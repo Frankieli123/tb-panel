@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "serena": {
+      "disabled": false,
+      "args": [
+        "start-mcp-server",
+        "--context",
+        "ide-assistant",
+        "--project",
+        "${PROJECT_ROOT}"
+      ]
+    }
+  }
+}

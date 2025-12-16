@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker-compose up:*)",
+      "Bash(findstr:*)",
+      "Bash(npm install:*)",
+      "Bash(npx prisma migrate:*)",
+      "Bash(npx playwright install:*)",
+      "Bash(npm run dev:*)",
+      "Bash(npx prisma generate:*)"
+    ]
+  }
+}
