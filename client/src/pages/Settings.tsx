@@ -133,20 +133,28 @@ export default function Settings() {
             系统检查所有监控商品价格的频率。建议不要设置过短，以免触发频繁访问限制。
           </p>
         </div>
-        <div className="p-6">
-          <div className="max-w-xs">
-            <label className="block text-sm font-medium text-gray-700 mb-2">检查周期</label>
-            <div className="relative">
-              <input
-                type="number"
-                min="10"
-                value={config.pollingInterval}
-                onChange={(e) => updateConfig({ pollingInterval: Math.max(10, parseInt(e.target.value) || 10) })}
-                className="w-full pl-4 pr-12 py-2.5 border border-gray-200 rounded-xl focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none transition-all"
-              />
-              <span className="absolute right-4 top-2.5 text-gray-400 text-sm">分钟</span>
+        <div className="p-6 space-y-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">检查周期</label>
+              <div className="relative">
+                <input
+                  type="number"
+                  min="10"
+                  value={config.pollingInterval}
+                  onChange={(e) => updateConfig({ pollingInterval: Math.max(10, parseInt(e.target.value) || 10) })}
+                  className="w-full pl-4 pr-12 py-2.5 border border-gray-200 rounded-xl focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none transition-all"
+                />
+                <span className="absolute right-4 top-2.5 text-gray-400 text-sm">分钟</span>
+              </div>
+              <p className="text-xs text-gray-400 mt-2">最小值：10 分钟</p>
             </div>
-            <p className="text-xs text-gray-400 mt-2">最小值：10 分钟</p>
+            <div></div>
+          </div>
+
+          <div className="text-sm text-gray-500 bg-gray-50 p-4 rounded-xl">
+            <span className="font-medium text-gray-700">当前生效：</span>
+            系统将每 <span className="text-orange-600 font-bold">{config.pollingInterval}</span> 分钟检查一次所有监控商品的价格。
           </div>
         </div>
       </section>

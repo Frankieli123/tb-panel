@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { ExternalLink, RefreshCw, Trash2, ChevronDown, ChevronUp, AlertCircle } from 'lucide-react';
 import { Product } from '../types';
 import PriceChart from './PriceChart';
@@ -61,9 +61,14 @@ export default function ProductCard({ product, onRefresh, onDelete }: ProductCar
         {/* Info */}
         <div className="flex-1 flex flex-col justify-between min-w-0">
           <div className="flex justify-between items-start gap-2">
-            <h3 className="font-bold text-gray-900 line-clamp-2 text-sm md:text-base leading-tight">
-              {product.title || `商品 ${product.taobaoId}`}
-            </h3>
+            <div className="min-w-0">
+              <h3 className="font-bold text-gray-900 line-clamp-2 text-sm md:text-base leading-tight">
+                {product.title || `商品 ${product.taobaoId}`}
+              </h3>
+              <div className="text-[11px] md:text-xs text-gray-500 mt-1 truncate">
+                商品ID：{product.taobaoId}
+              </div>
+            </div>
             <a
               href={`https://item.taobao.com/item.htm?id=${product.taobaoId}`}
               target="_blank"

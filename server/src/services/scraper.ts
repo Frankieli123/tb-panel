@@ -455,13 +455,28 @@ export class TaobaoScraper {
     }
 
     // 提取标题
-    for (const selector of ['h1', '[class*="title"]', '.tb-main-title', '.main-title']) {
-      const el = await page.$(selector).catch(() => null);
-      const text = await el?.textContent().catch(() => null);
-      if (text && text.trim()) {
-        result.title = text.trim();
-        break;
-      }
+    const titleCandidates: Array<{ selector: string; attr?: string }> = [
+      { selector: 'div[id^="SkuPanel_"] [class*="MainTitle"] span[title]', attr: 'title' },
+      { selector: 'div[id^="SkuPanel_"] span[title][class*="mainTitle"]', attr: 'title' },
+      { selector: 'div[id^="SkuPanel_"] span[title]', attr: 'title' },
+      { selector: 'h1' },
+      { selector: '.tb-main-title' },
+      { selector: '.main-title' },
+      { selector: '[class*="title"]' },
+    ];
+
+    for (const candidate of titleCandidates) {
+      const el = await page.$(candidate.selector).catch(() => null);
+      if (!el) continue;
+
+      const attrText = candidate.attr ? await el.getAttribute(candidate.attr).catch(() => null) : null;
+      const textContent = await el.textContent().catch(() => null);
+      const text = (attrText ?? textContent ?? '').replace(/\s+/g, ' ').trim();
+      if (!text) continue;
+      if (text.includes('按图片搜索') || text.includes('图片搜索')) continue;
+
+      result.title = text;
+      break;
     }
     if (!result.title) {
       const t = await page.title().catch(() => '');
@@ -469,11 +484,59 @@ export class TaobaoScraper {
     }
 
     // 提取图片
-    for (const selector of ['.main-img img', '[class*="gallery"] img', '.pic-box img']) {
-      const el = await page.$(selector).catch(() => null);
-      const src = await el?.getAttribute('src').catch(() => null);
-      if (src) {
-        result.imageUrl = src;
+    const isPlaceholderImage = (url: string) => {
+      const u = url.trim();
+      if (!u) return true;
+      return (
+        u.includes('tps-2-2.png') ||
+        u.includes('O1CN01CYtPWu1MUBqQAUK9D') ||
+        u.includes('imgextra/i4/O1CN01CYtPWu1MUBqQAUK9D')
+      );
+    };
+
+    const normalizeImageUrl = (url: string) => {
+      const u = url.trim();
+      if (!u) return null;
+      if (u.startsWith('//')) return `https:${u}`;
+      return u;
+    };
+
+    const imageCandidates: Array<{ selector: string; attrs: string[] }> = [
+      { selector: '#picGalleryEle div[class*="thumbnailActive"] img[class*="thumbnailPic"]', attrs: ['src', 'data-src', 'data-ks-lazyload', 'data-lazy-src', 'data-original'] },
+      { selector: '#picGalleryEle img[class*="thumbnailPic"]', attrs: ['src', 'data-src', 'data-ks-lazyload', 'data-lazy-src', 'data-original'] },
+      { selector: '#mainPicImageEl', attrs: ['src', 'data-src', 'data-ks-lazyload', 'data-lazy-src', 'data-original'] },
+      { selector: 'img[id="mainPicImageEl"]', attrs: ['src', 'data-src', 'data-ks-lazyload', 'data-lazy-src', 'data-original'] },
+      { selector: 'img[class*="mainPic"]', attrs: ['src', 'data-src', 'data-ks-lazyload', 'data-lazy-src', 'data-original'] },
+      { selector: '.main-img img', attrs: ['src', 'data-src', 'data-ks-lazyload', 'data-lazy-src', 'data-original'] },
+      { selector: '[class*="gallery"] img', attrs: ['src', 'data-src', 'data-ks-lazyload', 'data-lazy-src', 'data-original'] },
+      { selector: '.pic-box img', attrs: ['src', 'data-src', 'data-ks-lazyload', 'data-lazy-src', 'data-original'] },
+    ];
+
+    for (const candidate of imageCandidates) {
+      const el = await page.$(candidate.selector).catch(() => null);
+      if (!el) continue;
+
+      let bestUrl: string | null = null;
+      for (const attr of candidate.attrs) {
+        const raw = await el.getAttribute(attr).catch(() => null);
+        if (!raw) continue;
+        const normalized = normalizeImageUrl(raw);
+        if (!normalized) continue;
+        if (isPlaceholderImage(normalized)) continue;
+        bestUrl = normalized;
+        break;
+      }
+
+      if (!bestUrl) {
+        const placeholder = await el.getAttribute('placeholder').catch(() => null);
+        const normalized = placeholder ? normalizeImageUrl(placeholder) : null;
+        if (normalized && !isPlaceholderImage(normalized)) {
+          bestUrl = normalized;
+        }
+      }
+
+      if (bestUrl) {
+        result.imageUrl = bestUrl;
         break;
       }
     }
