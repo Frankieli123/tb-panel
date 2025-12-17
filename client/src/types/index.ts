@@ -28,6 +28,25 @@ export interface PriceSnapshot {
   capturedAt: string;
 }
 
+export interface SkuSelection {
+  label: string;
+  value: string;
+  vid?: string;
+}
+
+export interface Variant {
+  variantKey: string;
+  skuId: string | null;
+  skuProperties: string | null;
+  vidPath: string;
+  selections: SkuSelection[];
+  finalPrice: number | null;
+  originalPrice: number | null;
+  thumbnailUrl: string | null;
+  prevFinalPrice?: number | null;
+  prevCapturedAt?: string | null;
+}
+
 export interface TaobaoAccount {
   id: string;
   name: string;

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Bell, Mail, MessageSquare, Send, Save, CheckCircle2, Zap, Loader2 } from 'lucide-react';
 import { api } from '../services/api';
 import { NotificationConfig } from '../types';

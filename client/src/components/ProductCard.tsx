@@ -1,7 +1,7 @@
-import { useState } from 'react';
-import { ExternalLink, RefreshCw, Trash2, ChevronDown, ChevronUp, AlertCircle } from 'lucide-react';
+import { useMemo, useState } from 'react';
+import { ExternalLink, RefreshCw, Trash2, ChevronDown, ChevronUp, AlertCircle, TrendingDown, TrendingUp } from 'lucide-react';
 import { Product } from '../types';
-import PriceChart from './PriceChart';
+import SkuVariantPanel from './SkuVariantPanel';
 
 interface ProductCardProps {
   product: Product;
@@ -11,6 +11,31 @@ interface ProductCardProps {
 
 export default function ProductCard({ product, onRefresh, onDelete }: ProductCardProps) {
   const [isExpanded, setIsExpanded] = useState(false);
+
+  const recentChange = useMemo(() => {
+    const snapshots = product.snapshots || [];
+    const latest = snapshots[0]?.finalPrice ?? product.currentPrice;
+    const prev = snapshots[1]?.finalPrice ?? null;
+    if (latest === null || latest === undefined) return null;
+    if (prev === null || prev === undefined) return null;
+
+    const delta = latest - prev;
+    const abs = Math.abs(delta);
+    if (!(abs > 0)) return null;
+
+    const percent = prev > 0 ? (abs / prev) * 100 : null;
+
+    const MIN_DROP_AMOUNT = 0.1;
+    const MIN_DROP_PERCENT = 0.5;
+    if (abs < MIN_DROP_AMOUNT && (percent ?? 0) < MIN_DROP_PERCENT) return null;
+
+    return { direction: delta > 0 ? 'UP' : 'DOWN', diff: abs, percent } as const;
+  }, [product.currentPrice, product.snapshots]);
+
+  const formatMoney = (n: number) => {
+    if (!Number.isFinite(n)) return '-';
+    return `¥${n.toFixed(2)}`;
+  };
 
   const getStatusColor = (product: Product) => {
     if (product.lastError) return 'bg-red-100 text-red-700';
@@ -37,12 +62,6 @@ export default function ProductCard({ product, onRefresh, onDelete }: ProductCar
     return date.toLocaleDateString();
   };
 
-  // 转换价格历史数据格式
-  const chartData = product.snapshots?.map((s) => ({
-    date: new Date(s.capturedAt).toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' }),
-    price: Number(s.finalPrice),
-  })) || [];
-
   return (
     <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden transition-all hover:shadow-md">
       {/* Main Card Content */}
@@ -54,6 +73,25 @@ export default function ProductCard({ product, onRefresh, onDelete }: ProductCar
           ) : (
             <div className="w-full h-full flex items-center justify-center text-gray-400 text-xs">
               暂无图片
+            </div>
+          )}
+          {recentChange && (
+            <div
+              className={`absolute left-2 top-2 inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-bold shadow-sm ${
+                recentChange.direction === 'DOWN'
+                  ? 'bg-red-50 text-red-700 border-red-200'
+                  : 'bg-amber-50 text-amber-800 border-amber-200'
+              }`}
+            >
+              {recentChange.direction === 'DOWN' ? (
+                <TrendingDown className="w-3 h-3" />
+              ) : (
+                <TrendingUp className="w-3 h-3" />
+              )}
+              <span>
+                {recentChange.direction === 'DOWN' ? '降' : '涨'} {formatMoney(recentChange.diff)}
+                {recentChange.percent !== null ? ` (${recentChange.percent.toFixed(0)}%)` : ''}
+              </span>
             </div>
           )}
         </div>
@@ -85,6 +123,17 @@ export default function ProductCard({ product, onRefresh, onDelete }: ProductCar
                 <span className="text-xl md:text-2xl font-bold text-orange-600">
                   {product.currentPrice ? `¥${product.currentPrice}` : '-'}
                 </span>
+                {recentChange && (
+                  <span
+                    className={`text-[11px] font-bold border px-2 py-0.5 rounded-full whitespace-nowrap ${
+                      recentChange.direction === 'DOWN'
+                        ? 'text-red-600 bg-red-50 border-red-100'
+                        : 'text-amber-800 bg-amber-50 border-amber-100'
+                    }`}
+                  >
+                    {recentChange.direction === 'DOWN' ? '最近降价' : '最近涨价'}
+                  </span>
+                )}
                 {product.originalPrice && product.currentPrice &&
                  Number(product.originalPrice) > Number(product.currentPrice) && (
                   <span className="text-xs text-gray-400 line-through">
@@ -154,12 +203,7 @@ export default function ProductCard({ product, onRefresh, onDelete }: ProductCar
       {/* Expanded Chart Area */}
       {isExpanded && (
         <div className="border-t border-gray-100 bg-gray-50/50 p-4">
-          <div className="h-48 md:h-64 w-full bg-white rounded-xl p-4 shadow-sm border border-gray-200">
-            <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">
-              价格历史 (最近30天)
-            </h4>
-            <PriceChart data={chartData} />
-          </div>
+          <SkuVariantPanel productId={product.id} productImageUrl={product.imageUrl} />
 
           {/* Mobile Actions Expanded */}
           <div className="flex justify-between items-center mt-4 md:hidden">

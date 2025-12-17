@@ -5,6 +5,9 @@ build/
 .env.*
 logs/
 *.log
+mcp_config.json
+**/mcp_config.json
+.codeium/
 
 # IDE
 .vscode/

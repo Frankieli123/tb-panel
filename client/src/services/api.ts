@@ -1,4 +1,4 @@
-import { Product, TaobaoAccount, NotificationConfig, SystemStatus, ScraperConfig } from '../types';
+import { PriceSnapshot, Product, ScraperConfig, SystemStatus, TaobaoAccount, NotificationConfig, Variant } from '../types';
 
 const API_BASE = '/api';
 
@@ -35,8 +35,14 @@ export const api = {
   refreshProduct: (id: string) =>
     request<void>(`/products/${id}/refresh`, { method: 'POST' }),
 
+  getProductVariantsLatest: (id: string) =>
+    request<Variant[]>(`/products/${id}/variants/latest`),
+
+  getVariantHistory: (id: string, variantKey: string, days = 30) =>
+    request<PriceSnapshot[]>(`/products/${id}/variants/${encodeURIComponent(variantKey)}/history?days=${days}`),
+
   getProductHistory: (id: string, days = 30) =>
-    request<any[]>(`/products/${id}/history?days=${days}`),
+    request<PriceSnapshot[]>(`/products/${id}/history?days=${days}`),
 
   // 账号
   getAccounts: () => request<TaobaoAccount[]>('/accounts'),

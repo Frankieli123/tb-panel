@@ -20,8 +20,8 @@ app.get('/health', (req, res) => {
 });
 
 // 启动服务器
-const server = app.listen(config.port, () => {
-  console.log(`[Server] Running on http://localhost:${config.port}`);
+const server = app.listen(config.port, config.host, () => {
+  console.log(`[Server] Running on http://${config.host}:${config.port}`);
   console.log(`[Server] Environment: ${config.env}`);
 
   // 初始化 WebSocket 服务（用于扫码登录）
@@ -31,6 +31,24 @@ const server = app.listen(config.port, () => {
   if (config.env !== 'test') {
     schedulerService.start().catch(console.error);
   }
+});
+
+server.on('error', (error: any) => {
+  if (error?.code === 'EACCES') {
+    console.error(
+      `[Server] Permission denied listening on ${config.host}:${config.port}. ` +
+        `On Windows this is often caused by excluded port ranges. Try setting a different PORT (e.g. 3100/4000).`
+    );
+    return;
+  }
+  if (error?.code === 'EADDRINUSE') {
+    console.error(
+      `[Server] Port already in use: ${config.host}:${config.port}. ` +
+        `Try a different PORT or stop the process currently using it.`
+    );
+    return;
+  }
+  console.error('[Server] Server error:', error);
 });
 
 // 优雅关闭

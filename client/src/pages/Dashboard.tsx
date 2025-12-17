@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Plus, TrendingDown, Package, Users } from 'lucide-react';
 import { api } from '../services/api';
 import { Product, SystemStatus } from '../types';

@@ -158,6 +158,127 @@ router.get('/products/:id/history', async (req: Request, res: Response) => {
   }
 });
 
+function getVariantKey(v: any): string | null {
+  const raw = v?.variantKey ?? v?.skuId ?? v?.skuProperties ?? v?.vidPath;
+  if (raw === null || raw === undefined) return null;
+  const s = String(raw).trim();
+  return s ? s : null;
+}
+
+function normalizeVariantForClient(v: any) {
+  return {
+    variantKey: getVariantKey(v),
+    skuId: v?.skuId ?? null,
+    skuProperties: v?.skuProperties ?? null,
+    vidPath: v?.vidPath ?? '',
+    selections: Array.isArray(v?.selections)
+      ? v.selections.map((s: any) => ({
+          label: s?.label ?? '',
+          value: s?.value ?? '',
+          vid: s?.vid ?? undefined,
+        }))
+      : [],
+    finalPrice: typeof v?.finalPrice === 'number' ? v.finalPrice : null,
+    originalPrice: typeof v?.originalPrice === 'number' ? v.originalPrice : null,
+    thumbnailUrl: v?.thumbnailUrl ?? null,
+  };
+}
+
+router.get('/products/:id/variants/latest', async (req: Request, res: Response) => {
+  try {
+    const snapshots = await prisma.priceSnapshot.findMany({
+      where: { productId: req.params.id },
+      orderBy: { capturedAt: 'desc' },
+      take: 2,
+    });
+
+    const latest = snapshots[0];
+    const prev = snapshots[1];
+
+    if (!latest) {
+      res.json({ success: true, data: [] });
+      return;
+    }
+
+    const latestRaw = (latest as any)?.rawData as any;
+    const latestVariants = Array.isArray(latestRaw?.variants) ? latestRaw.variants : [];
+
+    const prevRaw = (prev as any)?.rawData as any;
+    const prevVariants = Array.isArray(prevRaw?.variants) ? prevRaw.variants : [];
+
+    const prevByKey = new Map<string, any>();
+    for (const v of prevVariants) {
+      const key = getVariantKey(v);
+      if (!key) continue;
+      if (!prevByKey.has(key)) prevByKey.set(key, v);
+    }
+
+    const normalized = latestVariants
+      .map((v: any) => {
+        const next = normalizeVariantForClient(v);
+        const pv = next.variantKey ? prevByKey.get(next.variantKey) : null;
+
+        return {
+          ...next,
+          prevFinalPrice: typeof pv?.finalPrice === 'number' ? pv.finalPrice : null,
+          prevCapturedAt: prev ? prev.capturedAt : null,
+        };
+      })
+      .filter((v: any) => !!v.variantKey);
+
+    console.log(
+      `[API] variantsLatest productId=${req.params.id} snapshotId=${(latest as any)?.id ?? 'n/a'} rawVariants=${latestVariants.length} normalized=${normalized.length}`
+    );
+
+    res.json({ success: true, data: normalized });
+  } catch (error) {
+    res.status(500).json({ success: false, error: String(error) });
+  }
+});
+
+router.get('/products/:id/variants/:variantKey/history', async (req: Request, res: Response) => {
+  try {
+    const { days = '30' } = req.query;
+    const daysNum = parseInt(days as string, 10);
+    const variantKey = String(req.params.variantKey || '').trim();
+
+    const snapshots = await prisma.priceSnapshot.findMany({
+      where: {
+        productId: req.params.id,
+        capturedAt: {
+          gte: new Date(Date.now() - daysNum * 24 * 60 * 60 * 1000),
+        },
+      },
+      orderBy: { capturedAt: 'asc' },
+    });
+
+    const points = snapshots
+      .map((s: any) => {
+        const raw = s?.rawData as any;
+        const variants = Array.isArray(raw?.variants) ? raw.variants : [];
+        const v = variants.find((x: any) => getVariantKey(x) === variantKey);
+        const finalPrice = typeof v?.finalPrice === 'number' ? v.finalPrice : null;
+        if (finalPrice === null) return null;
+
+        return {
+          id: s.id,
+          finalPrice,
+          originalPrice: typeof v?.originalPrice === 'number' ? v.originalPrice : null,
+          capturedAt: s.capturedAt,
+        };
+      })
+      .filter(Boolean);
+
+    console.log(
+      `[API] variantHistory productId=${req.params.id} variantKey=${variantKey} days=${daysNum} snapshots=${snapshots.length} points=${points.length}`
+    );
+
+    res.json({ success: true, data: points });
+  } catch (error) {
+    res.status(500).json({ success: false, error: String(error) });
+  }
+});
+
 // ============ 账号管理 ============
 
 // 获取账号列表
@@ -425,10 +546,10 @@ router.post('/system/scheduler/:action', async (req: Request, res: Response) => 
 // 获取抓取配置
 router.get('/scraper/config', async (req: Request, res: Response) => {
   try {
-    let scraperConfig = await prisma.scraperConfig.findFirst();
+    let scraperConfig = await (prisma as any).scraperConfig.findFirst();
 
     if (!scraperConfig) {
-      scraperConfig = await prisma.scraperConfig.create({
+      scraperConfig = await (prisma as any).scraperConfig.create({
         data: {
           minDelay: 60,
           maxDelay: 180,
@@ -458,15 +579,15 @@ router.put('/scraper/config', async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: '最小延迟不能大于最大延迟' });
     }
 
-    let scraperConfig = await prisma.scraperConfig.findFirst();
+    let scraperConfig = await (prisma as any).scraperConfig.findFirst();
 
     if (scraperConfig) {
-      scraperConfig = await prisma.scraperConfig.update({
+      scraperConfig = await (prisma as any).scraperConfig.update({
         where: { id: scraperConfig.id },
         data,
       });
     } else {
-      scraperConfig = await prisma.scraperConfig.create({ data });
+      scraperConfig = await (prisma as any).scraperConfig.create({ data });
     }
 
     res.json({ success: true, data: scraperConfig });

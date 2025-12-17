@@ -106,7 +106,7 @@ class SchedulerService {
 
     try {
       // 获取抓取配置
-      const scraperConfig = await prisma.scraperConfig.findFirst();
+      const scraperConfig = await (prisma as any).scraperConfig.findFirst();
       const pollingIntervalMs = (scraperConfig?.pollingInterval ?? 60) * 60 * 1000; // 默认60分钟
 
       // 获取所有活跃账号
@@ -231,6 +231,11 @@ class SchedulerService {
         `[Scheduler] Job ${job.id} scrapeResult success=${result.success} needLogin=${!!result.needLogin} needCaptcha=${!!result.needCaptcha} error=${result.error ?? 'n/a'} ms=${Date.now() - startedAt}`
       );
 
+      const variantsCount = result.success ? (result.data?.variants?.length ?? 0) : 0;
+      console.log(
+        `[Scheduler] Job ${job.id} scrapeVariants accountId=${accountId} taobaoId=${taobaoId} productId=${productId} variantsCount=${variantsCount}`
+      );
+
       // 处理结果
       if (result.success && result.data) {
         const dbStartAt = Date.now();
@@ -240,20 +245,29 @@ class SchedulerService {
         });
 
         const oldPrice = product?.currentPrice ? parseFloat(product.currentPrice.toString()) : null;
-        const newPrice = result.data.finalPrice;
+        const variantPrices = (result.data.variants ?? [])
+          .map((v) => v.finalPrice)
+          .filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+        const minVariantPrice = variantPrices.length > 0 ? Math.min(...variantPrices) : null;
+        const newPrice = result.data.finalPrice ?? minVariantPrice;
 
         // 保存价格快照
         if (newPrice !== null) {
-          await prisma.priceSnapshot.create({
+          const snapshot = await prisma.priceSnapshot.create({
             data: {
               productId,
               finalPrice: newPrice,
               originalPrice: result.data.originalPrice,
               couponInfo: result.data.couponInfo,
               promotionInfo: result.data.promotionInfo,
+              rawData: result.data.variants ? ({ variants: result.data.variants } as any) : undefined,
               accountId,
             },
           });
+
+          console.log(
+            `[Scheduler] Job ${job.id} snapshotSaved productId=${productId} snapshotId=${snapshot.id} variantsSaved=${result.data.variants ? (result.data.variants.length ?? 0) : 0}`
+          );
 
           // 更新商品信息
           await prisma.product.update({
@@ -340,7 +354,7 @@ class SchedulerService {
       }
 
       // 随机延迟后继续（从数据库读取配置）
-      const scraperConfig = await prisma.scraperConfig.findFirst();
+      const scraperConfig = await (prisma as any).scraperConfig.findFirst();
       const minDelayMs = (scraperConfig?.minDelay ?? 60) * 1000; // 默认60秒
       const maxDelayMs = (scraperConfig?.maxDelay ?? 180) * 1000; // 默认180秒
       const delay = randomDelay(minDelayMs, maxDelayMs);

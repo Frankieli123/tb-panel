@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Settings as SettingsIcon, Save, CheckCircle2, Shield, Clock, Loader2, AlertTriangle } from 'lucide-react';
 import { api } from '../services/api';
 import { ScraperConfig } from '../types';

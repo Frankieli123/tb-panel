@@ -5,7 +5,8 @@ dotenv.config();
 
 export const config = {
   env: process.env.NODE_ENV || 'development',
-  port: parseInt(process.env.PORT || '3000', 10),
+  host: process.env.HOST || '127.0.0.1',
+  port: parseInt(process.env.PORT || '4000', 10),
   apiKey: process.env.API_KEY || '', // 可选的API密钥认证
 
   database: {

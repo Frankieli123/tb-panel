@@ -1,4 +1,4 @@
-import React, { ReactNode } from 'react';
+import { ReactNode } from 'react';
 import { NavLink } from 'react-router-dom';
 import { LayoutDashboard, Users, Bell, Settings, ShoppingBag } from 'lucide-react';
 

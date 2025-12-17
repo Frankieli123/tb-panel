@@ -52,7 +52,19 @@ export interface ScrapedPrice {
   imageUrl: string | null;
   couponInfo: string | null;
   promotionInfo: string | null;
+  variants?: ScrapedSkuVariant[];
   rawHtml?: string;
+}
+
+export interface ScrapedSkuVariant {
+  skuKey: string;
+  skuId: string | null;
+  skuProperties: string | null;
+  vidPath: string;
+  selections: Array<{ label: string; vid: string; value: string }>;
+  finalPrice: number | null;
+  originalPrice: number | null;
+  thumbnailUrl: string | null;
 }
 
 export interface ScrapeResult {
@@ -101,7 +113,9 @@ export class TaobaoScraper {
     const contextKey = `${accountId}:${mode}`;
     let context = this.contexts.get(contextKey);
     if (context) {
-      await context.addInitScript(`var __name = (fn, _name) => fn;`).catch(() => {});
+      await context
+        .addInitScript(`globalThis.__name = (fn, _name) => fn; var __name = globalThis.__name;`)
+        .catch(() => {});
       return context;
     }
 
@@ -111,7 +125,7 @@ export class TaobaoScraper {
 
     const stealth = await loadStealthScript();
     await context.addInitScript(stealth);
-    await context.addInitScript(`var __name = (fn, _name) => fn;`);
+    await context.addInitScript(`globalThis.__name = (fn, _name) => fn; var __name = globalThis.__name;`);
 
     if (cookies) {
       try {
@@ -183,6 +197,16 @@ export class TaobaoScraper {
     }
   }
 
+  private async waitForSkuPanel(page: Page): Promise<void> {
+    await page
+      .locator(
+        'div[id^="SkuPanel_"] div[id*="SkuPanelBody"] div[class*="valueItem--"][data-vid][data-disabled], div[id^="SkuPanel_"] div[id*="SkuPanelBody"] [data-vid][data-disabled], div[id^="SkuPanel_"] [class*="skuItem--"] div[class*="valueItem--"][data-vid][data-disabled], div[id^="SkuPanel_"] [class*="skuItem--"] [data-vid][data-disabled], #skuOptionsArea div[class*="valueItem--"][data-vid][data-disabled], #skuOptionsArea [data-vid][data-disabled], [id*="skuOptionsArea"] div[class*="valueItem--"][data-vid][data-disabled], [id*="skuOptionsArea"] [data-vid][data-disabled]'
+      )
+      .first()
+      .waitFor({ state: 'attached', timeout: 4500 })
+      .catch(() => {});
+  }
+
   async scrapeProduct(
     accountId: string,
     taobaoId: string,
@@ -217,7 +241,10 @@ export class TaobaoScraper {
       page = await context.newPage();
 
       // 兜底：某些构建链路会把 evaluate 回调包一层 __name(...)，确保页面里一定存在该全局变量
-      await page.addInitScript(`var __name = (fn, _name) => fn;`).catch(() => {});
+      await page.addInitScript(`globalThis.__name = (fn, _name) => fn; var __name = globalThis.__name;`).catch(() => {});
+      await page
+        .evaluate('var __name = (fn, _name) => fn; globalThis.__name = __name;')
+        .catch(() => {});
 
       console.log(
         `[Scraper] [${mode}] Start account=${accountId} taobaoId=${taobaoId} url=${url}`
@@ -236,7 +263,7 @@ export class TaobaoScraper {
       );
 
       const sleepStartAt = Date.now();
-      await sleep(500);
+      await sleep(1000);
       timings.sleepMs = Date.now() - sleepStartAt;
 
       const needLoginStartAt = Date.now();
@@ -285,6 +312,10 @@ export class TaobaoScraper {
       await this.waitForPriceElement(page);
       timings.waitForPriceMs = Date.now() - waitPriceStartAt;
 
+      const waitSkuStartAt = Date.now();
+      await this.waitForSkuPanel(page);
+      timings.waitForSkuMs = Date.now() - waitSkuStartAt;
+
       const extractStartAt = Date.now();
       const data = await this.extractPriceInfo(page);
       timings.extractMs = Date.now() - extractStartAt;
@@ -298,6 +329,44 @@ export class TaobaoScraper {
         );
         logTimings('noPrice');
         return { success: false, error: 'Price not found' };
+      }
+
+      if (!data.variants || data.variants.length === 0) {
+        const skuDiag = await page
+          .evaluate(() => {
+            const doc = (globalThis as any).document as any;
+            const panel = doc?.querySelector?.('div[id^="SkuPanel_"]') || null;
+            const panelBody = panel?.querySelector?.('div[id*="SkuPanelBody"]') || null;
+            const scope = panelBody || panel || doc;
+            const skuItems = Array.from(scope?.querySelectorAll?.('[class*="skuItem--"]') ?? []);
+            const vidNodes = Array.from(
+              scope?.querySelectorAll?.('div[class*="valueItem--"][data-vid][data-disabled], [data-vid][data-disabled]') ?? []
+            );
+            const enabledCount = vidNodes.filter((n: any) => n?.getAttribute?.('data-disabled') === 'false').length;
+            const sample = vidNodes.slice(0, 5).map((n: any) => {
+              const vid = n?.getAttribute?.('data-vid') || '';
+              const disabled = n?.getAttribute?.('data-disabled') || '';
+              const cls = n?.getAttribute?.('class') || '';
+              const text = String(n?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+              return { vid, disabled, cls, text };
+            });
+            return {
+              hasPanel: !!panel,
+              hasPanelBody: !!panelBody,
+              skuItemCount: skuItems.length,
+              vidCount: vidNodes.length,
+              enabledVidCount: enabledCount,
+              sample,
+            };
+          })
+          .catch(() => null);
+
+        const artifactsStartAt = Date.now();
+        const artifacts = await this.saveDebugArtifacts(page, accountId, taobaoId, `${mode}_no_sku`);
+        timings.saveSkuArtifactsMs = Date.now() - artifactsStartAt;
+        console.warn(
+          `[Scraper] [${mode}] NoSkuExtracted account=${accountId} taobaoId=${taobaoId} finalUrl=${page.url()} ms=${Date.now() - startedAt} artifacts=${artifacts?.prefix ?? 'n/a'} skuDiag=${skuDiag ? JSON.stringify(skuDiag) : 'n/a'}`
+        );
       }
 
       console.log(
@@ -626,7 +695,655 @@ export class TaobaoScraper {
       result.promotionInfo = promoText.trim() || null;
     }
 
+    let variants: ScrapedSkuVariant[] = [];
+    try {
+      variants = await this.extractSkuVariants(page);
+    } catch (error) {
+      const msg = error instanceof Error ? `${error.message}${error.stack ? `\n${error.stack}` : ''}` : String(error);
+      console.warn(`[Scraper] [sku] ExtractError url=${page.url()} message=${msg}`);
+      variants = [];
+    }
+    if (variants.length > 0) {
+      if (result.imageUrl) {
+        for (const v of variants) {
+          if (!v.thumbnailUrl) v.thumbnailUrl = result.imageUrl;
+        }
+      }
+      result.variants = variants;
+    }
+
     return result;
+  }
+
+  private async extractSkuVariants(page: Page): Promise<ScrapedSkuVariant[]> {
+    const skuTraceId = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+    const skuLogPrefix = `[Scraper] [sku] [${skuTraceId}]`;
+    const skuTrace: string[] = [];
+    const pushSkuTrace = (msg: string) => {
+      if (skuTrace.length >= 400) return;
+      skuTrace.push(msg);
+    };
+
+    const parsePrice = (text: string | null) => {
+      if (!text) return null;
+      const match = text.match(/[\d]+(?:\.[\d]+)?/);
+      if (!match) return null;
+      const v = parseFloat(match[0]);
+      return Number.isFinite(v) ? v : null;
+    };
+
+    await page
+      .evaluate('var __name = (fn, _name) => fn; globalThis.__name = __name;')
+      .catch(() => {});
+
+    const getCurrentPrice = async () => {
+      const finalText = await page
+        .locator('div[class*="highlightPrice--"] span[class*="text--"], .highlightPrice--LlVWiXXs .text--LP7Wf49z')
+        .first()
+        .textContent()
+        .catch(() => null);
+
+      const origText = await page
+        .locator('div[class*="subPrice--"] span[class*="text--"], .subPrice--KfQ0yn4v span:nth-of-type(3)')
+        .last()
+        .textContent()
+        .catch(() => null);
+      return {
+        finalPrice: parsePrice(finalText),
+        originalPrice: parsePrice(origText),
+      };
+    };
+
+    await page
+      .locator(
+        'div[id^="SkuPanel_"] div[id*="SkuPanelBody"] div[class*="valueItem--"][data-vid][data-disabled], div[id^="SkuPanel_"] div[id*="SkuPanelBody"] [data-vid][data-disabled], div[id^="SkuPanel_"] [class*="skuItem--"] div[class*="valueItem--"][data-vid][data-disabled], div[id^="SkuPanel_"] [class*="skuItem--"] [data-vid][data-disabled], #skuOptionsArea div[class*="valueItem--"][data-vid][data-disabled], #skuOptionsArea [data-vid][data-disabled], [id*="skuOptionsArea"] div[class*="valueItem--"][data-vid][data-disabled], [id*="skuOptionsArea"] [data-vid][data-disabled]'
+      )
+      .first()
+      .waitFor({ state: 'attached', timeout: 6000 })
+      .catch(() => {});
+
+    const optionCount = await page
+      .evaluate(() => {
+        const doc = (globalThis as any).document as any;
+        const panel = doc?.querySelector?.('div[id^="SkuPanel_"]') || null;
+        const panelBody = panel?.querySelector?.('div[id*="SkuPanelBody"]') || null;
+        const scope = panelBody || panel || doc;
+        const nodes = Array.from(scope?.querySelectorAll?.('[data-vid][data-disabled]') ?? []);
+        return nodes.length;
+      })
+      .catch(() => 0);
+
+    if (optionCount > 0) {
+      await page
+        .locator('div[id^="SkuPanel_"] div[id*="SkuPanelBody"] [class*="skuItem--"], div[id^="SkuPanel_"] [class*="skuItem--"]')
+        .first()
+        .waitFor({ state: 'attached', timeout: 8000 })
+        .catch(() => {});
+    }
+
+    const discoverGroups = async () =>
+      page
+        .evaluate(() => {
+        const doc = (globalThis as any).document as any;
+
+        const findSkuScope = () => {
+          const panel = doc?.querySelector?.('div[id^="SkuPanel_"]') || null;
+          const panelBody = panel?.querySelector?.('div[id*="SkuPanelBody"]') || null;
+          const byId = doc?.querySelector?.('#skuOptionsArea') || null;
+          const byIdLike = (byId ? null : doc?.querySelector?.('[id*="skuOptionsArea"]')) || null;
+          const inPanel = panel?.querySelector?.('#skuOptionsArea') || panel?.querySelector?.('[id*="skuOptionsArea"]') || null;
+          return panelBody || byId || byIdLike || inPanel || panel;
+        };
+
+        const skuScope = findSkuScope();
+        if (!skuScope) return [] as number[];
+        const groups = Array.from(skuScope.querySelectorAll?.('[class*="skuItem--"]') ?? []);
+        if (groups.length === 0) return [] as number[];
+
+        const indexes: number[] = [];
+        for (let i = 0; i < groups.length; i++) {
+          const el = groups[i] as any;
+          const vidCount = (el?.querySelectorAll?.('[data-vid]') ?? []).length;
+          if (vidCount > 0) indexes.push(i);
+        }
+
+        if (indexes.length > 0) return indexes;
+        return groups.map((_, i) => i);
+        })
+        .catch((error) => {
+          const msg = error instanceof Error ? `${error.message}${error.stack ? `\n${error.stack}` : ''}` : String(error);
+          console.warn(`${skuLogPrefix} discoverGroupsEvalError url=${page.url()} message=${msg}`);
+          return [] as number[];
+        });
+
+    let groupIndexes = await discoverGroups();
+    if (groupIndexes.length === 0) {
+      await page.waitForTimeout(1800);
+      groupIndexes = await discoverGroups();
+    }
+    if (groupIndexes.length === 0 && optionCount > 0) {
+      const groupCount = await page
+        .evaluate(() => {
+          const doc = (globalThis as any).document as any;
+          const panel = doc?.querySelector?.('div[id^="SkuPanel_"]') || null;
+          const panelBody = panel?.querySelector?.('div[id*="SkuPanelBody"]') || null;
+          const byId = doc?.querySelector?.('#skuOptionsArea') || null;
+          const byIdLike = (byId ? null : doc?.querySelector?.('[id*="skuOptionsArea"]')) || null;
+          const scope = panelBody || panel || byId || byIdLike || null;
+          return (scope?.querySelectorAll?.('[class*="skuItem--"]') ?? []).length;
+        })
+        .catch(() => 0);
+
+      if (groupCount > 0) {
+        groupIndexes = Array.from({ length: groupCount }, (_, i) => i);
+        console.warn(
+          `${skuLogPrefix} GroupDiscoveryFallback url=${page.url()} optionCount=${optionCount} groupCount=${groupCount} groupIndexes=${JSON.stringify(
+            groupIndexes
+          )}`
+        );
+      }
+    }
+
+    if (groupIndexes.length === 0 && optionCount > 0) {
+      const diag = await page
+        .evaluate(() => {
+          const doc = (globalThis as any).document as any;
+          const panel = doc?.querySelector?.('div[id^="SkuPanel_"]') || null;
+          const panelBody = panel?.querySelector?.('div[id*="SkuPanelBody"]') || null;
+          const byId = doc?.querySelector?.('#skuOptionsArea') || null;
+          const byIdLike = (byId ? null : doc?.querySelector?.('[id*="skuOptionsArea"]')) || null;
+          const scope = panelBody || panel || byId || byIdLike || null;
+          const skuItemCount = (scope?.querySelectorAll?.('[class*="skuItem--"]') ?? []).length;
+          const vidCount = (scope?.querySelectorAll?.('[data-vid][data-disabled]') ?? []).length;
+          return {
+            hasPanel: !!panel,
+            hasPanelBody: !!panelBody,
+            hasSkuOptionsArea: !!byId,
+            hasSkuOptionsAreaLike: !!byIdLike,
+            scopeTag: scope?.tagName || null,
+            scopeId: scope?.getAttribute?.('id') || null,
+            skuItemCount,
+            vidCount,
+          };
+        })
+        .catch(() => null);
+      console.warn(
+        `${skuLogPrefix} GroupDiscoveryEmpty url=${page.url()} optionCount=${optionCount} diag=${JSON.stringify(diag)} (sku DOM exists but groups not detected; likely render timing or container mismatch)`
+      );
+    }
+
+    const stats = {
+      groupCount: groupIndexes.length,
+      dfsCalls: 0,
+      leafVisits: 0,
+      leafNoKey: 0,
+      leafDuplicate: 0,
+      leafStored: 0,
+      alreadySelectedSkips: 0,
+      clickAttempts: 0,
+      clickOk: 0,
+      clickFail: 0,
+    };
+    const leafSamples: Array<{ key: string; vidPath: string; finalPrice: number | null; originalPrice: number | null }> = [];
+    const clickFailSamples: Array<{ groupIndex: number; vid: string }> = [];
+    pushSkuTrace(`start url=${page.url()} groupIndexes=${JSON.stringify(groupIndexes)}`);
+
+    const getAvailableVids = async (groupIndex: number) => {
+      return page
+        .evaluate((idx) => {
+          const doc = (globalThis as any).document as any;
+          const findSkuScope = () => {
+            const panel = doc?.querySelector?.('div[id^="SkuPanel_"]') || null;
+            const panelBody = panel?.querySelector?.('div[id*="SkuPanelBody"]') || null;
+            const byId = doc?.querySelector?.('#skuOptionsArea') || null;
+            const byIdLike = (byId ? null : doc?.querySelector?.('[id*="skuOptionsArea"]')) || null;
+            const inPanel = panel?.querySelector?.('#skuOptionsArea') || panel?.querySelector?.('[id*="skuOptionsArea"]') || null;
+            return panelBody || byId || byIdLike || inPanel || panel;
+          };
+
+          const skuScope = findSkuScope();
+          const groups = Array.from(skuScope?.querySelectorAll?.('[class*="skuItem--"]') ?? []);
+          const group = (groups[idx] as any) || null;
+          if (!group) return [] as string[];
+          const vidSet = new Set<string>();
+          const preferred = Array.from(
+            group.querySelectorAll?.('div[class*="valueItem--"][data-vid][data-disabled="false"]') ?? []
+          );
+          const fallback =
+            preferred.length > 0 ? [] : Array.from(group.querySelectorAll?.('[data-vid][data-disabled="false"]') ?? []);
+          const nodes = preferred.length > 0 ? preferred : fallback;
+          for (const n of nodes) {
+            const el = n as any;
+            const vid = el?.getAttribute?.('data-vid');
+            if (vid) vidSet.add(vid);
+          }
+          return Array.from(vidSet);
+        }, groupIndex)
+        .catch((error) => {
+          const msg = error instanceof Error ? `${error.message}${error.stack ? `\n${error.stack}` : ''}` : String(error);
+          console.warn(`${skuLogPrefix} getAvailableVidsEvalError url=${page.url()} groupIndex=${groupIndex} message=${msg}`);
+          return [] as string[];
+        });
+    };
+
+    const waitForStablePrice = async () => {
+      const priceSelector = 'div[class*="highlightPrice--"] span[class*="text--"], .highlightPrice--LlVWiXXs .text--LP7Wf49z';
+      const startedAt = Date.now();
+      const timeoutMs = 5000;
+      const stableMs = 450;
+      const pollMs = 120;
+
+      const readPriceToken = async () => {
+        const raw = await page.locator(priceSelector).first().textContent().catch(() => null);
+        const txt = String(raw || '').replace(/\s+/g, '').trim();
+        const m = txt.match(/[\d]+(?:\.[\d]+)?/);
+        return m ? m[0] : '';
+      };
+
+      let candidate = await readPriceToken();
+      let candidateSince = Date.now();
+      while (Date.now() - startedAt < timeoutMs) {
+        await page.waitForTimeout(pollMs);
+        const cur = await readPriceToken();
+
+        if (cur !== candidate) {
+          candidate = cur;
+          candidateSince = Date.now();
+          continue;
+        }
+
+        if (candidate && Date.now() - candidateSince >= stableMs) break;
+      }
+    };
+
+    const clickVid = async (groupIndex: number, vid: string): Promise<boolean> => {
+      await page
+        .evaluate(
+          ({ idx, v }) => {
+            const doc = (globalThis as any).document as any;
+
+            const findSkuScope = () => {
+              const panel = doc?.querySelector?.('div[id^="SkuPanel_"]') || null;
+              const panelBody = panel?.querySelector?.('div[id*="SkuPanelBody"]') || null;
+              const byId = doc?.querySelector?.('#skuOptionsArea') || null;
+              const byIdLike = (byId ? null : doc?.querySelector?.('[id*="skuOptionsArea"]')) || null;
+              const inPanel = panel?.querySelector?.('#skuOptionsArea') || panel?.querySelector?.('[id*="skuOptionsArea"]') || null;
+              return panelBody || byId || byIdLike || inPanel || panel;
+            };
+
+            const skuScope = findSkuScope();
+            const groups = Array.from(skuScope?.querySelectorAll?.('[class*="skuItem--"]') ?? []);
+            const group = (groups[idx] as any) || null;
+            if (!group) return;
+
+            const preferred = Array.from(
+              group.querySelectorAll?.(`div[class*="valueItem--"][data-vid="${v}"][data-disabled="false"]`) ?? []
+            );
+            const fallback =
+              preferred.length > 0
+                ? []
+                : Array.from(group.querySelectorAll?.(`[data-vid="${v}"][data-disabled="false"]`) ?? []);
+            const nodes = preferred.length > 0 ? preferred : fallback;
+            const target = (nodes[0] as any) || null;
+            if (!target) return;
+            try {
+              target?.scrollIntoView?.({ block: 'center', inline: 'center' });
+            } catch {
+            }
+            target?.click?.();
+          },
+          { idx: groupIndex, v: vid }
+        )
+        .catch(() => {});
+
+      const ok = await page
+        .waitForFunction(
+          (arg) => {
+            const { idx, v } = (arg || {}) as any;
+            const doc = (globalThis as any).document as any;
+            const isSelected = (el: any) => {
+              if (!el) return false;
+              const cls = (el.getAttribute?.('class') || '') as string;
+              if (cls.includes('isSelected')) return true;
+              const ariaChecked = el.getAttribute?.('aria-checked');
+              if (ariaChecked === 'true') return true;
+              const ariaSelected = el.getAttribute?.('aria-selected');
+              if (ariaSelected === 'true') return true;
+              const dataSelected = el.getAttribute?.('data-selected');
+              if (dataSelected === 'true') return true;
+              return false;
+            };
+            const findSkuScope = () => {
+              const panel = doc?.querySelector?.('div[id^="SkuPanel_"]') || null;
+              const panelBody = panel?.querySelector?.('div[id*="SkuPanelBody"]') || null;
+              const byId = doc?.querySelector?.('#skuOptionsArea') || null;
+              const byIdLike = (byId ? null : doc?.querySelector?.('[id*="skuOptionsArea"]')) || null;
+              const inPanel = panel?.querySelector?.('#skuOptionsArea') || panel?.querySelector?.('[id*="skuOptionsArea"]') || null;
+              return panelBody || byId || byIdLike || inPanel || panel;
+            };
+
+            const skuScope = findSkuScope();
+            const groups = Array.from(skuScope?.querySelectorAll?.('[class*="skuItem--"]') ?? []);
+            const group = (groups[idx] as any) || null;
+            if (!group) return false;
+            const el =
+              group?.querySelector?.(`div[class*="valueItem--"][data-vid="${v}"]`) || group?.querySelector?.(`[data-vid="${v}"]`);
+
+            let cur: any = el;
+            for (let i = 0; i < 4 && cur; i++) {
+              if (isSelected(cur)) return true;
+              cur = cur.parentElement;
+            }
+            return false;
+          },
+          { idx: groupIndex, v: vid },
+          { timeout: 9000 }
+        )
+        .then(() => true)
+        .catch(() => false);
+
+      return ok;
+    };
+
+    const getSelectionSnapshot = async (chosenVids?: Array<string | null> | null) => {
+      return page
+        .evaluate(({ indexes, vids }) => {
+          const doc = (globalThis as any).document as any;
+          const loc = (globalThis as any).location as any;
+          const findSkuScope = () => {
+            const panel = doc?.querySelector?.('div[id^="SkuPanel_"]') || null;
+            const panelBody = panel?.querySelector?.('div[id*="SkuPanelBody"]') || null;
+            const byId = doc?.querySelector?.('#skuOptionsArea') || null;
+            const byIdLike = (byId ? null : doc?.querySelector?.('[id*="skuOptionsArea"]')) || null;
+            const inPanel = panel?.querySelector?.('#skuOptionsArea') || panel?.querySelector?.('[id*="skuOptionsArea"]') || null;
+            return panelBody || byId || byIdLike || inPanel || panel;
+          };
+
+          const skuScope = findSkuScope();
+          const groups = Array.from(skuScope?.querySelectorAll?.('[class*="skuItem--"]') ?? []);
+          if (groups.length === 0) return { selections: [], skuId: null, skuProperties: null, thumbnailUrl: null };
+
+          const normalizeImg = (raw: string | null) => {
+            if (!raw) return null;
+            const u = String(raw).trim();
+            if (!u) return null;
+            if (u.startsWith('//')) return `https:${u}`;
+            return u;
+          };
+
+          const readImg = (root: any) => {
+            const img = root?.querySelector?.('img');
+            if (!img) return null;
+            const attrs = ['src', 'data-src', 'data-ks-lazyload', 'data-lazy-src', 'data-original'];
+            for (const a of attrs) {
+              const v = img.getAttribute?.(a);
+              const n = normalizeImg(v);
+              if (n) return n;
+            }
+            return null;
+          };
+
+          const selections: Array<{ label: string; vid: string; value: string }> = [];
+          let thumbnailUrl: string | null = null;
+          for (let i = 0; i < indexes.length; i++) {
+            const idx = indexes[i];
+            const group = (groups[idx] as any) || null;
+            if (!group) continue;
+            const labelEl =
+              group?.querySelector?.('[class*="labelWrap--"] span[title]') ||
+              group?.querySelector?.('[class*="ItemLabel--"] span[title]') ||
+              group?.querySelector?.('span[title]') ||
+              null;
+            const label = (labelEl?.getAttribute('title') || labelEl?.textContent || '').trim();
+
+            const expectedVid = vids?.[i] ? String(vids[i]) : null;
+
+            const candidates = expectedVid
+              ? Array.from(group?.querySelectorAll?.(`[data-vid="${expectedVid}"]`) ?? [])
+              : [];
+            const preferred =
+              (candidates.find((n: any) => ((n.getAttribute?.('class') || '') as string).includes('valueItem--')) as any) ||
+              (candidates[0] as any) ||
+              null;
+
+            const selected =
+              preferred ||
+              (group?.querySelector?.('[data-vid][data-disabled="false"][aria-checked="true"]') as any) ||
+              (group?.querySelector?.('[data-vid][data-disabled="false"][aria-selected="true"]') as any) ||
+              (group?.querySelector?.('[data-vid][data-disabled="false"][data-selected="true"]') as any) ||
+              (group?.querySelector?.('[data-vid][data-disabled][class*="isSelected"]') as any) ||
+              null;
+            const vid = selected?.getAttribute?.('data-vid') || '';
+            const valueEl = selected?.querySelector?.('span[title]') || null;
+            const value = (
+              (valueEl?.getAttribute('title') || valueEl?.textContent || selected?.textContent || '').replace(/\s+/g, ' ').trim()
+            );
+            if (vid) selections.push({ label: label || `规格${idx + 1}`, vid, value });
+
+            const imgUrl = readImg(selected);
+            if (imgUrl) thumbnailUrl = imgUrl;
+          }
+
+          const params = new URLSearchParams(loc?.search || '');
+          return {
+            selections,
+            skuId: params.get('skuId'),
+            skuProperties: params.get('sku_properties'),
+            thumbnailUrl,
+          };
+        }, { indexes: groupIndexes, vids: chosenVids ?? null })
+        .catch(() => ({ selections: [] as Array<{ label: string; vid: string; value: string }>, skuId: null as string | null, skuProperties: null as string | null, thumbnailUrl: null as string | null }));
+    };
+
+    if (groupIndexes.length === 0) {
+      if (optionCount > 0) return [];
+      const snap = await page
+        .evaluate(() => {
+          const loc = (globalThis as any).location as any;
+          const params = new URLSearchParams(loc?.search || '');
+          return {
+            skuId: params.get('skuId'),
+            skuProperties: params.get('sku_properties'),
+          };
+        })
+        .catch(() => ({ skuId: null as string | null, skuProperties: null as string | null }));
+
+      const price = await getCurrentPrice();
+      const key = snap.skuId || snap.skuProperties;
+      if (!key) return [];
+      return [
+        {
+          skuKey: key,
+          skuId: snap.skuId,
+          skuProperties: snap.skuProperties,
+          vidPath: '',
+          selections: [],
+          finalPrice: price.finalPrice,
+          originalPrice: price.originalPrice,
+          thumbnailUrl: null,
+        },
+      ];
+    }
+
+    const maxVariants = 200;
+    const results: ScrapedSkuVariant[] = [];
+    const seen = new Set<string>();
+    const chosenVids: Array<string | null> = Array.from({ length: groupIndexes.length }, () => null);
+
+    const dfs = async (depth: number) => {
+      stats.dfsCalls += 1;
+      if (results.length >= maxVariants) return;
+      if (depth >= groupIndexes.length) {
+        stats.leafVisits += 1;
+        await waitForStablePrice().catch(() => {});
+        const snap = await getSelectionSnapshot(chosenVids);
+        const price = await getCurrentPrice();
+        const vidPath = chosenVids.filter((v) => !!v).join(';');
+        const skuKey = snap.selections.map((s) => `${s.label}=${s.value}`).join(' / ');
+        const key = snap.skuId || snap.skuProperties || vidPath;
+        if (!key) {
+          stats.leafNoKey += 1;
+          pushSkuTrace(`leaf:noKey vidPath=${vidPath} skuKey=${skuKey}`);
+          return;
+        }
+        if (seen.has(key)) {
+          stats.leafDuplicate += 1;
+          return;
+        }
+        seen.add(key);
+        results.push({
+          skuKey,
+          skuId: snap.skuId,
+          skuProperties: snap.skuProperties,
+          vidPath,
+          selections: snap.selections,
+          finalPrice: price.finalPrice,
+          originalPrice: price.originalPrice,
+          thumbnailUrl: snap.thumbnailUrl,
+        });
+        stats.leafStored += 1;
+        if (leafSamples.length < 12) {
+          leafSamples.push({ key, vidPath, finalPrice: price.finalPrice, originalPrice: price.originalPrice });
+        }
+        return;
+      }
+
+      const groupIndex = groupIndexes[depth];
+      const vids = await getAvailableVids(groupIndex);
+      if (depth < 4) {
+        pushSkuTrace(
+          `depth=${depth} groupIndex=${groupIndex} vids=${vids.length} sample=${JSON.stringify(vids.slice(0, 8))}`
+        );
+      }
+      if (vids.length === 0) {
+        chosenVids[depth] = null;
+        await dfs(depth + 1);
+        return;
+      }
+
+      for (const vid of vids) {
+        if (results.length >= maxVariants) return;
+        chosenVids[depth] = vid;
+        const alreadySelected = await page
+          .evaluate(
+            ({ idx, v }) => {
+              const doc = (globalThis as any).document as any;
+              const isSelected = (el: any) => {
+                if (!el) return false;
+                const cls = (el.getAttribute?.('class') || '') as string;
+                if (cls.includes('isSelected')) return true;
+                const ariaChecked = el.getAttribute?.('aria-checked');
+                if (ariaChecked === 'true') return true;
+                const ariaSelected = el.getAttribute?.('aria-selected');
+                if (ariaSelected === 'true') return true;
+                const dataSelected = el.getAttribute?.('data-selected');
+                if (dataSelected === 'true') return true;
+                return false;
+              };
+              const findSkuScope = () => {
+                const panel = doc?.querySelector?.('div[id^="SkuPanel_"]') || null;
+                const panelBody = panel?.querySelector?.('div[id*="SkuPanelBody"]') || null;
+                const byId = doc?.querySelector?.('#skuOptionsArea') || null;
+                const byIdLike = (byId ? null : doc?.querySelector?.('[id*="skuOptionsArea"]')) || null;
+                const inPanel = panel?.querySelector?.('#skuOptionsArea') || panel?.querySelector?.('[id*="skuOptionsArea"]') || null;
+                return panelBody || byId || byIdLike || inPanel || panel;
+              };
+
+              const skuScope = findSkuScope();
+              const groups = Array.from(skuScope?.querySelectorAll?.('[class*="skuItem--"]') ?? []);
+              const group = (groups[idx] as any) || null;
+              if (!group) return false;
+              const el =
+                group?.querySelector?.(`div[class*="valueItem--"][data-vid="${v}"]`) || group?.querySelector?.(`[data-vid="${v}"]`);
+
+              let cur: any = el;
+              for (let i = 0; i < 4 && cur; i++) {
+                if (isSelected(cur)) return true;
+                cur = cur.parentElement;
+              }
+              return false;
+            },
+            { idx: groupIndex, v: vid }
+          )
+          .catch(() => false);
+
+        if (!alreadySelected) {
+          stats.clickAttempts += 1;
+          const ok = await clickVid(groupIndex, vid).catch(() => false);
+          if (ok) {
+            stats.clickOk += 1;
+          } else {
+            stats.clickFail += 1;
+            if (clickFailSamples.length < 12) clickFailSamples.push({ groupIndex, vid });
+            pushSkuTrace(`clickFail groupIndex=${groupIndex} vid=${vid}`);
+          }
+          await page.waitForTimeout(200);
+        } else {
+          stats.alreadySelectedSkips += 1;
+        }
+
+        await dfs(depth + 1);
+      }
+    };
+
+    await dfs(0);
+    if (results.length === 0 && groupIndexes.length > 0) {
+      const groupMeta = await page
+        .evaluate((indexes) => {
+          const doc = (globalThis as any).document as any;
+
+          const findSkuArea = () => {
+            const panel = doc?.querySelector?.('div[id^="SkuPanel_"]') || null;
+            const panelBody = panel?.querySelector?.('div[id*="SkuPanelBody"]') || null;
+            const byId = doc?.querySelector?.('#skuOptionsArea') || null;
+            return panelBody || panel || byId || doc;
+          };
+
+          const skuArea = findSkuArea();
+          const groups = Array.from(skuArea?.querySelectorAll?.('[class*="skuItem--"]') ?? []);
+
+          return (indexes as number[]).map((idx) => {
+            const group = (groups.length > 0 ? (groups[idx] as any) : (skuArea?.children?.[idx] as any)) as any;
+            if (!group) return { idx, ok: false };
+
+            const labelEl =
+              group?.querySelector?.('[class*="labelWrap--"] span[title]') ||
+              group?.querySelector?.('[class*="ItemLabel--"] span[title]') ||
+              group?.querySelector?.('span[title]') ||
+              null;
+            const label = (labelEl?.getAttribute?.('title') || labelEl?.textContent || '').trim();
+
+            const nodes = Array.from(
+              group?.querySelectorAll?.('div[class*="valueItem--"][data-vid][data-disabled], [data-vid][data-disabled]') ?? []
+            ) as any[];
+            const enabled = nodes.filter((n) => n?.getAttribute?.('data-disabled') === 'false');
+            const sample = enabled.slice(0, 8).map((n) => {
+              const vid = n?.getAttribute?.('data-vid') || '';
+              const cls = n?.getAttribute?.('class') || '';
+              const text = String(n?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+              return { vid, cls, text };
+            });
+            return {
+              idx,
+              ok: true,
+              label,
+              nodeCount: nodes.length,
+              enabledCount: enabled.length,
+              enabledSample: sample,
+            };
+          });
+        }, groupIndexes)
+        .catch(() => null);
+
+      console.warn(
+        `${skuLogPrefix} NoVariantsExtracted url=${page.url()} groupIndexes=${JSON.stringify(
+          groupIndexes
+        )} stats=${JSON.stringify(stats)} groupMeta=${groupMeta ? JSON.stringify(groupMeta) : 'n/a'} leafSamples=${JSON.stringify(
+          leafSamples
+        )} clickFailSamples=${JSON.stringify(clickFailSamples)} trace=${JSON.stringify(skuTrace)}`
+      );
+    }
+    return results;
   }
 
   async closeContext(accountId: string): Promise<void> {
@@ -676,7 +1393,7 @@ export class TaobaoScraper {
 
     const stealth = await loadStealthScript();
     await context.addInitScript(stealth);
-    await context.addInitScript(`var __name = (fn, _name) => fn;`);
+    await context.addInitScript(`globalThis.__name = (fn, _name) => fn; var __name = globalThis.__name;`);
 
     const page = await context.newPage();
     await page.goto('https://login.taobao.com/member/login.jhtml');
