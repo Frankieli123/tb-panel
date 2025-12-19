@@ -21,6 +21,18 @@ export interface Product {
   account?: { id: string; name: string } | null;
 }
 
+export interface InviteCode {
+  id: string;
+  code: string;
+  isActive: boolean;
+  disabledAt: string | null;
+  deletedAt: string | null;
+  createdAt: string;
+  usedAt: string | null;
+  createdBy: { id: string; username: string; role: 'admin' | 'operator' } | null;
+  usedBy: { id: string; username: string; role: 'admin' | 'operator' } | null;
+}
+
 export interface PriceSnapshot {
   id: string;
   finalPrice: number;
@@ -66,11 +78,20 @@ export interface NotificationConfig {
   emailAddress: string | null;
   wechatEnabled: boolean;
   wechatWebhook: string | null;
-  telegramEnabled: boolean;
-  telegramBotToken: string | null;
-  telegramChatId: string | null;
+  dingtalkEnabled: boolean;
+  dingtalkWebhook: string | null;
+  feishuEnabled: boolean;
+  feishuWebhook: string | null;
   triggerType: 'AMOUNT' | 'PERCENT';
   triggerValue: number;
+}
+
+export interface SmtpConfig {
+  host: string;
+  port: number;
+  user: string;
+  from: string;
+  hasPass: boolean;
 }
 
 export interface SystemStatus {

@@ -1,23 +1,35 @@
 import { ReactNode } from 'react';
-import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, Users, Bell, Settings, ShoppingBag } from 'lucide-react';
+import { NavLink, useNavigate } from 'react-router-dom';
+import { LayoutDashboard, Users, Bell, Settings, ShoppingBag, Key } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
 
 interface LayoutProps {
   children: ReactNode;
 }
 
 export default function Layout({ children }: LayoutProps) {
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+
+  const roleLabel = user?.role === 'admin' ? '管理员' : user?.role === 'operator' ? '操作员' : '';
+
+  const onLogout = async () => {
+    await logout();
+    navigate('/login', { replace: true });
+  };
+
   const navItems = [
     { to: '/', icon: LayoutDashboard, label: '监控面板' },
     { to: '/accounts', icon: Users, label: '账号管理' },
     { to: '/notifications', icon: Bell, label: '通知设置' },
     { to: '/settings', icon: Settings, label: '系统设置' },
+    ...(user?.role === 'admin' ? [{ to: '/invite-codes', icon: Key, label: '邀请码管理' }] : []),
   ];
 
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900 font-sans pb-20 md:pb-0">
       {/* Desktop Sidebar / Mobile Header */}
-      <header className="fixed top-0 left-0 right-0 h-16 bg-white border-b border-gray-200 z-30 flex items-center px-4 md:px-6 justify-between md:justify-start md:gap-4">
+      <header className="fixed top-0 left-0 right-0 h-16 bg-white border-b border-gray-200 z-30 flex items-center px-4 md:px-6 justify-between">
         <div className="flex items-center gap-2">
           <div className="bg-orange-500 p-2 rounded-lg">
             <ShoppingBag className="w-5 h-5 text-white" />
@@ -25,6 +37,24 @@ export default function Layout({ children }: LayoutProps) {
           <h1 className="font-bold text-xl tracking-tight hidden md:block">淘宝价格监控</h1>
           <h1 className="font-bold text-xl tracking-tight md:hidden">价格监控</h1>
         </div>
+
+        {user ? (
+          <div className="flex items-center gap-3">
+            <div className="hidden md:flex items-center gap-2">
+              <span className="text-sm font-medium text-gray-700">{user.username}</span>
+              <span className="text-xs font-semibold px-2 py-1 rounded-full bg-orange-50 text-orange-700 border border-orange-100">
+                {roleLabel || user.role}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => void onLogout()}
+              className="px-3 py-2 rounded-xl border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 text-sm font-medium"
+            >
+              登出
+            </button>
+          </div>
+        ) : null}
       </header>
 
       {/* Main Content Area */}

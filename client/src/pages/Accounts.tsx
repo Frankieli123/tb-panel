@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { Plus, Cookie, Trash2, AlertTriangle, Play, Pause, QrCode, X, Loader2 } from 'lucide-react';
 import { api } from '../services/api';
+import { getLoginWsUrl } from '../services/api';
 import { TaobaoAccount } from '../types';
 
 interface LoginState {
@@ -42,9 +43,7 @@ export default function Accounts() {
     setLoginState({ accountId, status: 'connecting' });
 
     // 创建 WebSocket 连接
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.hostname}:3001/ws/login`;
-    const ws = new WebSocket(wsUrl);
+    const ws = new WebSocket(getLoginWsUrl());
     wsRef.current = ws;
 
     ws.onopen = () => {

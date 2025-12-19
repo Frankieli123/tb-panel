@@ -1,6 +1,6 @@
 import nodemailer from 'nodemailer';
 import { config } from '../config/index.js';
-import { PrismaClient, Product, NotificationConfig } from '@prisma/client';
+import { PrismaClient, Product, UserNotificationConfig } from '@prisma/client';
 import { formatPrice } from '../utils/helpers.js';
 
 const prisma = new PrismaClient();
@@ -10,28 +10,81 @@ interface PriceDropNotification {
   oldPrice: number;
   newPrice: number;
   drop: { amount: number; percent: number };
-  config: NotificationConfig;
+  config: UserNotificationConfig;
 }
 
 class NotificationService {
   private emailTransporter: nodemailer.Transporter | null = null;
+  private smtpCacheKey: string | null = null;
 
   constructor() {
-    this.initEmailTransporter();
   }
 
-  private initEmailTransporter(): void {
-    if (config.smtp.user && config.smtp.pass) {
+  private async loadSmtpSettings(): Promise<{
+    host: string;
+    port: number;
+    user: string;
+    pass: string;
+    from: string;
+  } | null> {
+    const keys = ['smtp.host', 'smtp.port', 'smtp.user', 'smtp.pass', 'smtp.from'] as const;
+    const rows = await prisma.systemConfig.findMany({
+      where: { key: { in: [...keys] } },
+    });
+
+    const map = rows.reduce<Record<string, string>>((acc, row) => {
+      acc[row.key] = row.value;
+      return acc;
+    }, {});
+
+    const host = map['smtp.host'] || config.smtp.host;
+    const port = parseInt(map['smtp.port'] || String(config.smtp.port), 10);
+    const user = map['smtp.user'] || config.smtp.user;
+    const pass = map['smtp.pass'] || config.smtp.pass;
+    const from = map['smtp.from'] || config.smtp.from;
+
+    if (!user || !pass) return null;
+
+    return {
+      host,
+      port: Number.isFinite(port) ? port : config.smtp.port,
+      user,
+      pass,
+      from,
+    };
+  }
+
+  private async getEmailTransport(): Promise<{ transporter: nodemailer.Transporter; from: string } | null> {
+    const settings = await this.loadSmtpSettings();
+    if (!settings) {
+      console.warn('[Notification] Email transporter not configured');
+      return null;
+    }
+
+    const cacheKey = JSON.stringify({
+      host: settings.host,
+      port: settings.port,
+      user: settings.user,
+      pass: settings.pass,
+    });
+
+    if (!this.emailTransporter || this.smtpCacheKey !== cacheKey) {
       this.emailTransporter = nodemailer.createTransport({
-        host: config.smtp.host,
-        port: config.smtp.port,
-        secure: config.smtp.port === 465,
+        host: settings.host,
+        port: settings.port,
+        secure: settings.port === 465,
         auth: {
-          user: config.smtp.user,
-          pass: config.smtp.pass,
+          user: settings.user,
+          pass: settings.pass,
         },
       });
+      this.smtpCacheKey = cacheKey;
     }
+
+    return {
+      transporter: this.emailTransporter,
+      from: settings.from,
+    };
   }
 
   async sendPriceDropNotification(data: PriceDropNotification): Promise<void> {
@@ -56,17 +109,52 @@ class NotificationService {
       );
     }
 
-    // Telegram通知
-    if (notifyConfig.telegramEnabled && notifyConfig.telegramBotToken && notifyConfig.telegramChatId) {
-      promises.push(
-        this.sendTelegram(
-          notifyConfig.telegramBotToken,
-          notifyConfig.telegramChatId,
-          title,
-          content,
-          product.id
-        )
-      );
+    // 钉钉通知
+    if (notifyConfig.dingtalkEnabled && notifyConfig.dingtalkWebhook) {
+      promises.push(this.sendDingtalk(notifyConfig.dingtalkWebhook, title, content, product.id));
+    }
+
+    // 飞书通知
+    if (notifyConfig.feishuEnabled && notifyConfig.feishuWebhook) {
+      promises.push(this.sendFeishu(notifyConfig.feishuWebhook, title, content, product.id));
+    }
+
+    await Promise.allSettled(promises);
+  }
+
+  async sendSystemAlert(title: string, content: string): Promise<void> {
+    const userConfigs = await (prisma as any).userNotificationConfig.findMany({
+      where: {
+        OR: [
+          { emailEnabled: true },
+          { wechatEnabled: true },
+          { dingtalkEnabled: true },
+          { feishuEnabled: true },
+        ],
+      },
+    });
+
+    if (!userConfigs.length) return;
+
+    const alertTitle = `【系统告警】${title}`;
+
+    const promises: Promise<void>[] = [];
+    for (const cfg of userConfigs) {
+      if (cfg.emailEnabled && cfg.emailAddress) {
+        promises.push(this.sendEmail(cfg.emailAddress, alertTitle, content, 'system'));
+      }
+
+      if (cfg.wechatEnabled && cfg.wechatWebhook) {
+        promises.push(this.sendWechat(cfg.wechatWebhook, alertTitle, content, 'system'));
+      }
+
+      if (cfg.dingtalkEnabled && cfg.dingtalkWebhook) {
+        promises.push(this.sendDingtalk(cfg.dingtalkWebhook, alertTitle, content, 'system'));
+      }
+
+      if (cfg.feishuEnabled && cfg.feishuWebhook) {
+        promises.push(this.sendFeishu(cfg.feishuWebhook, alertTitle, content, 'system'));
+      }
     }
 
     await Promise.allSettled(promises);
@@ -93,14 +181,12 @@ class NotificationService {
     text: string,
     productId: string
   ): Promise<void> {
-    if (!this.emailTransporter) {
-      console.warn('[Notification] Email transporter not configured');
-      return;
-    }
+    const transport = await this.getEmailTransport();
+    if (!transport) return;
 
     try {
-      await this.emailTransporter.sendMail({
-        from: config.smtp.from,
+      await transport.transporter.sendMail({
+        from: transport.from,
         to,
         subject,
         text,
@@ -167,24 +253,21 @@ class NotificationService {
     }
   }
 
-  private async sendTelegram(
-    botToken: string,
-    chatId: string,
+  private async sendDingtalk(
+    webhookUrl: string,
     title: string,
     content: string,
     productId: string
   ): Promise<void> {
     try {
-      const message = `*${title}*\n\n${content}`;
-      const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
-
-      const response = await fetch(url, {
+      const response = await fetch(webhookUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          chat_id: chatId,
-          text: message,
-          parse_mode: 'Markdown',
+          msgtype: 'text',
+          text: {
+            content: `${title}\n\n${content}`,
+          },
         }),
       });
 
@@ -192,13 +275,43 @@ class NotificationService {
         throw new Error(`HTTP ${response.status}`);
       }
 
-      await this.logNotification(productId, 'telegram', title, content, true);
-      console.log('[Notification] Telegram notification sent');
-
+      await this.logNotification(productId, 'dingtalk', title, content, true);
+      console.log('[Notification] DingTalk notification sent');
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
-      await this.logNotification(productId, 'telegram', title, content, false, errorMsg);
-      console.error('[Notification] Telegram error:', errorMsg);
+      await this.logNotification(productId, 'dingtalk', title, content, false, errorMsg);
+      console.error('[Notification] DingTalk error:', errorMsg);
+    }
+  }
+
+  private async sendFeishu(
+    webhookUrl: string,
+    title: string,
+    content: string,
+    productId: string
+  ): Promise<void> {
+    try {
+      const response = await fetch(webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          msg_type: 'text',
+          content: {
+            text: `${title}\n\n${content}`,
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      await this.logNotification(productId, 'feishu', title, content, true);
+      console.log('[Notification] Feishu notification sent');
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      await this.logNotification(productId, 'feishu', title, content, false, errorMsg);
+      console.error('[Notification] Feishu error:', errorMsg);
     }
   }
 
@@ -228,8 +341,8 @@ class NotificationService {
 
   // 测试通知
   async testNotification(
-    channel: 'email' | 'wechat' | 'telegram',
-    config: Partial<NotificationConfig>
+    channel: 'email' | 'wechat' | 'dingtalk' | 'feishu',
+    config: Partial<UserNotificationConfig>
   ): Promise<{ success: boolean; error?: string }> {
     const testTitle = '【测试通知】淘宝价格监控';
     const testContent = '这是一条测试消息，如果您收到此消息，说明通知配置正确。';
@@ -247,20 +360,29 @@ class NotificationService {
           await this.sendWechat(config.wechatWebhook, testTitle, testContent, testProductId);
           break;
 
-        case 'telegram':
-          if (!config.telegramBotToken || !config.telegramChatId) {
-            throw new Error('Bot token and chat ID required');
-          }
-          await this.sendTelegram(
-            config.telegramBotToken,
-            config.telegramChatId,
-            testTitle,
-            testContent,
-            testProductId
-          );
+        case 'dingtalk':
+          if (!config.dingtalkWebhook) throw new Error('Webhook URL required');
+          await this.sendDingtalk(config.dingtalkWebhook, testTitle, testContent, testProductId);
+          break;
+
+        case 'feishu':
+          if (!config.feishuWebhook) throw new Error('Webhook URL required');
+          await this.sendFeishu(config.feishuWebhook, testTitle, testContent, testProductId);
           break;
       }
 
+      return { success: true };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  async testSmtp(to: string): Promise<{ success: boolean; error?: string }> {
+    try {
+      await this.sendEmail(to, '【SMTP测试】淘宝价格监控', '这是一条 SMTP 测试消息。', 'test');
       return { success: true };
     } catch (error) {
       return {

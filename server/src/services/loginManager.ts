@@ -2,6 +2,9 @@ import { chromium, Browser, BrowserContext, Page } from 'playwright';
 import { WebSocket, WebSocketServer } from 'ws';
 import { PrismaClient } from '@prisma/client';
 import { encryptCookies } from '../utils/helpers.js';
+import { config } from '../config/index.js';
+import { getCookieValue, getSessionByToken } from '../auth/session.js';
+import { SESSION_COOKIE_NAME } from '../auth/cookies.js';
 
 const prisma = new PrismaClient();
 
@@ -82,30 +85,57 @@ class LoginManager {
   initWebSocket(server: any): void {
     this.wss = new WebSocketServer({ server, path: '/ws/login' });
 
-    this.wss.on('connection', (ws) => {
-      console.log('[LoginManager] WebSocket connected');
+    this.wss.on('connection', (ws, req) => {
+      const origin = String(req.headers.origin || '');
+      const allowed = ((config as any).cors?.origins as string[] | undefined) || [];
+      const isDevLocalOrigin =
+        config.env !== 'production' &&
+        /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
+      if (origin && allowed.length > 0 && !allowed.includes(origin) && !isDevLocalOrigin) {
+        ws.close(1008, 'Forbidden origin');
+        return;
+      }
 
-      ws.on('message', async (message) => {
-        try {
-          const data = JSON.parse(message.toString());
-          if (data.type === 'start_login') {
-            await this.startLoginSession(data.accountId, ws);
-          } else if (data.type === 'cancel_login') {
-            await this.cancelLoginSession(data.accountId);
-          }
-        } catch (error) {
-          console.error('[LoginManager] Message error:', error);
-          ws.send(JSON.stringify({ type: 'error', message: String(error) }));
-        }
-      });
+      const sid = getCookieValue(String(req.headers.cookie || ''), SESSION_COOKIE_NAME);
+      if (!sid) {
+        ws.close(1008, 'Unauthorized');
+        return;
+      }
 
-      ws.on('close', () => {
-        console.log('[LoginManager] WebSocket disconnected');
-        for (const [accountId, session] of this.sessions) {
-          if (session.ws === ws) {
-            this.cancelLoginSession(accountId);
-          }
+      void (async () => {
+        const session = await getSessionByToken(prisma, { token: sid });
+        if (!session) {
+          ws.close(1008, 'Unauthorized');
+          return;
         }
+
+        console.log('[LoginManager] WebSocket connected');
+
+        ws.on('message', async (message) => {
+          try {
+            const data = JSON.parse(message.toString());
+            if (data.type === 'start_login') {
+              await this.startLoginSession(data.accountId, ws);
+            } else if (data.type === 'cancel_login') {
+              await this.cancelLoginSession(data.accountId);
+            }
+          } catch (error) {
+            console.error('[LoginManager] Message error:', error);
+            ws.send(JSON.stringify({ type: 'error', message: String(error) }));
+          }
+        });
+
+        ws.on('close', () => {
+          console.log('[LoginManager] WebSocket disconnected');
+          for (const [accountId, s] of this.sessions) {
+            if (s.ws === ws) {
+              this.cancelLoginSession(accountId);
+            }
+          }
+        });
+      })().catch((err) => {
+        console.error('[LoginManager] WS auth error:', err);
+        ws.close(1011, 'Internal error');
       });
     });
 

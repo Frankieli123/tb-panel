@@ -111,6 +111,38 @@ model NotificationConfig {
   @@map("notification_configs")
 }
 
+model UserNotificationConfig {
+  id     String @id @default(uuid())
+
+  userId String @unique
+  user   SystemUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // 邮件
+  emailEnabled Boolean @default(false)
+  emailAddress String?
+
+  // 微信
+  wechatEnabled Boolean @default(false)
+  wechatWebhook String? // Server酱或企业微信Webhook
+
+  // 钉钉
+  dingtalkEnabled Boolean @default(false)
+  dingtalkWebhook String?
+
+  // 飞书
+  feishuEnabled Boolean @default(false)
+  feishuWebhook String?
+
+  // 触发条件
+  triggerType  TriggerType @default(AMOUNT)
+  triggerValue Decimal @default(10) @db.Decimal(10, 2) // 降价阈值
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("user_notification_configs")
+}
+
 enum TriggerType {
   AMOUNT  // 固定金额
   PERCENT // 百分比
@@ -150,4 +182,60 @@ model ScraperConfig {
   updatedAt       DateTime @updatedAt
 
   @@map("scraper_configs")
+}
+
+enum SystemUserRole {
+  admin
+  operator
+}
+
+model SystemUser {
+  id           String         @id @default(uuid())
+  username     String         @unique
+  passwordHash String         @db.Text
+  role         SystemUserRole @default(operator)
+  isActive     Boolean        @default(true)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  sessions     SystemSession[]
+  notificationConfig UserNotificationConfig?
+  inviteCodesCreated InviteCode[] @relation("InviteCodeCreatedBy")
+  inviteCodesUsed    InviteCode[] @relation("InviteCodeUsedBy")
+
+  @@map("system_users")
+}
+
+model SystemSession {
+  id        String     @id @default(uuid())
+  tokenHash String     @unique
+  csrfToken String
+  expiresAt DateTime
+  createdAt DateTime   @default(now())
+  lastSeenAt DateTime  @default(now())
+
+  userId    String
+  user      SystemUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@map("system_sessions")
+}
+
+model InviteCode {
+  id        String   @id @default(uuid())
+  code      String   @unique
+  isActive  Boolean  @default(true)
+  disabledAt DateTime?
+  deletedAt DateTime?
+  createdAt DateTime @default(now())
+  usedAt    DateTime?
+
+  createdById String?
+  createdBy   SystemUser? @relation("InviteCodeCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  usedById String?
+  usedBy   SystemUser? @relation("InviteCodeUsedBy", fields: [usedById], references: [id], onDelete: SetNull)
+
+  @@index([usedAt])
+  @@map("invite_codes")
 }

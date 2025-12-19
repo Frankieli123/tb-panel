@@ -29,6 +29,26 @@ class SchedulerService {
   private worker: Worker | null = null;
   private isRunning = false;
   private mainLoopInterval: NodeJS.Timeout | null = null;
+  private riskPauseUntilMs = 0;
+  private riskStreak = 0;
+
+  private isRiskPaused(nowMs: number): boolean {
+    return nowMs < this.riskPauseUntilMs;
+  }
+
+  private clearRiskPause(): void {
+    this.riskPauseUntilMs = 0;
+    this.riskStreak = 0;
+  }
+
+  private setRiskPause(nowMs: number): number {
+    this.riskStreak += 1;
+    const baseMs = 5 * 60 * 1000;
+    const maxMs = 60 * 60 * 1000;
+    const pauseMs = Math.min(baseMs * Math.pow(2, this.riskStreak - 1), maxMs);
+    this.riskPauseUntilMs = nowMs + pauseMs;
+    return pauseMs;
+  }
 
   async start(): Promise<void> {
     if (this.isRunning) return;
@@ -105,9 +125,14 @@ class SchedulerService {
     if (!this.isRunning) return;
 
     try {
+      const nowMs = Date.now();
+      if (this.isRiskPaused(nowMs)) {
+        return;
+      }
+
       // 获取抓取配置
       const scraperConfig = await (prisma as any).scraperConfig.findFirst();
-      const pollingIntervalMs = (scraperConfig?.pollingInterval ?? 60) * 60 * 1000; // 默认60分钟
+      const defaultIntervalMs = (scraperConfig?.pollingInterval ?? 60) * 60 * 1000;
 
       // 获取所有活跃账号
       const accounts = await prisma.taobaoAccount.findMany({
@@ -118,43 +143,56 @@ class SchedulerService {
       });
 
       // 获取需要检查的商品
-      const now = new Date();
       const products = await prisma.product.findMany({
         where: {
           isActive: true,
-          OR: [
-            { lastCheckAt: null },
-            {
-              lastCheckAt: {
-                lt: new Date(now.getTime() - pollingIntervalMs),
-              },
-            },
-          ],
         },
         orderBy: { lastCheckAt: 'asc' },
       });
 
-      if (products.length === 0 || accounts.length === 0) {
+      const dueProducts = products.filter((product) => {
+        const intervalMs = Math.max(
+          1000,
+          (product.checkInterval ? product.checkInterval * 1000 : defaultIntervalMs)
+        );
+
+        if (!product.lastCheckAt) return true;
+        return product.lastCheckAt.getTime() <= nowMs - intervalMs;
+      });
+
+      if (dueProducts.length === 0 || accounts.length === 0) {
         return;
       }
 
-      // 分配商品到账号
-      const productsPerAccount = Math.ceil(products.length / accounts.length);
+      const accountById = new Map(accounts.map((a) => [a.id, a] as const));
+      let rr = 0;
 
-      for (let i = 0; i < accounts.length; i++) {
-        const account = accounts[i];
+      for (let i = 0; i < dueProducts.length; i++) {
+        const product = dueProducts[i];
+        const preferred = product.accountId ? accountById.get(product.accountId) : null;
+        const fallback = accounts[rr % accounts.length];
+        const account = preferred || fallback;
+        rr += 1;
+
         const state = this.accountStates.get(account.id);
+        if (state?.isRunning) continue;
+        if (!state) {
+          this.accountStates.set(account.id, {
+            accountId: account.id,
+            lastRunAt: 0,
+            isRunning: false,
+            productQueue: [],
+          });
+        }
 
-        if (!state || state.isRunning) continue;
+        const intervalMs = Math.max(
+          1000,
+          (product.checkInterval ? product.checkInterval * 1000 : defaultIntervalMs)
+        );
+        const bucket = Math.floor(nowMs / intervalMs);
+        const jobId = `scrape_${product.id}_${bucket}`;
 
-        // 分配商品
-        const startIdx = i * productsPerAccount;
-        const assignedProducts = products.slice(startIdx, startIdx + productsPerAccount);
-
-        if (assignedProducts.length === 0) continue;
-
-        // 添加到队列
-        for (const product of assignedProducts) {
+        try {
           await scrapeQueue.add(
             'scrape',
             {
@@ -163,16 +201,22 @@ class SchedulerService {
               taobaoId: product.taobaoId,
             },
             {
+              jobId,
+              removeOnComplete: true,
               attempts: 3,
               backoff: {
                 type: 'exponential',
-                delay: 60000, // 失败后1分钟重试
+                delay: 60000,
               },
             }
           );
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (message.toLowerCase().includes('already exists')) {
+            continue;
+          }
+          throw error;
         }
-
-        console.log(`[Scheduler] Assigned ${assignedProducts.length} products to account ${account.name}`);
       }
     } catch (error) {
       console.error('[Scheduler] Error in scheduleTasks:', error);
@@ -211,7 +255,20 @@ class SchedulerService {
       timings.fetchAccountMs = Date.now() - fetchAccountStartAt;
 
       if (!account || !account.isActive) {
-        throw new Error('Account not available');
+        const dbStartAt = Date.now();
+        await prisma.product
+          .update({
+            where: { id: productId },
+            data: {
+              lastCheckAt: new Date(),
+              lastError: 'Account not available',
+            },
+          })
+          .catch(() => {});
+        timings.dbMs = Date.now() - dbStartAt;
+
+        logTimings('accountUnavailable');
+        return { success: false, error: 'Account not available' };
       }
 
       // 更新账号状态
@@ -299,35 +356,72 @@ class SchedulerService {
           },
         });
 
+        this.clearRiskPause();
+
         timings.dbMs = Date.now() - dbStartAt;
 
       } else if (result.needCaptcha) {
-        // 需要验证码，暂停账号
         const dbStartAt = Date.now();
         await prisma.taobaoAccount.update({
           where: { id: accountId },
           data: {
             status: AccountStatus.CAPTCHA,
+            isActive: false,
             lastError: result.error || 'Captcha required',
             lastErrorAt: new Date(),
           },
         });
+        await prisma.product.update({
+          where: { id: productId },
+          data: { lastError: result.error || 'Captcha required' },
+        });
         timings.dbMs = Date.now() - dbStartAt;
-        throw new Error(result.error || 'Captcha required');
+
+        const pauseMs = this.setRiskPause(Date.now());
+        await notificationService.sendSystemAlert(
+          '账号需要验证码，已停用',
+          [
+            `account=${account.name}(${accountId})`,
+            `taobaoId=${taobaoId}`,
+            `productId=${productId}`,
+            `error=${result.error || 'Captcha required'}`,
+            `pauseMs=${pauseMs}`,
+          ].join('\n')
+        );
+
+        logTimings('captcha');
+        return result;
 
       } else if (result.needLogin) {
-        // 需要登录
         const dbStartAt = Date.now();
         await prisma.taobaoAccount.update({
           where: { id: accountId },
           data: {
             status: AccountStatus.LOCKED,
+            isActive: false,
             lastError: 'Login required',
             lastErrorAt: new Date(),
           },
         });
+        await prisma.product.update({
+          where: { id: productId },
+          data: { lastError: 'Login required' },
+        });
         timings.dbMs = Date.now() - dbStartAt;
-        throw new Error('Login required');
+
+        const pauseMs = this.setRiskPause(Date.now());
+        await notificationService.sendSystemAlert(
+          '账号需要重新登录，已停用',
+          [
+            `account=${account.name}(${accountId})`,
+            `taobaoId=${taobaoId}`,
+            `productId=${productId}`,
+            `pauseMs=${pauseMs}`,
+          ].join('\n')
+        );
+
+        logTimings('needLogin');
+        return result;
 
       } else {
         // 其他错误
@@ -386,31 +480,41 @@ class SchedulerService {
     drop: { amount: number; percent: number }
   ): Promise<void> {
     try {
-      const notifyConfig = await prisma.notificationConfig.findFirst();
-      if (!notifyConfig) return;
-
       const product = await prisma.product.findUnique({
         where: { id: productId },
       });
       if (!product) return;
 
-      // 检查是否达到通知阈值
-      const threshold = parseFloat(notifyConfig.triggerValue.toString());
-      const shouldNotify =
-        notifyConfig.triggerType === 'AMOUNT'
-          ? drop.amount >= threshold
-          : drop.percent >= threshold;
-
-      if (!shouldNotify) return;
-
-      // 发送通知
-      await notificationService.sendPriceDropNotification({
-        product,
-        oldPrice,
-        newPrice,
-        drop,
-        config: notifyConfig,
+      const userConfigs = await (prisma as any).userNotificationConfig.findMany({
+        where: {
+          OR: [
+            { emailEnabled: true },
+            { wechatEnabled: true },
+            { dingtalkEnabled: true },
+            { feishuEnabled: true },
+          ],
+        },
       });
+
+      if (!userConfigs.length) return;
+
+      for (const cfg of userConfigs) {
+        const threshold = parseFloat(cfg.triggerValue.toString());
+        const shouldNotify =
+          cfg.triggerType === 'AMOUNT'
+            ? drop.amount >= threshold
+            : drop.percent >= threshold;
+
+        if (!shouldNotify) continue;
+
+        await notificationService.sendPriceDropNotification({
+          product,
+          oldPrice,
+          newPrice,
+          drop,
+          config: cfg,
+        });
+      }
 
     } catch (error) {
       console.error('[Scheduler] Notification error:', error);

@@ -8,7 +8,37 @@ import { loginManager } from './services/loginManager.js';
 const app = express();
 
 // 中间件
-app.use(cors());
+if ((config as any).auth?.trustProxy) {
+  app.set('trust proxy', 1);
+}
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      const allowed = (config as any).cors?.origins as string[] | undefined;
+      if (!origin) {
+        callback(null, true);
+        return;
+      }
+
+      if (!allowed || allowed.includes(origin)) {
+        callback(null, true);
+        return;
+      }
+
+      if (
+        config.env !== 'production' &&
+        /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin)
+      ) {
+        callback(null, true);
+        return;
+      }
+
+      callback(new Error('Not allowed by CORS'));
+    },
+    credentials: true,
+  })
+);
 app.use(express.json());
 
 // API路由

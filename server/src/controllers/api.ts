@@ -4,28 +4,45 @@ import { extractTaobaoId, buildMobileUrl, encryptCookies } from '../utils/helper
 import { schedulerService } from '../services/scheduler.js';
 import { notificationService } from '../services/notification.js';
 import { config } from '../config/index.js';
+import createAuthRouter from './auth.js';
+import { getCookieValue } from '../auth/session.js';
+import { SESSION_COOKIE_NAME } from '../auth/cookies.js';
+import { requireAdmin, requireCsrf, requireSession, systemAuth } from '../middlewares/systemAuth.js';
 import { z } from 'zod';
 
 const prisma = new PrismaClient();
 const router = Router();
 
+function getSessionAuth(req: Request) {
+  const auth = req.systemAuth;
+  return auth && auth.kind === 'session' ? auth : null;
+}
+
 // API Key 认证中间件（可选，如果配置了 API_KEY 环境变量则启用）
 function requireApiKey(req: Request, res: Response, next: NextFunction): void {
   const requiredKey = config.apiKey;
-  if (!requiredKey) {
-    next();
-    return;
-  }
-
   const providedKey =
     req.header('x-api-key') ||
     req.header('authorization')?.replace(/^Bearer\s+/i, '') ||
     '';
 
-  if (providedKey !== requiredKey) {
+  const sid = getCookieValue(req.header('cookie'), SESSION_COOKIE_NAME);
+  if (providedKey && sid) {
+    res.status(400).json({ success: false, error: 'Ambiguous credentials' });
+    return;
+  }
+
+  if (!providedKey) {
+    next();
+    return;
+  }
+
+  if (!requiredKey || providedKey !== requiredKey) {
     res.status(401).json({ success: false, error: 'Unauthorized' });
     return;
   }
+
+  req.systemAuth = { kind: 'apiKey' };
 
   next();
 }
@@ -45,7 +62,16 @@ function isSafeWebhookUrl(input: string): boolean {
 }
 
 // 所有 API 路由启用认证
+router.use(
+  '/auth',
+  systemAuth(prisma, { allowApiKey: false, allowAnonymous: true }),
+  requireCsrf,
+  createAuthRouter(prisma)
+);
+
 router.use(requireApiKey);
+router.use(systemAuth(prisma));
+router.use(requireCsrf);
 
 // ============ 商品管理 ============
 
@@ -420,17 +446,26 @@ router.delete('/accounts/:id', async (req: Request, res: Response) => {
 // ============ 通知配置 ============
 
 // 获取通知配置
-router.get('/notifications/config', async (req: Request, res: Response) => {
+router.get('/notifications/config', requireSession, async (req: Request, res: Response) => {
   try {
-    let config = await prisma.notificationConfig.findFirst();
+    const auth = getSessionAuth(req);
+    if (!auth) {
+      res.status(401).json({ success: false, error: 'Unauthorized' });
+      return;
+    }
 
-    if (!config) {
-      config = await prisma.notificationConfig.create({
-        data: {},
+    const userId = auth.user.id;
+    let userConfig = await (prisma as any).userNotificationConfig.findUnique({
+      where: { userId },
+    });
+
+    if (!userConfig) {
+      userConfig = await (prisma as any).userNotificationConfig.create({
+        data: { userId },
       });
     }
 
-    res.json({ success: true, data: config });
+    res.json({ success: true, data: userConfig });
   } catch (error) {
     res.status(500).json({ success: false, error: String(error) });
   }
@@ -442,14 +477,15 @@ const updateNotificationSchema = z.object({
   emailAddress: z.string().email().optional().nullable(),
   wechatEnabled: z.boolean().optional(),
   wechatWebhook: z.string().optional().nullable(),
-  telegramEnabled: z.boolean().optional(),
-  telegramBotToken: z.string().optional().nullable(),
-  telegramChatId: z.string().optional().nullable(),
+  dingtalkEnabled: z.boolean().optional(),
+  dingtalkWebhook: z.string().optional().nullable(),
+  feishuEnabled: z.boolean().optional(),
+  feishuWebhook: z.string().optional().nullable(),
   triggerType: z.enum(['AMOUNT', 'PERCENT']).optional(),
   triggerValue: z.number().nonnegative().optional(),
 });
 
-router.put('/notifications/config', async (req: Request, res: Response) => {
+router.put('/notifications/config', requireSession, async (req: Request, res: Response) => {
   try {
     const data = updateNotificationSchema.parse(req.body);
 
@@ -458,33 +494,56 @@ router.put('/notifications/config', async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: 'Unsafe webhook URL' });
     }
 
-    let notifyConfig = await prisma.notificationConfig.findFirst();
-
-    if (notifyConfig) {
-      notifyConfig = await prisma.notificationConfig.update({
-        where: { id: notifyConfig.id },
-        data,
-      });
-    } else {
-      notifyConfig = await prisma.notificationConfig.create({ data });
+    if (data.dingtalkWebhook && !isSafeWebhookUrl(data.dingtalkWebhook)) {
+      return res.status(400).json({ success: false, error: 'Unsafe webhook URL' });
     }
 
-    res.json({ success: true, data: notifyConfig });
+    if (data.feishuWebhook && !isSafeWebhookUrl(data.feishuWebhook)) {
+      return res.status(400).json({ success: false, error: 'Unsafe webhook URL' });
+    }
+
+    const auth = getSessionAuth(req);
+    if (!auth) {
+      res.status(401).json({ success: false, error: 'Unauthorized' });
+      return;
+    }
+
+    const userId = auth.user.id;
+    const userConfig = await (prisma as any).userNotificationConfig.upsert({
+      where: { userId },
+      update: data,
+      create: { userId, ...data },
+    });
+
+    res.json({ success: true, data: userConfig });
   } catch (error) {
     res.status(500).json({ success: false, error: String(error) });
   }
 });
 
 // 测试通知
-router.post('/notifications/test', async (req: Request, res: Response) => {
+router.post('/notifications/test', requireSession, async (req: Request, res: Response) => {
   try {
-    const channelSchema = z.enum(['email', 'wechat', 'telegram']);
+    const auth = getSessionAuth(req);
+    if (!auth) {
+      res.status(401).json({ success: false, error: 'Unauthorized' });
+      return;
+    }
+
+    const channelSchema = z.enum(['email', 'wechat', 'dingtalk', 'feishu']);
     const channel = channelSchema.parse(req.body.channel);
     const testConfig = req.body;
 
     // 验证 Webhook URL 安全性
-    if (channel === 'wechat' && testConfig.wechatWebhook) {
-      if (!isSafeWebhookUrl(testConfig.wechatWebhook)) {
+    const webhookKeyByChannel: Record<string, string> = {
+      wechat: 'wechatWebhook',
+      dingtalk: 'dingtalkWebhook',
+      feishu: 'feishuWebhook',
+    };
+
+    const webhookKey = webhookKeyByChannel[channel];
+    if (webhookKey && testConfig[webhookKey]) {
+      if (!isSafeWebhookUrl(testConfig[webhookKey])) {
         return res.status(400).json({ success: false, error: 'Unsafe webhook URL' });
       }
     }
@@ -493,6 +552,108 @@ router.post('/notifications/test', async (req: Request, res: Response) => {
 
     res.json({ success: result.success, error: result.error });
   } catch (error) {
+    res.status(500).json({ success: false, error: String(error) });
+  }
+});
+
+const smtpKeys = ['smtp.host', 'smtp.port', 'smtp.user', 'smtp.pass', 'smtp.from'] as const;
+
+router.get('/notifications/smtp', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const rows = await prisma.systemConfig.findMany({
+      where: { key: { in: [...smtpKeys] } },
+    });
+
+    const map = rows.reduce<Record<string, string>>((acc, row) => {
+      acc[row.key] = row.value;
+      return acc;
+    }, {});
+
+    res.json({
+      success: true,
+      data: {
+        host: map['smtp.host'] || config.smtp.host,
+        port: parseInt(map['smtp.port'] || String(config.smtp.port), 10),
+        user: map['smtp.user'] || config.smtp.user,
+        from: map['smtp.from'] || config.smtp.from,
+        hasPass: !!(map['smtp.pass'] || config.smtp.pass),
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: String(error) });
+  }
+});
+
+const updateSmtpSchema = z.object({
+  host: z.string().optional(),
+  port: z.number().int().positive().optional(),
+  user: z.string().optional(),
+  pass: z.string().optional(),
+  from: z.string().optional(),
+});
+
+router.put('/notifications/smtp', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const data = updateSmtpSchema.parse(req.body);
+    const entries: Array<{ key: (typeof smtpKeys)[number]; value: string }> = [];
+
+    if (data.host !== undefined) entries.push({ key: 'smtp.host', value: data.host });
+    if (data.port !== undefined) entries.push({ key: 'smtp.port', value: String(data.port) });
+    if (data.user !== undefined) entries.push({ key: 'smtp.user', value: data.user });
+    if (data.pass !== undefined) entries.push({ key: 'smtp.pass', value: data.pass });
+    if (data.from !== undefined) entries.push({ key: 'smtp.from', value: data.from });
+
+    await Promise.all(
+      entries.map((row) =>
+        prisma.systemConfig.upsert({
+          where: { key: row.key },
+          update: { value: row.value },
+          create: { key: row.key, value: row.value },
+        })
+      )
+    );
+
+    const rows = await prisma.systemConfig.findMany({
+      where: { key: { in: [...smtpKeys] } },
+    });
+    const map = rows.reduce<Record<string, string>>((acc, row) => {
+      acc[row.key] = row.value;
+      return acc;
+    }, {});
+
+    res.json({
+      success: true,
+      data: {
+        host: map['smtp.host'] || config.smtp.host,
+        port: parseInt(map['smtp.port'] || String(config.smtp.port), 10),
+        user: map['smtp.user'] || config.smtp.user,
+        from: map['smtp.from'] || config.smtp.from,
+        hasPass: !!(map['smtp.pass'] || config.smtp.pass),
+      },
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ success: false, error: error.errors });
+      return;
+    }
+    res.status(500).json({ success: false, error: String(error) });
+  }
+});
+
+const testSmtpSchema = z.object({
+  to: z.string().email(),
+});
+
+router.post('/notifications/smtp/test', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const { to } = testSmtpSchema.parse(req.body);
+    const result = await notificationService.testSmtp(to);
+    res.json({ success: result.success, error: result.error });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ success: false, error: error.errors });
+      return;
+    }
     res.status(500).json({ success: false, error: String(error) });
   }
 });
