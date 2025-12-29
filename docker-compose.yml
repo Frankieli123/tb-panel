@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  # 后端 API 服务
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: taobao-server
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    environment:
+      - NODE_ENV=production
+      - PORT=4000
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
+      - API_KEY=${API_KEY:-}
+      - AGENT_TOKEN=${AGENT_TOKEN:-}
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-465}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+      - SMTP_FROM=${SMTP_FROM:-}
+      - WECHAT_WEBHOOK_URL=${WECHAT_WEBHOOK_URL:-}
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:4000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - taobao-network
+
+  # 前端（可选，也可以用 Nginx 部署静态文件）
+  client:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    container_name: taobao-client
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - server
+    networks:
+      - taobao-network
+
+networks:
+  taobao-network:
+    driver: bridge
