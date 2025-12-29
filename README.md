@@ -20,18 +20,12 @@
 
 ## 快速开始
 
-### 1. 启动数据库
-
-```bash
-docker-compose up -d
-```
-
-### 2. 配置后端
+### 1. 配置后端（远端数据库/Redis）
 
 ```bash
 cd server
 cp .env.example .env
-# 编辑 .env 配置数据库连接等
+# 编辑 .env，填入远端 DATABASE_URL / REDIS_URL
 
 npm install
 npx prisma migrate dev
@@ -39,7 +33,7 @@ npx playwright install chromium
 npm run dev
 ```
 
-### 3. 启动前端
+### 2. 启动前端
 
 ```bash
 cd client
@@ -70,10 +64,10 @@ npm run dev
 
 ```env
 # 数据库
-DATABASE_URL="postgresql://taobao:taobao123@localhost:5432/taobao_tracker"
+DATABASE_URL="postgresql://postgres:<password>@110.42.105.188:5212/postgres"
 
 # Redis
-REDIS_URL="redis://localhost:6379"
+REDIS_URL="redis://default:<password>@110.42.105.188:6896"
 
 # 服务器端口
 PORT=3000
@@ -93,6 +87,24 @@ SCRAPER_MIN_INTERVAL_MS=60000   # 最小间隔1分钟
 SCRAPER_MAX_INTERVAL_MS=180000  # 最大间隔3分钟
 MAX_CONCURRENT_ACCOUNTS=3       # 最大并发账号数
 ```
+
+## 多机 Agent 模式（中心后端 + 本机浏览器）
+
+适用于：同一个后端部署，但希望“浏览器自动化”在多台 Windows 机器各自的本地 Chrome 上执行（账号固定绑定到某台机器）。
+
+1. 后端（中心机器）配置 `AGENT_TOKEN`（优先）或 `API_KEY`
+2. 每台执行机启动 Agent：
+   ```bash
+   cd server
+   # 任选其一：
+   # 推荐：使用面板生成的配对码（一次性）
+   npm run agent -- --pair <PAIR_CODE> --ws ws://<server-ip>:4000/ws/agent
+   # 或：
+   # 后续启动：无需再次配对（token 会保存在本机 %ProgramData%\\TaobaoAgent\\agent.json）
+   npm run agent -- --ws ws://<server-ip>:4000/ws/agent
+   ```
+3. 绑定账号到某个 Agent：`PUT /api/accounts/:id/agent`，body 为 `{ "agentId": "<your-agent-id>" }`
+4. 查看在线 Agent：`GET /api/agents`
 
 ## 风险提示
 
@@ -120,7 +132,6 @@ taobao/
 │       ├── components/    # 组件
 │       ├── pages/         # 页面
 │       └── services/      # API调用
-└── docker-compose.yml     # 数据库容器
 ```
 
 ## 常见问题

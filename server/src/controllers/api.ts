@@ -2,21 +2,58 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { extractTaobaoId, buildMobileUrl, encryptCookies } from '../utils/helpers.js';
 import { schedulerService } from '../services/scheduler.js';
+import { cartScraper } from '../services/cartScraper.js';
 import { notificationService } from '../services/notification.js';
+import { agentHub } from '../services/agentHub.js';
+import { agentAuthService } from '../services/agentAuth.js';
 import { config } from '../config/index.js';
 import createAuthRouter from './auth.js';
 import { getCookieValue } from '../auth/session.js';
 import { SESSION_COOKIE_NAME } from '../auth/cookies.js';
 import { requireAdmin, requireCsrf, requireSession, systemAuth } from '../middlewares/systemAuth.js';
+import { buildVisibleAccountsWhere, buildVisibleProductsWhere, getSessionUserId } from '../auth/access.js';
 import { z } from 'zod';
 
 const prisma = new PrismaClient();
 const router = Router();
 
+const CART_BASE_SKU_ID = '__BASE__';
+
 function getSessionAuth(req: Request) {
   const auth = req.systemAuth;
   return auth && auth.kind === 'session' ? auth : null;
 }
+
+// ============ Agent 配对（无需登录：仅凭配对码兑换 token） ============
+const agentRedeemSchema = z.object({
+  code: z.string().min(1),
+  agentId: z.string().min(1),
+});
+
+router.post('/agents/redeem', async (req: Request, res: Response) => {
+  try {
+    const { code, agentId } = agentRedeemSchema.parse(req.body);
+    const redeemed = await agentAuthService.redeemPairCode(code, agentId);
+
+    if (redeemed.setAsDefault) {
+      try {
+        await (prisma as any).systemUser.update({
+          where: { id: redeemed.userId },
+          data: { preferredAgentId: agentId },
+        });
+      } catch {}
+    }
+
+    res.json({ success: true, data: { token: redeemed.token } });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ success: false, error: error.errors });
+    }
+    res
+      .status(400)
+      .json({ success: false, error: (error as any)?.message ? String((error as any).message) : String(error) });
+  }
+});
 
 // API Key 认证中间件（可选，如果配置了 API_KEY 环境变量则启用）
 function requireApiKey(req: Request, res: Response, next: NextFunction): void {
@@ -62,6 +99,14 @@ function isSafeWebhookUrl(input: string): boolean {
 }
 
 // 所有 API 路由启用认证
+function requireAdminOrApiKey(req: Request, res: Response, next: NextFunction): void {
+  if (req.systemAuth?.kind === 'apiKey') {
+    next();
+    return;
+  }
+  requireAdmin(req, res, next);
+}
+
 router.use(
   '/auth',
   systemAuth(prisma, { allowApiKey: false, allowAnonymous: true }),
@@ -73,65 +118,21 @@ router.use(requireApiKey);
 router.use(systemAuth(prisma));
 router.use(requireCsrf);
 
-// ============ 商品管理 ============
-
-// 获取商品列表
-router.get('/products', async (req: Request, res: Response) => {
-  try {
-    const products = await prisma.product.findMany({
-      include: {
-        account: { select: { id: true, name: true } },
-        snapshots: {
-          orderBy: { capturedAt: 'desc' },
-          take: 30, // 最近30条价格记录
-        },
-      },
-      orderBy: { createdAt: 'desc' },
-    });
-
-    res.json({ success: true, data: products });
-  } catch (error) {
-    res.status(500).json({ success: false, error: String(error) });
-  }
+// ============ Agent 配对（需要登录：生成配对码） ============
+const createPairCodeSchema = z.object({
+  setAsDefault: z.boolean().optional(),
 });
 
-// 添加商品
-const addProductSchema = z.object({
-  input: z.string().min(1), // URL 或 ID
-  accountId: z.string().optional(),
-});
-
-router.post('/products', async (req: Request, res: Response) => {
+router.post('/agents/pair-code', requireSession, async (req: Request, res: Response) => {
   try {
-    const { input, accountId } = addProductSchema.parse(req.body);
-
-    const taobaoId = extractTaobaoId(input);
-    if (!taobaoId) {
-      return res.status(400).json({ success: false, error: '无法识别的商品链接或ID' });
+    const auth = getSessionAuth(req);
+    if (!auth) {
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
     }
 
-    // 检查是否已存在
-    const existing = await prisma.product.findUnique({
-      where: { taobaoId },
-    });
-
-    if (existing) {
-      return res.status(400).json({ success: false, error: '该商品已在监控列表中' });
-    }
-
-    // 创建商品
-    const product = await prisma.product.create({
-      data: {
-        taobaoId,
-        url: buildMobileUrl(taobaoId),
-        accountId,
-      },
-    });
-
-    // 立即触发一次抓取
-    schedulerService.scrapeNow(product.id).catch(console.error);
-
-    res.json({ success: true, data: product });
+    const { setAsDefault } = createPairCodeSchema.parse(req.body || {});
+    const created = await agentAuthService.createPairCode(auth.user.id, { setAsDefault });
+    res.json({ success: true, data: created });
   } catch (error) {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ success: false, error: error.errors });
@@ -140,12 +141,97 @@ router.post('/products', async (req: Request, res: Response) => {
   }
 });
 
+// ============ 商品管理 ============
+
+// 获取商品列表
+router.get('/products', async (req: Request, res: Response) => {
+  try {
+    const products = await prisma.product.findMany({
+      where: buildVisibleProductsWhere(req),
+      include: {
+        account: { select: { id: true, name: true } },
+        ownerAccount: { select: { id: true, name: true } },
+        snapshots: {
+          orderBy: { capturedAt: 'desc' },
+          take: 30, // 最近30条价格记录
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const cartGroups = new Map<string, any>();
+    const normalized: any[] = [];
+
+    for (const p of products as any[]) {
+      const key = `${p.taobaoId}:${p.ownerAccountId || ''}`;
+      const existing = cartGroups.get(key);
+      if (!existing) {
+        cartGroups.set(key, p);
+        continue;
+      }
+
+      const existingIsBase = existing.skuId === CART_BASE_SKU_ID;
+      const nextIsBase = p.skuId === CART_BASE_SKU_ID;
+      if (!existingIsBase && nextIsBase) {
+        cartGroups.set(key, p);
+      }
+    }
+
+    for (const p of cartGroups.values()) {
+      normalized.push(p);
+    }
+
+    // cart products now only show one row per (taobaoId, ownerAccountId), prefer base row when present
+    for (const p of normalized) {
+      p.account = p.ownerAccount;
+    }
+
+    normalized.sort((a, b) => {
+      const at = a?.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const bt = b?.createdAt ? new Date(b.createdAt).getTime() : 0;
+      return bt - at;
+    });
+
+    res.json({ success: true, data: normalized });
+  } catch (error) {
+    res.status(500).json({ success: false, error: String(error) });
+  }
+});
+
+router.post('/products', async (req: Request, res: Response) => {
+  try {
+    return res.status(410).json({ success: false, error: '详情页抓取已移除，请使用购物车模式添加商品' });
+  } catch (error) {
+    res.status(500).json({ success: false, error: String(error) });
+  }
+});
+
 // 删除商品
 router.delete('/products/:id', async (req: Request, res: Response) => {
   try {
-    await prisma.product.delete({
-      where: { id: req.params.id },
+    const product = await prisma.product.findFirst({
+      where: { id: req.params.id, AND: [buildVisibleProductsWhere(req)] },
+      select: { id: true, taobaoId: true, monitorMode: true, ownerAccountId: true }
     });
+
+    if (!product) {
+      return res.status(404).json({ success: false, error: 'Not found' });
+    }
+
+    if (product.monitorMode === 'CART' && product.ownerAccountId) {
+      await prisma.product.deleteMany({
+        where: {
+          monitorMode: 'CART',
+          ownerAccountId: product.ownerAccountId,
+          taobaoId: product.taobaoId
+        }
+      });
+    } else {
+      await prisma.product.delete({
+        where: { id: product.id },
+      });
+    }
+
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ success: false, error: String(error) });
@@ -155,8 +241,54 @@ router.delete('/products/:id', async (req: Request, res: Response) => {
 // 手动刷新商品
 router.post('/products/:id/refresh', async (req: Request, res: Response) => {
   try {
-    await schedulerService.scrapeNow(req.params.id);
-    res.json({ success: true, message: '已加入抓取队列' });
+    const product = await prisma.product.findFirst({
+      where: { id: req.params.id, AND: [buildVisibleProductsWhere(req)] },
+      select: { id: true, monitorMode: true, ownerAccountId: true }
+    });
+
+    if (!product) {
+      return res.status(404).json({ success: false, error: 'Not found' });
+    }
+
+    if (product.monitorMode === 'CART' && product.ownerAccountId) {
+      const account = await prisma.taobaoAccount.findFirst({
+        where: { id: product.ownerAccountId, ...buildVisibleAccountsWhere(req) },
+        select: { id: true, cookies: true, agentId: true, userId: true }
+      });
+      if (!account) {
+        return res.status(404).json({ success: false, error: 'Account not found' });
+      }
+
+      const preferredAgentId = account.userId
+        ? (await (prisma as any).systemUser.findUnique({
+            where: { id: account.userId },
+            select: { preferredAgentId: true },
+          }))?.preferredAgentId ?? null
+        : null;
+
+      const agentIdToUse =
+        account.agentId && agentHub.isConnected(account.agentId)
+          ? account.agentId
+          : preferredAgentId && agentHub.isConnected(preferredAgentId)
+            ? preferredAgentId
+            : null;
+
+      let result;
+      if (agentIdToUse) {
+        const cart = await agentHub.call<any>(
+          agentIdToUse,
+          'scrapeCart',
+          { accountId: account.id, cookies: account.cookies },
+          { timeoutMs: 120000 }
+        );
+        result = await cartScraper.updatePricesFromCart(account.id, account.cookies, { cartResult: cart });
+      } else {
+        result = await cartScraper.updatePricesFromCart(account.id, account.cookies);
+      }
+      return res.json({ success: true, message: `已刷新（更新${result.updated}，缺失${result.missing}，失败${result.failed}）` });
+    }
+
+    return res.status(410).json({ success: false, error: '该商品不是购物车模式，详情页抓取已移除' });
   } catch (error) {
     res.status(500).json({ success: false, error: String(error) });
   }
@@ -167,6 +299,15 @@ router.get('/products/:id/history', async (req: Request, res: Response) => {
   try {
     const { days = '30' } = req.query;
     const daysNum = parseInt(days as string, 10);
+
+    const product = await prisma.product.findFirst({
+      where: { id: req.params.id, AND: [buildVisibleProductsWhere(req)] },
+      select: { id: true },
+    });
+
+    if (!product) {
+      return res.status(404).json({ success: false, error: 'Not found' });
+    }
 
     const snapshots = await prisma.priceSnapshot.findMany({
       where: {
@@ -212,6 +353,15 @@ function normalizeVariantForClient(v: any) {
 
 router.get('/products/:id/variants/latest', async (req: Request, res: Response) => {
   try {
+    const product = await prisma.product.findFirst({
+      where: { id: req.params.id, AND: [buildVisibleProductsWhere(req)] },
+      select: { id: true },
+    });
+
+    if (!product) {
+      return res.status(404).json({ success: false, error: 'Not found' });
+    }
+
     const snapshots = await prisma.priceSnapshot.findMany({
       where: { productId: req.params.id },
       orderBy: { capturedAt: 'desc' },
@@ -268,6 +418,15 @@ router.get('/products/:id/variants/:variantKey/history', async (req: Request, re
     const daysNum = parseInt(days as string, 10);
     const variantKey = String(req.params.variantKey || '').trim();
 
+    const product = await prisma.product.findFirst({
+      where: { id: req.params.id, AND: [buildVisibleProductsWhere(req)] },
+      select: { id: true },
+    });
+
+    if (!product) {
+      return res.status(404).json({ success: false, error: 'Not found' });
+    }
+
     const snapshots = await prisma.priceSnapshot.findMany({
       where: {
         productId: req.params.id,
@@ -307,13 +466,36 @@ router.get('/products/:id/variants/:variantKey/history', async (req: Request, re
 
 // ============ 账号管理 ============
 
+// 获取在线 Agent 列表（用于将账号绑定到具体机器执行）
+router.get('/agents', async (req: Request, res: Response) => {
+  try {
+    const agents = agentHub.listConnectedAgents();
+
+    const auth = getSessionAuth(req);
+    if (!auth) {
+      return res.json({ success: true, data: agents });
+    }
+
+    const isAdmin = auth.user.role === 'admin';
+    const visible = isAdmin
+      ? agents
+      : agents.filter((a) => a.userId === null || a.userId === auth.user.id);
+
+    res.json({ success: true, data: visible });
+  } catch (error) {
+    res.status(500).json({ success: false, error: String(error) });
+  }
+});
+
 // 获取账号列表
 router.get('/accounts', async (req: Request, res: Response) => {
   try {
     const accounts = await prisma.taobaoAccount.findMany({
+      where: buildVisibleAccountsWhere(req),
       select: {
         id: true,
         name: true,
+        agentId: true,
         isActive: true,
         status: true,
         lastLoginAt: true,
@@ -321,12 +503,97 @@ router.get('/accounts', async (req: Request, res: Response) => {
         lastError: true,
         errorCount: true,
         createdAt: true,
-        _count: { select: { products: true } },
+        _count: {
+          select: {
+            assignedProducts: true,
+            ownedProducts: true,
+          }
+        },
       },
       orderBy: { createdAt: 'asc' },
     });
-    res.json({ success: true, data: accounts });
+
+    // 合并两种商品计数
+    const accountsWithTotalCount = accounts.map(acc => ({
+      ...acc,
+      _count: {
+        products: acc._count.assignedProducts + acc._count.ownedProducts
+      }
+    }));
+
+    res.json({ success: true, data: accountsWithTotalCount });
   } catch (error) {
+    res.status(500).json({ success: false, error: String(error) });
+  }
+});
+
+// 绑定账号到某个 Agent（哪台机器执行浏览器自动化）
+const updateAccountAgentSchema = z.object({
+  agentId: z.string().min(1).nullable(),
+});
+
+const updatePreferredAgentSchema = z.object({
+  agentId: z.string().min(1).nullable(),
+});
+
+router.put('/accounts/:id/agent', async (req: Request, res: Response) => {
+  try {
+    const { agentId } = updateAccountAgentSchema.parse(req.body);
+
+    const auth = getSessionAuth(req);
+    if (auth && auth.user.role !== 'admin' && agentId && agentHub.isConnected(agentId)) {
+      if (!agentHub.isOwnedBy(agentId, auth.user.id)) {
+        return res.status(403).json({ success: false, error: 'Forbidden' });
+      }
+    }
+
+    const account = await prisma.taobaoAccount.findFirst({
+      where: { id: req.params.id, ...buildVisibleAccountsWhere(req) },
+      select: { id: true },
+    });
+
+    if (!account) {
+      return res.status(404).json({ success: false, error: 'Account not found' });
+    }
+
+    await prisma.taobaoAccount.update({
+      where: { id: req.params.id },
+      data: { agentId },
+    });
+
+    res.json({ success: true });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ success: false, error: error.errors });
+    }
+    res.status(500).json({ success: false, error: String(error) });
+  }
+});
+
+// 设置当前用户的默认执行机（无需逐个绑定账号）
+router.put('/me/preferred-agent', requireSession, async (req: Request, res: Response) => {
+  try {
+    const auth = getSessionAuth(req);
+    if (!auth) {
+      res.status(401).json({ success: false, error: 'Unauthorized' });
+      return;
+    }
+
+    const { agentId } = updatePreferredAgentSchema.parse(req.body);
+    if (agentId && agentHub.isConnected(agentId) && !agentHub.isOwnedBy(agentId, auth.user.id)) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+
+    await (prisma as any).systemUser.update({
+      where: { id: auth.user.id },
+      data: { preferredAgentId: agentId },
+    });
+
+    res.json({ success: true });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ success: false, error: error.errors });
+    }
     res.status(500).json({ success: false, error: String(error) });
   }
 });
@@ -336,11 +603,14 @@ router.post('/accounts', async (req: Request, res: Response) => {
   try {
     const { name } = req.body;
 
+    const userId = getSessionUserId(req);
+
     const account = await prisma.taobaoAccount.create({
       data: {
         name: name || `账号${Date.now()}`,
         cookies: '',
         isActive: false,
+        userId: userId || undefined,
       },
     });
 
@@ -353,8 +623,8 @@ router.post('/accounts', async (req: Request, res: Response) => {
 // 启动账号登录（返回登录页面URL，需要配合WebSocket推送）
 router.post('/accounts/:id/login', async (req: Request, res: Response) => {
   try {
-    const account = await prisma.taobaoAccount.findUnique({
-      where: { id: req.params.id },
+    const account = await prisma.taobaoAccount.findFirst({
+      where: { id: req.params.id, ...buildVisibleAccountsWhere(req) },
     });
 
     if (!account) {
@@ -392,6 +662,15 @@ router.put('/accounts/:id/cookies', async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: 'Invalid cookies format' });
     }
 
+    const account = await prisma.taobaoAccount.findFirst({
+      where: { id: req.params.id, ...buildVisibleAccountsWhere(req) },
+      select: { id: true },
+    });
+
+    if (!account) {
+      return res.status(404).json({ success: false, error: 'Account not found' });
+    }
+
     await prisma.taobaoAccount.update({
       where: { id: req.params.id },
       data: {
@@ -412,8 +691,8 @@ router.put('/accounts/:id/cookies', async (req: Request, res: Response) => {
 // 切换账号启用状态
 router.put('/accounts/:id/toggle', async (req: Request, res: Response) => {
   try {
-    const account = await prisma.taobaoAccount.findUnique({
-      where: { id: req.params.id },
+    const account = await prisma.taobaoAccount.findFirst({
+      where: { id: req.params.id, ...buildVisibleAccountsWhere(req) },
     });
 
     if (!account) {
@@ -434,9 +713,16 @@ router.put('/accounts/:id/toggle', async (req: Request, res: Response) => {
 // 删除账号
 router.delete('/accounts/:id', async (req: Request, res: Response) => {
   try {
-    await prisma.taobaoAccount.delete({
-      where: { id: req.params.id },
+    const account = await prisma.taobaoAccount.findFirst({
+      where: { id: req.params.id, ...buildVisibleAccountsWhere(req) },
+      select: { id: true },
     });
+
+    if (!account) {
+      return res.status(404).json({ success: false, error: 'Account not found' });
+    }
+
+    await prisma.taobaoAccount.delete({ where: { id: account.id } });
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ success: false, error: String(error) });
@@ -665,14 +951,18 @@ router.get('/system/status', async (req: Request, res: Response) => {
   try {
     const status = schedulerService.getStatus();
 
+    const visibleProductsWhere = buildVisibleProductsWhere(req);
+    const visibleAccountsWhere = buildVisibleAccountsWhere(req);
+
     const stats = {
-      totalProducts: await prisma.product.count(),
-      activeProducts: await prisma.product.count({ where: { isActive: true } }),
-      totalAccounts: await prisma.taobaoAccount.count(),
-      activeAccounts: await prisma.taobaoAccount.count({ where: { isActive: true } }),
+      totalProducts: await prisma.product.count({ where: visibleProductsWhere }),
+      activeProducts: await prisma.product.count({ where: { AND: [visibleProductsWhere, { isActive: true }] } }),
+      totalAccounts: await prisma.taobaoAccount.count({ where: visibleAccountsWhere }),
+      activeAccounts: await prisma.taobaoAccount.count({ where: { AND: [visibleAccountsWhere, { isActive: true }] } }),
       todaySnapshots: await prisma.priceSnapshot.count({
         where: {
           capturedAt: { gte: new Date(new Date().setHours(0, 0, 0, 0)) },
+          product: { is: visibleProductsWhere as any },
         },
       }),
     };
@@ -684,7 +974,7 @@ router.get('/system/status', async (req: Request, res: Response) => {
 });
 
 // 启动/停止调度器
-router.post('/system/scheduler/:action', async (req: Request, res: Response) => {
+router.post('/system/scheduler/:action', requireAdminOrApiKey, async (req: Request, res: Response) => {
   try {
     const { action } = req.params;
 
@@ -705,7 +995,7 @@ router.post('/system/scheduler/:action', async (req: Request, res: Response) => 
 // ============ 抓取配置 ============
 
 // 获取抓取配置
-router.get('/scraper/config', async (req: Request, res: Response) => {
+router.get('/scraper/config', requireAdminOrApiKey, async (req: Request, res: Response) => {
   try {
     let scraperConfig = await (prisma as any).scraperConfig.findFirst();
 
@@ -732,7 +1022,7 @@ const updateScraperSchema = z.object({
   pollingInterval: z.number().min(10),
 });
 
-router.put('/scraper/config', async (req: Request, res: Response) => {
+router.put('/scraper/config', requireAdminOrApiKey, async (req: Request, res: Response) => {
   try {
     const data = updateScraperSchema.parse(req.body);
 

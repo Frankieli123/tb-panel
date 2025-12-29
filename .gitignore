@@ -9,6 +9,9 @@ mcp_config.json
 **/mcp_config.json
 .codeium/
 
+# Chrome automation data
+server/data/
+
 # IDE
 .vscode/
 .idea/

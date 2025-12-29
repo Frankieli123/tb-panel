@@ -7,6 +7,7 @@ import Settings from './pages/Settings';
 import Login from './pages/Login';
 import Register from './pages/Register';
 import InviteCodes from './pages/InviteCodes';
+import Logs from './pages/Logs';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { ReactNode } from 'react';
 import { useLocation } from 'react-router-dom';
@@ -84,6 +85,18 @@ function App() {
                 <RequireAdmin>
                   <Layout>
                     <InviteCodes />
+                  </Layout>
+                </RequireAdmin>
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/logs"
+            element={
+              <RequireAuth>
+                <RequireAdmin>
+                  <Layout>
+                    <Logs />
                   </Layout>
                 </RequireAdmin>
               </RequireAuth>

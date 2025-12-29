@@ -19,6 +19,7 @@ export interface Product {
   createdAt: string;
   snapshots: PriceSnapshot[];
   account?: { id: string; name: string } | null;
+  monitorMode?: 'CART';
 }
 
 export interface InviteCode {
@@ -59,9 +60,29 @@ export interface Variant {
   prevCapturedAt?: string | null;
 }
 
+export interface AgentInfo {
+  agentId: string;
+  name?: string;
+  version?: string;
+  capabilities?: Record<string, unknown>;
+}
+
+export interface AgentConnection {
+  agentId: string;
+  connectedAt: number;
+  lastSeenAt: number;
+  info: AgentInfo;
+}
+
+export interface AgentPairCode {
+  code: string;
+  expiresInSec: number;
+}
+
 export interface TaobaoAccount {
   id: string;
   name: string;
+  agentId?: string | null;
   isActive: boolean;
   status: 'IDLE' | 'RUNNING' | 'CAPTCHA' | 'LOCKED' | 'COOLDOWN';
   lastLoginAt: string | null;

@@ -2,7 +2,8 @@ import { useEffect, useState, useRef, useCallback } from 'react';
 import { Plus, Cookie, Trash2, AlertTriangle, Play, Pause, QrCode, X, Loader2 } from 'lucide-react';
 import { api } from '../services/api';
 import { getLoginWsUrl } from '../services/api';
-import { TaobaoAccount } from '../types';
+import type { AgentConnection, TaobaoAccount } from '../types';
+import AgentManager from '../components/AgentManager';
 
 interface LoginState {
   accountId: string;
@@ -14,6 +15,11 @@ interface LoginState {
 export default function Accounts() {
   const [accounts, setAccounts] = useState<TaobaoAccount[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [agents, setAgents] = useState<AgentConnection[]>([]);
+  const [agentsLoading, setAgentsLoading] = useState(false);
+  const [agentsError, setAgentsError] = useState<string | null>(null);
+
+  const [bindingAccountId, setBindingAccountId] = useState<string | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
   const [showCookieModal, setShowCookieModal] = useState<string | null>(null);
   const [newAccountName, setNewAccountName] = useState('');
@@ -23,6 +29,7 @@ export default function Accounts() {
 
   useEffect(() => {
     loadAccounts();
+    loadAgents();
   }, []);
 
   // 清理 WebSocket 连接
@@ -33,6 +40,25 @@ export default function Accounts() {
       }
     };
   }, []);
+
+  const bindAgentToAccount = useCallback(async (accountId: string, agentId: string | null) => {
+    const previousAgentId = accounts.find((a) => a.id === accountId)?.agentId ?? null;
+
+    setBindingAccountId(accountId);
+    setAccounts((prev) => prev.map((a) => (a.id === accountId ? { ...a, agentId } : a)));
+
+    try {
+      await api.updateAccountAgent(accountId, agentId);
+    } catch (error) {
+      console.error('Failed to bind agent:', error);
+      setAccounts((prev) =>
+        prev.map((a) => (a.id === accountId ? { ...a, agentId: previousAgentId } : a))
+      );
+      alert(`绑定失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setBindingAccountId(null);
+    }
+  }, [accounts]);
 
   const startLogin = useCallback((accountId: string) => {
     // 关闭现有连接
@@ -45,8 +71,29 @@ export default function Accounts() {
     // 创建 WebSocket 连接
     const ws = new WebSocket(getLoginWsUrl());
     wsRef.current = ws;
+    let opened = false;
+    const connectTimeout = window.setTimeout(() => {
+      if (opened) return;
+      try {
+        ws.close();
+      } catch {}
+      setLoginState((prev) =>
+        prev && prev.accountId === accountId
+          ? {
+              ...prev,
+              status: 'error',
+              message: '登录连接超时：请确认后端已启动，并且你已登录面板（会话未过期）',
+            }
+          : prev
+      );
+    }, 10_000);
 
     ws.onopen = () => {
+      opened = true;
+      window.clearTimeout(connectTimeout);
+      setLoginState((prev) =>
+        prev && prev.accountId === accountId ? { ...prev, status: 'started' } : prev
+      );
       ws.send(JSON.stringify({ type: 'start_login', accountId }));
     };
 
@@ -77,11 +124,30 @@ export default function Accounts() {
     };
 
     ws.onerror = () => {
+      window.clearTimeout(connectTimeout);
       setLoginState(prev => prev ? { ...prev, status: 'error', message: '连接失败' } : null);
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
+      window.clearTimeout(connectTimeout);
       wsRef.current = null;
+
+      // 如果 WS 连接被拒绝/异常断开，避免 UI 一直停留在“连接中”转圈
+      setLoginState((prev) => {
+        if (!prev) return prev;
+        if (prev.accountId !== accountId) return prev;
+        if (prev.status === 'success' || prev.status === 'error') return prev;
+
+        const code = typeof event?.code === 'number' ? event.code : 0;
+        const reason =
+          typeof event?.reason === 'string' && event.reason ? `（${event.reason}）` : '';
+        const message =
+          code === 1008
+            ? `登录被拒绝${reason}：请确认你已登录面板（或刷新页面重新登录）`
+            : `登录连接已断开${reason}：请确认后端正常运行`;
+
+        return { ...prev, status: 'error', message };
+      });
     };
   }, []);
 
@@ -102,6 +168,20 @@ export default function Accounts() {
       console.error('Failed to load accounts:', error);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const loadAgents = async () => {
+    setAgentsLoading(true);
+    setAgentsError(null);
+    try {
+      const data = await api.getAgents();
+      setAgents(data);
+    } catch (error) {
+      console.error('Failed to load agents:', error);
+      setAgentsError(error instanceof Error ? error.message : 'Failed to load agents');
+    } finally {
+      setAgentsLoading(false);
     }
   };
 
@@ -174,6 +254,8 @@ export default function Accounts() {
     return new Date(dateStr).toLocaleString('zh-CN');
   };
 
+  const onlineAgentIds = new Set(agents.map((a) => a.agentId));
+
   return (
     <div className="space-y-6">
       <div>
@@ -194,6 +276,13 @@ export default function Accounts() {
           </p>
         </div>
       </div>
+
+      <AgentManager 
+        agents={agents}
+        isLoading={agentsLoading}
+        error={agentsError}
+        onRefresh={loadAgents}
+      />
 
       {isLoading ? (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -250,9 +339,48 @@ export default function Accounts() {
                 )}
               </div>
 
+              <div className="mt-4">
+                <div className="flex items-center justify-between">
+                  <p className="text-xs font-medium text-gray-500">执行机（Agent）</p>
+                  {account.agentId ? (
+                    <span
+                      className={`text-xs font-semibold px-2 py-0.5 rounded-full border ${
+                        onlineAgentIds.has(account.agentId)
+                          ? 'bg-green-50 text-green-700 border-green-100'
+                          : 'bg-red-50 text-red-700 border-red-100'
+                      }`}
+                      title={account.agentId}
+                    >
+                      {onlineAgentIds.has(account.agentId) ? '在线' : '离线'}
+                    </span>
+                  ) : (
+                    <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-gray-50 text-gray-600 border border-gray-100">
+                      未绑定
+                    </span>
+                  )}
+                </div>
+
+                <select
+                  className="mt-2 w-full px-3 py-2 rounded-xl border border-gray-200 bg-white text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-orange-500 disabled:opacity-60"
+                  value={account.agentId ?? ''}
+                  disabled={bindingAccountId === account.id}
+                  onChange={(e) => void bindAgentToAccount(account.id, e.target.value ? e.target.value : null)}
+                >
+                  <option value="">自动（跟随默认执行机）</option>
+                  {agents.map((a) => (
+                    <option key={a.agentId} value={a.agentId}>
+                      {a.agentId}
+                    </option>
+                  ))}
+                  {!!account.agentId && !onlineAgentIds.has(account.agentId) && (
+                    <option value={account.agentId}>离线：{account.agentId}</option>
+                  )}
+                </select>
+              </div>
+
               <div className="mt-4 flex gap-2">
                 <button
-                  onClick={() => startLogin(account.id)}
+                  onClick={() => void startLogin(account.id)}
                   className="flex-1 flex items-center justify-center gap-2 text-sm font-medium text-white bg-orange-500 hover:bg-orange-600 py-2 rounded-lg transition-colors"
                 >
                   <QrCode className="w-4 h-4" /> 登录
@@ -277,7 +405,7 @@ export default function Accounts() {
           {/* Add New Card */}
           <button
             onClick={() => setShowAddModal(true)}
-            className="flex flex-col items-center justify-center gap-3 bg-gray-50 border-2 border-dashed border-gray-300 rounded-2xl h-[200px] hover:border-orange-400 hover:bg-orange-50/50 transition-all group"
+            className="flex flex-col items-center justify-center gap-3 bg-gray-50 border-2 border-dashed border-gray-300 rounded-2xl min-h-[240px] h-full hover:border-orange-400 hover:bg-orange-50/50 transition-all group"
           >
             <div className="w-10 h-10 rounded-full bg-white shadow-sm flex items-center justify-center group-hover:scale-110 transition-transform">
               <Plus className="w-5 h-5 text-orange-500" />
@@ -427,7 +555,7 @@ export default function Accounts() {
                   </div>
                   <p className="mt-4 text-red-600 font-medium">{loginState.message || '登录失败'}</p>
                   <button
-                    onClick={() => startLogin(loginState.accountId)}
+                    onClick={() => void startLogin(loginState.accountId)}
                     className="mt-4 px-4 py-2 text-sm font-medium text-white bg-orange-500 hover:bg-orange-600 rounded-lg"
                   >
                     重试

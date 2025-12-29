@@ -2,7 +2,7 @@ import type { NextFunction, Request, Response } from 'express';
 import type { PrismaClient } from '@prisma/client';
 import { config } from '../config/index.js';
 import { getCookieValue, getSessionByToken } from '../auth/session.js';
-import { SESSION_COOKIE_NAME } from '../auth/cookies.js';
+import { clearSessionCookie, SESSION_COOKIE_NAME } from '../auth/cookies.js';
 
 function getProvidedApiKey(req: Request): string {
   return (
@@ -43,6 +43,14 @@ export function systemAuth(prisma: PrismaClient, options?: { allowApiKey?: boole
       try {
         const session = await getSessionByToken(prisma, { token: sid });
         if (!session) {
+          if (allowAnonymous) {
+            try {
+              clearSessionCookie(res);
+            } catch {}
+            next();
+            return;
+          }
+
           res.status(401).json({ success: false, error: 'Unauthorized' });
           return;
         }

@@ -8,6 +8,10 @@ export const config = {
   host: process.env.HOST || '127.0.0.1',
   port: parseInt(process.env.PORT || '4000', 10),
   apiKey: process.env.API_KEY || '', // 可选的API密钥认证
+  agent: {
+    // Agent/WebWorker 连接到中心后端时使用的鉴权 token（优先于 API_KEY）
+    token: process.env.AGENT_TOKEN || '',
+  },
 
   cors: {
     origins: (process.env.CORS_ORIGINS || 'http://localhost:5180')
@@ -36,7 +40,7 @@ export const config = {
   },
 
   redis: {
-    url: process.env.REDIS_URL || 'redis://localhost:6379',
+    url: process.env.REDIS_URL!,
   },
 
   smtp: {
@@ -58,5 +62,10 @@ export const config = {
     maxConcurrentAccounts: parseInt(process.env.MAX_CONCURRENT_ACCOUNTS || '3', 10),
     // 浏览器数据存储目录
     userDataDir: path.join(process.cwd(), 'browser-data'),
+  },
+
+  features: {
+    // 先专注购物车模式时可关闭（避免启动 Playwright 详情页抓取链路）
+    pageModeEnabled: false,
   },
 } as const;

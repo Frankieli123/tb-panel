@@ -1,4 +1,4 @@
-import {
+import type {
   InviteCode,
   NotificationConfig,
   PriceSnapshot,
@@ -8,9 +8,11 @@ import {
   TaobaoAccount,
   Variant,
   SmtpConfig,
+  AgentConnection,
+  AgentPairCode,
 } from '../types';
 
-const API_ORIGIN = (import.meta.env.VITE_API_ORIGIN as string | undefined) ?? '';
+const API_ORIGIN = import.meta.env.DEV ? '' : ((import.meta.env.VITE_API_ORIGIN as string | undefined) ?? '');
 
 function joinUrl(base: string, path: string): string {
   if (!base) return path;
@@ -106,12 +108,19 @@ export const api = {
   // 商品
   getProducts: () => request<Product[]>('/products'),
 
-  addProduct: (input: string, accountId?: string) =>
-    request<Product>('/products', {
+  addCartModeProduct: (url: string, accountId: string) =>
+    request<{ jobId: string }>('/products/add-cart-mode', {
       method: 'POST',
       headers: csrfToken ? { 'x-csrf-token': csrfToken } : undefined,
-      body: JSON.stringify({ input, accountId }),
+      body: JSON.stringify({ url, accountId }),
     }),
+
+  getAddProgress: (jobId: string) =>
+    request<{
+      status: 'pending' | 'running' | 'completed' | 'failed';
+      progress: { total: number; current: number; success: number; failed: number };
+      logs: string[];
+    }>(`/products/add-progress/${jobId}`),
 
   deleteProduct: (id: string) =>
     request<void>(`/products/${id}`, {
@@ -137,6 +146,13 @@ export const api = {
 
   // 账号
   getAccounts: () => request<TaobaoAccount[]>('/accounts'),
+  getAgents: () => request<AgentConnection[]>('/agents'),
+  createAgentPairCode: (setAsDefault?: boolean) =>
+    request<AgentPairCode>('/agents/pair-code', {
+      method: 'POST',
+      headers: csrfToken ? { 'x-csrf-token': csrfToken } : undefined,
+      body: JSON.stringify({ setAsDefault }),
+    }),
 
   addAccount: (name: string) =>
     request<TaobaoAccount>('/accounts', {
@@ -163,6 +179,20 @@ export const api = {
       method: 'PUT',
       headers: csrfToken ? { 'x-csrf-token': csrfToken } : undefined,
       body: JSON.stringify({ cookies }),
+    }),
+
+  updateAccountAgent: (id: string, agentId: string | null) =>
+    request<void>(`/accounts/${id}/agent`, {
+      method: 'PUT',
+      headers: csrfToken ? { 'x-csrf-token': csrfToken } : undefined,
+      body: JSON.stringify({ agentId }),
+    }),
+
+  updateMyPreferredAgent: (agentId: string | null) =>
+    request<void>('/me/preferred-agent', {
+      method: 'PUT',
+      headers: csrfToken ? { 'x-csrf-token': csrfToken } : undefined,
+      body: JSON.stringify({ agentId }),
     }),
 
   // 通知

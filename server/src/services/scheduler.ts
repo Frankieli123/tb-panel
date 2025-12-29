@@ -2,11 +2,15 @@ import { Queue, Worker, Job } from 'bullmq';
 import { PrismaClient, AccountStatus } from '@prisma/client';
 import { config } from '../config/index.js';
 import { scraper, ScrapeResult } from './scraper.js';
+import { cartScraper } from './cartScraper.js';
+import { agentHub } from './agentHub.js';
 import { notificationService } from './notification.js';
 import { randomDelay, sleep, calculatePriceDrop, encryptCookies } from '../utils/helpers.js';
 import IORedis from 'ioredis';
 
 const prisma = new PrismaClient();
+
+const CART_BASE_SKU_ID = '__BASE__';
 
 // Redis 连接
 const connection = new IORedis(config.redis.url, {
@@ -54,7 +58,7 @@ class SchedulerService {
     if (this.isRunning) return;
 
     console.log('[Scheduler] Starting...');
-    await scraper.init();
+    // 仅购物车模式：不初始化详情页抓取链路
 
     // 初始化账号状态
     await this.initAccountStates();
@@ -100,7 +104,6 @@ class SchedulerService {
       this.worker = null;
     }
 
-    await scraper.close();
     console.log('[Scheduler] Stopped');
   }
 
@@ -119,6 +122,110 @@ class SchedulerService {
     }
 
     console.log(`[Scheduler] Initialized ${accounts.length} accounts`);
+  }
+
+  /**
+   * 购物车模式批量抓取调度
+   * 随机间隔策略：配置间隔 × (0.5~1.5 随机系数)
+   * 例如配置60分钟，实际执行间隔在30~90分钟之间
+   */
+  private async scheduleCartScraping(
+    accounts: any[],
+    defaultIntervalMs: number,
+    nowMs: number
+  ): Promise<void> {
+    try {
+      for (const account of accounts) {
+        const baseCount = await prisma.product.count({
+          where: {
+            ownerAccountId: account.id,
+            monitorMode: 'CART',
+            skuId: CART_BASE_SKU_ID,
+            isActive: true
+          }
+        });
+
+        const cartProductsCount =
+          baseCount > 0
+            ? baseCount
+            : await prisma.product.count({
+                where: {
+                  ownerAccountId: account.id,
+                  monitorMode: 'CART',
+                  isActive: true
+                }
+              });
+
+        if (cartProductsCount === 0) continue;
+
+        const sampleProduct = await prisma.product.findFirst({
+          where: {
+            ownerAccountId: account.id,
+            monitorMode: 'CART',
+            ...(baseCount > 0 ? { skuId: CART_BASE_SKU_ID } : {}),
+            isActive: true
+          },
+          orderBy: { lastCheckAt: 'asc' }
+        });
+
+        if (!sampleProduct) continue;
+
+        // 计算随机间隔范围：0.5~1.5 倍
+        const minInterval = defaultIntervalMs * 0.5;
+
+        if (sampleProduct.lastCheckAt) {
+          const timeSinceLastCheck = nowMs - sampleProduct.lastCheckAt.getTime();
+
+          // 如果还没到最小间隔（0.5倍），跳过
+          if (timeSinceLastCheck < minInterval) {
+            continue;
+          }
+
+          // 使用确定性随机数：基于 accountId 和 lastCheckAt 生成固定的随机系数
+          const seed = this.simpleHash(account.id + sampleProduct.lastCheckAt.getTime());
+          const randomFactor = 0.5 + (seed % 100) / 100; // 0.5 ~ 1.5
+          const targetInterval = defaultIntervalMs * randomFactor;
+
+          // 如果还没到目标时间，跳过
+          if (timeSinceLastCheck < targetInterval) {
+            continue;
+          }
+        }
+
+        // 使用 bucket 去重（避免在同一周期内重复添加任务）
+        const bucket = Math.floor(nowMs / defaultIntervalMs);
+        const jobId = `cart_scrape_${account.id}_${bucket}`;
+
+        try {
+          await scrapeQueue.add(
+            'cart-scrape',
+            {
+              accountId: account.id,
+              productCount: cartProductsCount
+            },
+            {
+              jobId,
+              removeOnComplete: true,
+              attempts: 2,
+              backoff: {
+                type: 'exponential',
+                delay: 30000
+              }
+            }
+          );
+
+          console.log(`[Scheduler] Scheduled cart scrape for account ${account.id} (${cartProductsCount} products)`);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          // 静默跳过已存在的任务（避免日志污染）
+          if (!message.toLowerCase().includes('already exists')) {
+            console.error(`[Scheduler] Error scheduling cart scrape for ${account.id}:`, error);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('[Scheduler] Error in scheduleCartScraping:', error);
+    }
   }
 
   private async scheduleTasks(): Promise<void> {
@@ -142,88 +249,81 @@ class SchedulerService {
         },
       });
 
-      // 获取需要检查的商品
-      const products = await prisma.product.findMany({
-        where: {
-          isActive: true,
-        },
-        orderBy: { lastCheckAt: 'asc' },
-      });
-
-      const dueProducts = products.filter((product) => {
-        const intervalMs = Math.max(
-          1000,
-          (product.checkInterval ? product.checkInterval * 1000 : defaultIntervalMs)
-        );
-
-        if (!product.lastCheckAt) return true;
-        return product.lastCheckAt.getTime() <= nowMs - intervalMs;
-      });
-
-      if (dueProducts.length === 0 || accounts.length === 0) {
-        return;
-      }
-
-      const accountById = new Map(accounts.map((a) => [a.id, a] as const));
-      let rr = 0;
-
-      for (let i = 0; i < dueProducts.length; i++) {
-        const product = dueProducts[i];
-        const preferred = product.accountId ? accountById.get(product.accountId) : null;
-        const fallback = accounts[rr % accounts.length];
-        const account = preferred || fallback;
-        rr += 1;
-
-        const state = this.accountStates.get(account.id);
-        if (state?.isRunning) continue;
-        if (!state) {
-          this.accountStates.set(account.id, {
-            accountId: account.id,
-            lastRunAt: 0,
-            isRunning: false,
-            productQueue: [],
-          });
-        }
-
-        const intervalMs = Math.max(
-          1000,
-          (product.checkInterval ? product.checkInterval * 1000 : defaultIntervalMs)
-        );
-        const bucket = Math.floor(nowMs / intervalMs);
-        const jobId = `scrape_${product.id}_${bucket}`;
-
-        try {
-          await scrapeQueue.add(
-            'scrape',
-            {
-              accountId: account.id,
-              productId: product.id,
-              taobaoId: product.taobaoId,
-            },
-            {
-              jobId,
-              removeOnComplete: true,
-              attempts: 3,
-              backoff: {
-                type: 'exponential',
-                delay: 60000,
-              },
-            }
-          );
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          if (message.toLowerCase().includes('already exists')) {
-            continue;
-          }
-          throw error;
-        }
-      }
+      // ========== 1. 购物车模式批量抓取 ==========
+      await this.scheduleCartScraping(accounts, defaultIntervalMs, nowMs);
     } catch (error) {
       console.error('[Scheduler] Error in scheduleTasks:', error);
     }
   }
 
-  private async processJob(job: Job): Promise<ScrapeResult> {
+  private async processJob(job: Job): Promise<any> {
+    // 判断任务类型
+    if (job.name === 'cart-scrape') {
+      return this.processCartScrapeJob(job);
+    }
+
+    console.log(`[Scheduler] Unsupported job: ${job.name} id=${job.id}`);
+    return { success: false, error: 'Unsupported job' };
+  }
+
+  /**
+   * 处理购物车批量抓取任务
+   */
+  private async processCartScrapeJob(job: Job): Promise<{ success: boolean; updated: number; failed: number; missing: number }> {
+    const { accountId, productCount } = job.data;
+    console.log(`[Scheduler] Cart scrape start accountId=${accountId} products=${productCount}`);
+
+    try {
+      const account = await prisma.taobaoAccount.findUnique({
+        where: { id: accountId },
+        select: { id: true, name: true, cookies: true, agentId: true, userId: true }
+      });
+
+      if (!account) {
+        throw new Error('Account not found');
+      }
+
+      const preferredAgentId = !account.agentId && account.userId
+        ? (await (prisma as any).systemUser.findUnique({
+            where: { id: account.userId },
+            select: { preferredAgentId: true },
+          }))?.preferredAgentId ?? null
+        : null;
+
+      const agentIdToUse = account.agentId || preferredAgentId;
+
+      let result;
+      if (agentIdToUse && agentHub.isConnected(agentIdToUse)) {
+        const cart = await agentHub.call<any>(
+          agentIdToUse,
+          'scrapeCart',
+          { accountId, cookies: account.cookies },
+          { timeoutMs: 120000 }
+        );
+        result = await cartScraper.updatePricesFromCart(accountId, account.cookies, { cartResult: cart });
+      } else {
+        // 执行购物车批量抓取（本机执行，兼容未启用 Agent 的场景）
+        result = await cartScraper.updatePricesFromCart(accountId, account.cookies);
+      }
+
+      console.log(`[Scheduler] Cart scrape complete accountId=${accountId} updated=${result.updated} missing=${result.missing} failed=${result.failed}`);
+
+      return {
+        success: true,
+        updated: result.updated,
+        failed: result.failed,
+        missing: result.missing
+      };
+    } catch (error) {
+      console.error(`[Scheduler] Cart scrape failed accountId=${accountId}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * 处理单个商品详情页抓取任务
+   */
+  private async processPageScrapeJob(job: Job): Promise<ScrapeResult> {
     const { accountId, productId, taobaoId } = job.data;
 
     const startedAt = Date.now();
@@ -533,12 +633,12 @@ class SchedulerService {
     }
 
     // 找一个可用账号
-    const account = product.account || await prisma.taobaoAccount.findFirst({
-      where: { isActive: true, status: AccountStatus.IDLE },
-    });
-
+    const account = product.account;
     if (!account) {
-      throw new Error('No available account');
+      throw new Error('Product has no assigned account');
+    }
+    if (!account.isActive) {
+      throw new Error('Assigned account is inactive');
     }
 
     await scrapeQueue.add(
@@ -550,6 +650,17 @@ class SchedulerService {
       },
       { priority: 1 } // 高优先级
     );
+  }
+
+  // 简单的字符串哈希函数（用于生成确定性随机数）
+  private simpleHash(str: string): number {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      const char = str.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash; // Convert to 32bit integer
+    }
+    return Math.abs(hash);
   }
 
   // 获取调度状态

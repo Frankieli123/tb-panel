@@ -1,19 +1,121 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { Plus, TrendingDown, Package, Users } from 'lucide-react';
 import { api } from '../services/api';
 import { Product, SystemStatus } from '../types';
 import ProductCard from '../components/ProductCard';
 import AddProductModal from '../components/AddProductModal';
+import TaskProgressPanel, { TaskProgress } from '../components/TaskProgressPanel';
+import { useRealtimeUpdates } from '../hooks/useRealtimeUpdates';
 
 export default function Dashboard() {
   const [products, setProducts] = useState<Product[]>([]);
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [tasks, setTasks] = useState<TaskProgress[]>([]);
+
+  const taskIntervalsRef = useRef<Map<string, number>>(new Map());
 
   useEffect(() => {
     loadData();
+
+    // 清理定时器
+    return () => {
+      taskIntervalsRef.current.forEach((intervalId) => clearInterval(intervalId));
+      taskIntervalsRef.current.clear();
+    };
   }, []);
+
+  // WebSocket 实时更新处理
+  const handleProductUpdate = useCallback((productId: string, data: { lastCheckAt: string; currentPrice?: number | null; title?: string | null }) => {
+    setProducts((prev) =>
+      prev.map((p) =>
+        p.id === productId
+          ? {
+              ...p,
+              lastCheckAt: data.lastCheckAt,
+              currentPrice: data.currentPrice ?? p.currentPrice,
+              title: data.title ?? p.title,
+            }
+          : p
+      )
+    );
+  }, []);
+
+  const handleSystemUpdate = useCallback(() => {
+    // 刷新系统状态
+    api.getSystemStatus().then(setStatus).catch(console.error);
+  }, []);
+
+  // 使用 WebSocket 实时更新
+  useRealtimeUpdates({
+    onProductUpdate: handleProductUpdate,
+    onSystemUpdate: handleSystemUpdate,
+  });
+
+  const startTaskMonitoring = (jobId: string, title: string) => {
+    // 添加新任务到列表
+    const newTask: TaskProgress = {
+      jobId,
+      title,
+      status: 'pending',
+      progress: { total: 0, current: 0, success: 0, failed: 0 },
+      logs: ['任务已创建...'],
+      startedAt: Date.now(),
+    };
+
+    setTasks((prev) => [...prev, newTask]);
+
+    // 开始轮询任务进度
+    const intervalId = setInterval(async () => {
+      try {
+        const status = await api.getAddProgress(jobId);
+
+        setTasks((prev) =>
+          prev.map((t) =>
+            t.jobId === jobId
+              ? {
+                  ...t,
+                  status: status.status,
+                  progress: status.progress,
+                  logs: status.logs,
+                }
+              : t
+          )
+        );
+
+        // 任务完成或失败，停止轮询
+        if (status.status === 'completed' || status.status === 'failed') {
+          const interval = taskIntervalsRef.current.get(jobId);
+          if (interval) {
+            clearInterval(interval);
+            taskIntervalsRef.current.delete(jobId);
+          }
+
+          // 任务完成后刷新商品列表
+          if (status.status === 'completed') {
+            await loadData();
+          }
+        }
+      } catch (error) {
+        console.error('Failed to fetch task progress:', error);
+      }
+    }, 1000);
+
+    taskIntervalsRef.current.set(jobId, intervalId);
+  };
+
+  const handleDismissTask = (jobId: string) => {
+    // 停止轮询
+    const intervalId = taskIntervalsRef.current.get(jobId);
+    if (intervalId) {
+      clearInterval(intervalId);
+      taskIntervalsRef.current.delete(jobId);
+    }
+
+    // 从列表移除
+    setTasks((prev) => prev.filter((t) => t.jobId !== jobId));
+  };
 
   const loadData = async () => {
     setIsLoading(true);
@@ -31,17 +133,16 @@ export default function Dashboard() {
     }
   };
 
-  const handleAddProduct = async (input: string) => {
-    await api.addProduct(input);
+  const handleAddProduct = async () => {
     await loadData();
   };
 
   const handleRefresh = async (id: string) => {
     try {
       await api.refreshProduct(id);
-      // 更新本地状态显示刷新中
+      // 乐观更新：立即更新本地状态，显示"刚刚"
       setProducts((prev) =>
-        prev.map((p) => (p.id === id ? { ...p, lastError: null } : p))
+        prev.map((p) => (p.id === id ? { ...p, lastError: null, lastCheckAt: new Date().toISOString() } : p))
       );
     } catch (error) {
       console.error('Failed to refresh product:', error);
@@ -57,6 +158,8 @@ export default function Dashboard() {
       console.error('Failed to delete product:', error);
     }
   };
+
+  const filteredProducts = products;
 
   return (
     <div className="space-y-6">
@@ -127,6 +230,10 @@ export default function Dashboard() {
         </div>
       )}
 
+      <div className="flex items-center">
+        <span className="text-xs text-gray-400 ml-auto">显示 {filteredProducts.length} 个商品</span>
+      </div>
+
       {/* Content */}
       {isLoading ? (
         <div className="flex flex-col gap-4">
@@ -136,7 +243,7 @@ export default function Dashboard() {
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-4">
-          {products.map((product) => (
+          {filteredProducts.map((product) => (
             <ProductCard
               key={product.id}
               product={product}
@@ -144,7 +251,7 @@ export default function Dashboard() {
               onDelete={handleDelete}
             />
           ))}
-          {products.length === 0 && (
+          {filteredProducts.length === 0 && (
             <div className="text-center py-20 bg-white rounded-2xl border border-dashed border-gray-300">
               <p className="text-gray-400 mb-4">还没有监控任何商品</p>
               <button
@@ -161,8 +268,12 @@ export default function Dashboard() {
       <AddProductModal
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
-        onSubmit={handleAddProduct}
+        onSuccess={handleAddProduct}
+        onTaskStart={startTaskMonitoring}
       />
+
+      {/* 任务进度面板 */}
+      <TaskProgressPanel tasks={tasks} onDismiss={handleDismissTask} />
     </div>
   );
 }

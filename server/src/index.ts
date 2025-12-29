@@ -2,8 +2,13 @@ import express from 'express';
 import cors from 'cors';
 import { config } from './config/index.js';
 import apiRouter from './controllers/api.js';
+import cartApiRouter from './controllers/cartApi.js';
 import { schedulerService } from './services/scheduler.js';
 import { loginManager } from './services/loginManager.js';
+import { chromeLauncher } from './services/chromeLauncher.js';
+import { agentHub } from './services/agentHub.js';
+import { frontendPush } from './services/frontendPush.js';
+import { logService } from './services/logService.js';
 
 const app = express();
 
@@ -43,6 +48,7 @@ app.use(express.json());
 
 // API路由
 app.use('/api', apiRouter);
+app.use('/api', cartApiRouter);
 
 // 健康检查
 app.get('/health', (req, res) => {
@@ -50,17 +56,37 @@ app.get('/health', (req, res) => {
 });
 
 // 启动服务器
-const server = app.listen(config.port, config.host, () => {
+const server = app.listen(config.port, config.host, async () => {
   console.log(`[Server] Running on http://${config.host}:${config.port}`);
   console.log(`[Server] Environment: ${config.env}`);
 
   // 初始化 WebSocket 服务（用于扫码登录）
   loginManager.initWebSocket(server);
+  agentHub.initWebSocket(server);
+  frontendPush.initWebSocket(server);
+  logService.initWebSocket(server);
+
+  // 购物车/加购相关功能会按需拉起 Chrome（避免启动即占用资源）
+  console.log('[Server] Chrome for cart mode will be launched on-demand');
 
   // 自动启动调度器
   if (config.env !== 'test') {
     schedulerService.start().catch(console.error);
   }
+});
+
+// WebSocket upgrade routing (login + agent + frontend + logs share one HTTP server)
+server.on('upgrade', (req: any, socket: any, head: any) => {
+  try {
+    if (loginManager.handleUpgrade(req, socket, head)) return;
+    if (agentHub.handleUpgrade(req, socket, head)) return;
+    if (frontendPush.handleUpgrade(req, socket, head)) return;
+    if (logService.handleUpgrade(req, socket, head)) return;
+  } catch {}
+
+  try {
+    socket.destroy();
+  } catch {}
 });
 
 server.on('error', (error: any) => {
@@ -85,6 +111,7 @@ server.on('error', (error: any) => {
 process.on('SIGTERM', async () => {
   console.log('[Server] SIGTERM received, shutting down...');
   await schedulerService.stop();
+  await chromeLauncher.kill(); // 关闭 Chrome 实例
   server.close(() => {
     console.log('[Server] Closed');
     process.exit(0);
@@ -94,6 +121,7 @@ process.on('SIGTERM', async () => {
 process.on('SIGINT', async () => {
   console.log('[Server] SIGINT received, shutting down...');
   await schedulerService.stop();
+  await chromeLauncher.kill(); // 关闭 Chrome 实例
   server.close(() => {
     console.log('[Server] Closed');
     process.exit(0);

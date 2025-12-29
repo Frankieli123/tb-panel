@@ -33,6 +33,8 @@ interface LoginSession {
   isCapturing: boolean;
 }
 
+type WsUser = { id: string; role: 'admin' | 'operator' };
+
 // 判断是否为导航相关错误
 function isNavigationError(error: unknown): boolean {
   const msg = String(error ?? '');
@@ -55,6 +57,14 @@ async function waitForPageStable(page: Page): Promise<void> {
   } catch {
     // ignore
   }
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  const timeout = new Promise<never>((_, reject) => {
+    const id = setTimeout(() => reject(new Error(`Timeout: ${label}`)), timeoutMs);
+    (id as any).unref?.();
+  });
+  return (await Promise.race([promise, timeout])) as T;
 }
 
 // 根据 accountId 生成唯一的调试端口
@@ -82,8 +92,9 @@ class LoginManager {
   private sessions: Map<string, LoginSession> = new Map();
   private wss: WebSocketServer | null = null;
 
-  initWebSocket(server: any): void {
-    this.wss = new WebSocketServer({ server, path: '/ws/login' });
+  initWebSocket(_server: any): void {
+    // Use noServer mode so we can route upgrades for multiple WS endpoints on the same HTTP server
+    this.wss = new WebSocketServer({ noServer: true });
 
     this.wss.on('connection', (ws, req) => {
       const origin = String(req.headers.origin || '');
@@ -102,6 +113,46 @@ class LoginManager {
         return;
       }
 
+      // IMPORTANT: attach message handler immediately to avoid losing the first client message
+      // (client may send `start_login` right after WS open, while we are still awaiting DB auth).
+      const pendingMessages: string[] = [];
+      let user: WsUser | null = null;
+      let ready = false;
+
+      const handleMessage = async (message: string) => {
+        if (!user) return;
+        try {
+          const data = JSON.parse(message);
+          if (data.type === 'start_login') {
+            await this.startLoginSession(String(data.accountId || ''), ws, user);
+          } else if (data.type === 'cancel_login') {
+            if (user.role === 'operator') {
+              const acc = await prisma.taobaoAccount.findUnique({
+                where: { id: String(data.accountId || '') },
+                select: { userId: true },
+              });
+              if (!acc || acc.userId !== user.id) {
+                ws.send(JSON.stringify({ type: 'error', message: 'Forbidden' }));
+                return;
+              }
+            }
+            await this.cancelLoginSession(String(data.accountId || ''));
+          }
+        } catch (error) {
+          console.error('[LoginManager] Message error:', error);
+          ws.send(JSON.stringify({ type: 'error', message: String(error) }));
+        }
+      };
+
+      ws.on('message', (raw) => {
+        const msg = raw.toString();
+        if (!ready) {
+          if (pendingMessages.length < 10) pendingMessages.push(msg);
+          return;
+        }
+        void handleMessage(msg);
+      });
+
       void (async () => {
         const session = await getSessionByToken(prisma, { token: sid });
         if (!session) {
@@ -109,21 +160,12 @@ class LoginManager {
           return;
         }
 
+        user = { id: session.user.id, role: session.user.role };
         console.log('[LoginManager] WebSocket connected');
-
-        ws.on('message', async (message) => {
-          try {
-            const data = JSON.parse(message.toString());
-            if (data.type === 'start_login') {
-              await this.startLoginSession(data.accountId, ws);
-            } else if (data.type === 'cancel_login') {
-              await this.cancelLoginSession(data.accountId);
-            }
-          } catch (error) {
-            console.error('[LoginManager] Message error:', error);
-            ws.send(JSON.stringify({ type: 'error', message: String(error) }));
-          }
-        });
+        ready = true;
+        for (const msg of pendingMessages.splice(0, pendingMessages.length)) {
+          await handleMessage(msg);
+        }
 
         ws.on('close', () => {
           console.log('[LoginManager] WebSocket disconnected');
@@ -142,7 +184,27 @@ class LoginManager {
     console.log('[LoginManager] WebSocket server initialized');
   }
 
-  async startLoginSession(accountId: string, ws: WebSocket): Promise<void> {
+  /**
+   * Route HTTP upgrade requests to this WS server.
+   * Returns true when the upgrade is handled.
+   */
+  handleUpgrade(req: any, socket: any, head: any): boolean {
+    if (!this.wss) return false;
+    try {
+      const base = `http://${req.headers.host || 'localhost'}`;
+      const url = new URL(String(req.url || ''), base);
+      if (url.pathname !== '/ws/login') return false;
+    } catch {
+      return false;
+    }
+
+    this.wss.handleUpgrade(req, socket, head, (ws) => {
+      this.wss?.emit('connection', ws, req);
+    });
+    return true;
+  }
+
+  async startLoginSession(accountId: string, ws: WebSocket, user: WsUser): Promise<void> {
     if (this.sessions.has(accountId)) {
       await this.cancelLoginSession(accountId);
     }
@@ -156,37 +218,45 @@ class LoginManager {
       return;
     }
 
-    console.log(`[LoginManager] Starting login session for account: ${account.name}`);
+    if (user.role === 'operator' && account.userId !== user.id) {
+      ws.send(JSON.stringify({ type: 'error', message: 'Forbidden' }));
+      return;
+    }
+
+    console.log(`[LoginManager] Starting login session for account: ${account.name} accountId=${accountId}`);
 
     try {
-      const debugPort = getDebugPort(accountId);
-
-      // 使用非 headless 模式 + remote-debugging-port 避免检测
+      // 不使用 remote-debugging-port：部分 Windows/服务器环境可能因端口保留/权限导致 Chrome 启动异常，
+      // 且本登录流程不需要 CDP 调试端口。
       let browser: Browser;
       try {
-        browser = await chromium.launch({
-          headless: false,
-          channel: 'chrome', // 优先使用系统安装的 Chrome
-          args: [
-            `--remote-debugging-port=${debugPort}`,
-            '--remote-debugging-address=127.0.0.1', // 仅本地访问
-            '--disable-blink-features=AutomationControlled',
-            '--disable-infobars',
-            '--no-first-run',
-            '--no-default-browser-check',
-          ],
-        });
+        browser = await withTimeout(
+          chromium.launch({
+            headless: false,
+            channel: 'chrome', // 优先使用系统安装的 Chrome
+            args: [
+              '--disable-blink-features=AutomationControlled',
+              '--disable-infobars',
+              '--no-first-run',
+              '--no-default-browser-check',
+            ],
+          }),
+          25_000,
+          'launch chrome'
+        );
       } catch {
         // 回退到 Playwright 自带的 Chromium
-        browser = await chromium.launch({
-          headless: false,
-          args: [
-            `--remote-debugging-port=${debugPort}`,
-            '--remote-debugging-address=127.0.0.1',
-            '--disable-blink-features=AutomationControlled',
-            '--disable-infobars',
-          ],
-        });
+        browser = await withTimeout(
+          chromium.launch({
+            headless: false,
+            args: [
+              '--disable-blink-features=AutomationControlled',
+              '--disable-infobars',
+            ],
+          }),
+          25_000,
+          'launch chromium'
+        );
       }
 
       const context = await browser.newContext(DESKTOP_DEVICE);
@@ -204,7 +274,7 @@ class LoginManager {
 
       const page = await context.newPage();
 
-      await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded' });
+      await withTimeout(page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded' }), 30_000, 'goto login page');
       await waitForPageStable(page);
 
       const session: LoginSession = {

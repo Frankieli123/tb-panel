@@ -1,6 +1,6 @@
 import { ReactNode } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, Users, Bell, Settings, ShoppingBag, Key } from 'lucide-react';
+import { LayoutDashboard, Users, Bell, Settings, ShoppingBag, Key, ScrollText } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
 interface LayoutProps {
@@ -23,7 +23,10 @@ export default function Layout({ children }: LayoutProps) {
     { to: '/accounts', icon: Users, label: '账号管理' },
     { to: '/notifications', icon: Bell, label: '通知设置' },
     { to: '/settings', icon: Settings, label: '系统设置' },
-    ...(user?.role === 'admin' ? [{ to: '/invite-codes', icon: Key, label: '邀请码管理' }] : []),
+    ...(user?.role === 'admin' ? [
+      { to: '/invite-codes', icon: Key, label: '邀请码管理' },
+      { to: '/logs', icon: ScrollText, label: '系统日志' },
+    ] : []),
   ];
 
   return (

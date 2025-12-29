@@ -197,7 +197,12 @@ export default function SkuVariantPanel({ productId, productImageUrl }: SkuVaria
 
   const buildChartData = (history: PriceSnapshot[]) => {
     return (history || []).map((s) => ({
-      date: new Date(s.capturedAt).toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' }),
+      date: new Date(s.capturedAt).toLocaleString('zh-CN', { 
+        month: '2-digit', 
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit'
+      }),
       price: Number(s.finalPrice),
     }));
   };
@@ -367,15 +372,22 @@ export default function SkuVariantPanel({ productId, productImageUrl }: SkuVaria
 }
 
 function getVariantTitle(v: Variant, primaryLabel: string) {
-  if (!v.selections || v.selections.length === 0) return v.variantKey;
+  // 优先使用 selections 显示规格
+  if (v.selections && v.selections.length > 0) {
+    const label = (primaryLabel || '').trim();
+    if (!label) return v.selections.map((s) => s.value).join(' / ');
 
-  const label = (primaryLabel || '').trim();
-  if (!label) return v.selections.map((s) => s.value).join(' / ');
+    const rest = v.selections.filter((s) => (s.label || '').trim() !== label);
+    if (rest.length > 0) return rest.map((s) => s.value).join(' / ');
 
-  const rest = v.selections.filter((s) => (s.label || '').trim() !== label);
-  if (rest.length > 0) return rest.map((s) => s.value).join(' / ');
-
-  return v.selections.find((s) => (s.label || '').trim() === label)?.value || v.variantKey;
+    return v.selections.find((s) => (s.label || '').trim() === label)?.value || v.skuProperties || v.variantKey;
+  }
+  
+  // 没有 selections 时，使用 skuProperties（规格文本）
+  if (v.skuProperties) return v.skuProperties;
+  
+  // 兜底使用 variantKey
+  return v.variantKey;
 }
 
 function getVariantSubtitle(v: Variant) {

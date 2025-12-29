@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react';
-import { ExternalLink, RefreshCw, Trash2, ChevronDown, ChevronUp, AlertCircle, TrendingDown, TrendingUp } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { ExternalLink, RefreshCw, Trash2, ChevronDown, ChevronUp, AlertCircle, TrendingDown, TrendingUp, ShoppingCart, User } from 'lucide-react';
 import { Product } from '../types';
 import SkuVariantPanel from './SkuVariantPanel';
 
@@ -11,6 +11,13 @@ interface ProductCardProps {
 
 export default function ProductCard({ product, onRefresh, onDelete }: ProductCardProps) {
   const [isExpanded, setIsExpanded] = useState(false);
+  const [, setTick] = useState(0); // 用于强制重新渲染时间显示
+
+  // 每分钟更新一次时间显示
+  useEffect(() => {
+    const timer = setInterval(() => setTick(t => t + 1), 60000);
+    return () => clearInterval(timer);
+  }, []);
 
   const recentChange = useMemo(() => {
     const snapshots = product.snapshots || [];
@@ -99,12 +106,18 @@ export default function ProductCard({ product, onRefresh, onDelete }: ProductCar
         {/* Info */}
         <div className="flex-1 flex flex-col justify-between min-w-0">
           <div className="flex justify-between items-start gap-2">
-            <div className="min-w-0">
+            <div className="min-w-0 flex-1">
               <h3 className="font-bold text-gray-900 line-clamp-2 text-sm md:text-base leading-tight">
                 {product.title || `商品 ${product.taobaoId}`}
               </h3>
-              <div className="text-[11px] md:text-xs text-gray-500 mt-1 truncate">
-                商品ID：{product.taobaoId}
+              <div className="flex items-center gap-2 mt-1">
+                <div className="text-[11px] md:text-xs text-gray-500 truncate">
+                  商品ID：{product.taobaoId}
+                </div>
+                <div className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold border bg-purple-50 text-purple-700 border-purple-200">
+                  <ShoppingCart className="w-3 h-3" />
+                  购物车
+                </div>
               </div>
             </div>
             <a
@@ -144,6 +157,12 @@ export default function ProductCard({ product, onRefresh, onDelete }: ProductCar
               <p className="text-[10px] md:text-xs text-gray-400">
                 更新: {formatTime(product.lastCheckAt)}
               </p>
+              {product.monitorMode === 'CART' && product.account && (
+                <p className="text-[10px] text-gray-500 flex items-center gap-1 mt-0.5">
+                  <User className="w-3 h-3" />
+                  {product.account.name}
+                </p>
+              )}
             </div>
 
             {/* Mobile Actions (Compact) */}
