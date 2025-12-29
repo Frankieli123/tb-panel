@@ -2,7 +2,7 @@ node_modules/
 dist/
 build/
 .env
-.env.*
+.env.local
 logs/
 *.log
 mcp_config.json
@@ -12,10 +12,25 @@ mcp_config.json
 # Chrome automation data
 server/data/
 
+# Prisma generated client (regenerated on install)
+server/node_modules/
+
+# Debug files
+server/debug-*.png
+*.png
+*.html
+
 # IDE
 .vscode/
 .idea/
+.windsurf/
+.serena/
+.claude/
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Temp files
+_tmp_*
+cookies.txt
