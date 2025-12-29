@@ -22,9 +22,33 @@ export class ChromeLauncher {
    * 启动独立的 Chrome 实例
    */
   async launch(): Promise<Browser> {
+    // 检查现有浏览器是否仍然健康
     if (this.browser) {
-      console.log('[ChromeLauncher] Browser already running');
+      try {
+        // 尝试获取 contexts 来验证连接是否有效
+        this.browser.contexts();
+        console.log('[ChromeLauncher] Browser already running, reusing connection');
+        return this.browser;
+      } catch (e) {
+        console.log('[ChromeLauncher] Existing browser connection invalid, restarting...');
+        this.browser = null;
+        // 杀掉旧进程
+        if (this.chromeProcess) {
+          try {
+            this.chromeProcess.kill('SIGTERM');
+          } catch {}
+          this.chromeProcess = null;
+        }
+      }
+    }
+
+    // 尝试连接到已有的 Chrome 实例（可能是之前启动但引用丢失的）
+    try {
+      this.browser = await chromium.connectOverCDP(`http://127.0.0.1:${this.debugPort}`);
+      console.log('[ChromeLauncher] Connected to existing Chrome instance');
       return this.browser;
+    } catch {
+      // 没有现有实例，继续启动新的
     }
 
     // 确保用户数据目录存在

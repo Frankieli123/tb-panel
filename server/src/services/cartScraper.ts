@@ -164,13 +164,26 @@ export class CartScraper {
     const existing = this.sessions.get(accountId);
 
     if (existing) {
-      if (existing.page.isClosed()) {
+      // 检查 page 是否仍然有效
+      let pageValid = false;
+      try {
+        pageValid = !existing.page.isClosed();
+        // 额外验证：尝试获取 URL
+        if (pageValid) {
+          existing.page.url();
+        }
+      } catch {
+        pageValid = false;
+      }
+
+      if (!pageValid) {
         await this.disposeSession(accountId, 'page_closed');
       } else if (sig && existing.cookieSig && sig !== existing.cookieSig) {
         // cookies 发生变化：重建 session，避免混乱
         await this.disposeSession(accountId, 'cookies_changed');
       } else {
         existing.lastUsedAt = Date.now();
+        console.log(`[CartScraper] Reusing existing session for account=${accountId}`);
         return existing;
       }
     }
