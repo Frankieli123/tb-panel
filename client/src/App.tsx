@@ -9,6 +9,7 @@ import Register from './pages/Register';
 import InviteCodes from './pages/InviteCodes';
 import Logs from './pages/Logs';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { TaskProvider } from './context/TaskContext';
 import { ReactNode } from 'react';
 import { useLocation } from 'react-router-dom';
 
@@ -35,75 +36,77 @@ function App() {
   return (
     <BrowserRouter>
       <AuthProvider>
-        <Routes>
-          <Route path="/login" element={<Login />} />
-          <Route path="/register" element={<Register />} />
-          <Route
-            path="/"
-            element={
-              <RequireAuth>
-                <Layout>
-                  <Dashboard />
-                </Layout>
-              </RequireAuth>
-            }
-          />
-          <Route
-            path="/accounts"
-            element={
-              <RequireAuth>
-                <Layout>
-                  <Accounts />
-                </Layout>
-              </RequireAuth>
-            }
-          />
-          <Route
-            path="/notifications"
-            element={
-              <RequireAuth>
-                <Layout>
-                  <Notifications />
-                </Layout>
-              </RequireAuth>
-            }
-          />
-          <Route
-            path="/settings"
-            element={
-              <RequireAuth>
-                <Layout>
-                  <Settings />
-                </Layout>
-              </RequireAuth>
-            }
-          />
-          <Route
-            path="/invite-codes"
-            element={
-              <RequireAuth>
-                <RequireAdmin>
+        <TaskProvider>
+          <Routes>
+            <Route path="/login" element={<Login />} />
+            <Route path="/register" element={<Register />} />
+            <Route
+              path="/"
+              element={
+                <RequireAuth>
                   <Layout>
-                    <InviteCodes />
+                    <Dashboard />
                   </Layout>
-                </RequireAdmin>
-              </RequireAuth>
-            }
-          />
-          <Route
-            path="/logs"
-            element={
-              <RequireAuth>
-                <RequireAdmin>
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/accounts"
+              element={
+                <RequireAuth>
                   <Layout>
-                    <Logs />
+                    <Accounts />
                   </Layout>
-                </RequireAdmin>
-              </RequireAuth>
-            }
-          />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/notifications"
+              element={
+                <RequireAuth>
+                  <Layout>
+                    <Notifications />
+                  </Layout>
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/settings"
+              element={
+                <RequireAuth>
+                  <Layout>
+                    <Settings />
+                  </Layout>
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/invite-codes"
+              element={
+                <RequireAuth>
+                  <RequireAdmin>
+                    <Layout>
+                      <InviteCodes />
+                    </Layout>
+                  </RequireAdmin>
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/logs"
+              element={
+                <RequireAuth>
+                  <RequireAdmin>
+                    <Layout>
+                      <Logs />
+                    </Layout>
+                  </RequireAdmin>
+                </RequireAuth>
+              }
+            />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </TaskProvider>
       </AuthProvider>
     </BrowserRouter>
   );

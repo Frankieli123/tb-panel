@@ -2,6 +2,8 @@ import { ReactNode } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { LayoutDashboard, Users, Bell, Settings, ShoppingBag, Key, ScrollText } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { useTask } from '../context/TaskContext';
+import TaskProgressPanel from './TaskProgressPanel';
 
 interface LayoutProps {
   children: ReactNode;
@@ -9,6 +11,7 @@ interface LayoutProps {
 
 export default function Layout({ children }: LayoutProps) {
   const { user, logout } = useAuth();
+  const { tasks, dismissTask } = useTask();
   const navigate = useNavigate();
 
   const roleLabel = user?.role === 'admin' ? '管理员' : user?.role === 'operator' ? '操作员' : '';
@@ -106,6 +109,9 @@ export default function Layout({ children }: LayoutProps) {
           ))}
         </div>
       </nav>
+
+      {/* 全局任务进度面板 */}
+      <TaskProgressPanel tasks={tasks} onDismiss={dismissTask} />
     </div>
   );
 }

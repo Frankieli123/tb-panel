@@ -1,7 +1,7 @@
 import { Page, BrowserContext, Browser } from 'playwright';
 import { SkuParser, SkuCombination } from './skuParser.js';
 import { HumanSimulator, randomDelay } from './humanSimulator.js';
-import { chromeLauncher } from './chromeLauncher.js';
+import { sharedBrowserManager } from './sharedBrowserManager.js';
 import fs from 'fs/promises';
 import path from 'path';
 
@@ -60,6 +60,25 @@ export class AutoCartAdder {
   private exclusiveChain: Promise<void> = Promise.resolve();
   private lastTipEscapeAt = 0;
   private lastTipDeepScanAt = 0;
+  private currentAccountId: string | null = null;
+
+  async closeBrowser(): Promise<void> {
+    // 不关闭共享浏览器，由 sharedBrowserManager 统一管理
+    console.log('[AutoCart] Browser session kept open for reuse');
+  }
+
+  private async ensureBrowser(accountId: string, cookies?: string): Promise<void> {
+    // 使用共享浏览器管理器，让 autoCartAdder 和 cartScraper 共享同一个浏览器
+    const session = await sharedBrowserManager.getOrCreateSession(accountId, cookies);
+    
+    this.context = session.context;
+    this.page = session.page;
+    this.humanSimulator = session.human;
+    this.skuParser = new SkuParser(this.page);
+    this.currentAccountId = accountId;
+    
+    console.log('[AutoCart] Using shared browser session');
+  }
 
   private async navigateToCartPage(): Promise<void> {
     const url = this.page.url();
@@ -287,7 +306,7 @@ export class AutoCartAdder {
     accountId: string,
     taobaoId: string,
     cookies?: string,
-    options?: { headless?: boolean; onProgress?: ProgressCallback }
+    options?: { headless?: boolean; onProgress?: ProgressCallback; existingCartSkus?: Map<string, Set<string>> }
   ): Promise<AddAllSkusResult> {
     return this.runExclusive(async () => {
       const startTime = Date.now();
@@ -295,55 +314,38 @@ export class AutoCartAdder {
       console.log(`[AutoCart] Mode: ${options?.headless === false ? 'Human-visible' : 'Headless'}`);
 
       try {
-        // 使用真实 Chrome 浏览器（通过 CDP 连接）
-        // 优势：零风控风险，真实浏览器指纹
-        const realChrome = await chromeLauncher.launch();
-        console.log('[AutoCart] Using real Chrome browser via CDP');
-
-        // 使用用户真实 Chrome 的浏览器指纹，不覆盖 UserAgent
-        this.context = await realChrome.newContext({
-          // 不设置 userAgent，保持用户 Chrome 的真实指纹
-          viewport: { width: 1920, height: 1080 }, // 增大窗口尺寸，避免SKU区域变成独立滚动容器
-          locale: 'zh-CN',
-          timezoneId: 'Asia/Shanghai',
-        });
-
-        // tsx/esbuild 在序列化 page.evaluate 回调时可能注入 __name()，需要在页面环境里兜底
-        await this.context
-          .addInitScript(`globalThis.__name = (fn, _name) => fn; var __name = globalThis.__name;`)
-          .catch(() => {});
-
-        // 注入cookies
-        if (cookies) {
-          try {
-            const { decryptCookies } = await import('../utils/helpers.js');
-            const cookieList = JSON.parse(decryptCookies(cookies));
-            await this.context.addCookies(cookieList);
-            console.log('[AutoCart] Cookies injected successfully');
-          } catch (e) {
-            console.error(`[AutoCart] Failed to inject cookies:`, e);
-          }
-        }
-
-        this.page = await this.context.newPage();
-        this.humanSimulator = new HumanSimulator(this.page);
-        this.skuParser = new SkuParser(this.page);
+        // 复用或创建浏览器实例
+        await this.ensureBrowser(accountId, cookies);
 
         // 阶段1：打开购物车预检查已存在的SKU
-        if (options?.onProgress) {
-          options.onProgress(
-            { total: 0, current: 0, success: 0, failed: 0 },
-            '【阶段1/5】打开购物车，预检查已存在的SKU...'
-          );
-        }
-        await this.navigateToCartPage();
-        const existedSkuProps = await this.collectCartSkuPropertiesForTaobaoId(taobaoId);
-        console.log(`[AutoCart] Cart precheck: taobaoId=${taobaoId} existedSkus=${existedSkuProps.size}`);
-        if (options?.onProgress) {
-          options.onProgress(
-            { total: 0, current: 0, success: 0, failed: 0 },
-            `【阶段1/5】购物车预检查完成，已存在 ${existedSkuProps.size} 个SKU`
-          );
+        // 如果批量模式已经预先抓取过购物车，则直接使用传入的数据
+        let existedSkuProps: Set<string>;
+        if (options?.existingCartSkus?.has(taobaoId)) {
+          existedSkuProps = options.existingCartSkus.get(taobaoId)!;
+          console.log(`[AutoCart] Using pre-fetched cart data: taobaoId=${taobaoId} existedSkus=${existedSkuProps.size}`);
+          if (options?.onProgress) {
+            options.onProgress(
+              { total: 0, current: 0, success: 0, failed: 0 },
+              `【阶段1/5】使用预抓取的购物车数据，已存在 ${existedSkuProps.size} 个SKU`
+            );
+          }
+          // 直接跳到商品页，不需要先打开购物车
+        } else {
+          if (options?.onProgress) {
+            options.onProgress(
+              { total: 0, current: 0, success: 0, failed: 0 },
+              '【阶段1/5】打开购物车，预检查已存在的SKU...'
+            );
+          }
+          await this.navigateToCartPage();
+          existedSkuProps = await this.collectCartSkuPropertiesForTaobaoId(taobaoId);
+          console.log(`[AutoCart] Cart precheck: taobaoId=${taobaoId} existedSkus=${existedSkuProps.size}`);
+          if (options?.onProgress) {
+            options.onProgress(
+              { total: 0, current: 0, success: 0, failed: 0 },
+              `【阶段1/5】购物车预检查完成，已存在 ${existedSkuProps.size} 个SKU`
+            );
+          }
         }
 
         // 阶段2：打开商品详情页

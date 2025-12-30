@@ -1,11 +1,10 @@
 import { Page } from 'playwright';
 import { PrismaClient } from '@prisma/client';
-import { chromeLauncher } from './chromeLauncher.js';
+import { sharedBrowserManager } from './sharedBrowserManager.js';
 import { HumanSimulator, randomDelay } from './humanSimulator.js';
 import { notificationService } from './notification.js';
 import { frontendPush } from './frontendPush.js';
 import { calculatePriceDrop } from '../utils/helpers.js';
-import { decryptCookies } from '../utils/helpers.js';
 
 const prisma = new PrismaClient();
 
@@ -32,11 +31,6 @@ export interface CartScrapeResult {
 
 export class CartScraper {
   private readonly keepOpen = /^(1|true)$/i.test(String(process.env.CART_SCRAPER_KEEP_OPEN ?? 'true'));
-  private readonly sessionTtlMs = parseInt(process.env.CART_SCRAPER_SESSION_TTL_MS || '900000', 10); // 15min
-  private sessions = new Map<
-    string,
-    { context: any; page: Page; human: HumanSimulator; cookieSig: string; lastUsedAt: number }
-  >();
   private mutex: Promise<void> = Promise.resolve();
 
   private async runExclusive<T>(fn: () => Promise<T>): Promise<T> {
@@ -51,63 +45,23 @@ export class CartScraper {
     }
   }
 
-  private parseCookies(input?: string): any[] | null {
-    if (!input) return null;
-
-    try {
-      const parsed = JSON.parse(input);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-    } catch {
-      // continue
-    }
-
-    try {
-      const decrypted = decryptCookies(input);
-      const parsed = JSON.parse(decrypted);
-      return Array.isArray(parsed) ? parsed : null;
-    } catch {
-      return null;
-    }
-  }
-
-  private cookieSignature(input?: string): string {
-    if (!input) return '';
-    const s = String(input);
-    return `${s.length}:${s.slice(0, 64)}`;
-  }
-
-  private async disposeSession(accountId: string, reason: string): Promise<void> {
-    const session = this.sessions.get(accountId);
-    if (!session) return;
-    this.sessions.delete(accountId);
-
-    try {
-      await session.page.close().catch(() => {});
-    } catch {}
-    try {
-      await session.context.close().catch(() => {});
-    } catch {}
-
-    console.log(`[CartScraper] Session closed account=${accountId} reason=${reason}`);
-  }
-
-  private async closeIdleSessions(): Promise<void> {
-    if (this.keepOpen) return;
-    if (!Number.isFinite(this.sessionTtlMs) || this.sessionTtlMs <= 0) return;
-    const now = Date.now();
-    for (const [accountId, session] of this.sessions.entries()) {
-      if (now - session.lastUsedAt > this.sessionTtlMs) {
-        await this.disposeSession(accountId, 'idle_ttl');
-      }
-    }
-  }
-
   private isFatalSessionError(error: unknown): boolean {
     const msg = error instanceof Error ? error.message : String(error ?? '');
     return (
       /Target closed|has been closed|Browser has been closed|Session closed|Connection closed/i.test(msg) ||
       /Navigation failed because page crashed/i.test(msg)
     );
+  }
+
+  private async getOrCreateSession(accountId: string, cookies?: string): Promise<{
+    context: any;
+    page: Page;
+    human: HumanSimulator;
+  }> {
+    // 使用共享浏览器管理器
+    const session = await sharedBrowserManager.getOrCreateSession(accountId, cookies);
+    console.log(`[CartScraper] Using shared browser session for account=${accountId}`);
+    return session;
   }
 
   private async checkAndNotify(
@@ -151,76 +105,6 @@ export class CartScraper {
     } catch (error) {
       console.error('[CartScraper] Notification error:', error);
     }
-  }
-
-  private async getOrCreateSession(accountId: string, cookies?: string): Promise<{
-    context: any;
-    page: Page;
-    human: HumanSimulator;
-    cookieSig: string;
-    lastUsedAt: number;
-  }> {
-    const sig = this.cookieSignature(cookies);
-    const existing = this.sessions.get(accountId);
-
-    if (existing) {
-      // 检查 page 是否仍然有效
-      let pageValid = false;
-      try {
-        pageValid = !existing.page.isClosed();
-        // 额外验证：尝试获取 URL
-        if (pageValid) {
-          existing.page.url();
-        }
-      } catch {
-        pageValid = false;
-      }
-
-      if (!pageValid) {
-        await this.disposeSession(accountId, 'page_closed');
-      } else if (sig && existing.cookieSig && sig !== existing.cookieSig) {
-        // cookies 发生变化：重建 session，避免混乱
-        await this.disposeSession(accountId, 'cookies_changed');
-      } else {
-        existing.lastUsedAt = Date.now();
-        console.log(`[CartScraper] Reusing existing session for account=${accountId}`);
-        return existing;
-      }
-    }
-
-    const realChrome = await chromeLauncher.launch();
-    console.log('[CartScraper] Using real Chrome browser via CDP');
-
-    // 使用用户真实 Chrome 的浏览器指纹，不覆盖 UserAgent
-    const context = await realChrome.newContext({
-      // 不设置 userAgent，保持用户 Chrome 的真实指纹
-      viewport: { width: 1920, height: 1080 },
-      locale: 'zh-CN',
-      timezoneId: 'Asia/Shanghai',
-    });
-
-    await context
-      .addInitScript(`globalThis.__name = (fn, _name) => fn; var __name = globalThis.__name;`)
-      .catch(() => {});
-
-    const cookieArray = this.parseCookies(cookies);
-    if (cookieArray && cookieArray.length > 0) {
-      await context.addCookies(cookieArray).catch((e: any) => {
-        console.warn('[CartScraper] Failed to inject cookies:', e);
-      });
-    }
-
-    const page = await context.newPage();
-    if (!page) throw new Error('Failed to create page');
-    const human = new HumanSimulator(page);
-
-    // 首次建立时就打开购物车页；后续轮询将用 reload 刷新（更像真人停留在页面上）
-    await human.navigateAsHuman('https://cart.taobao.com/cart.htm');
-    await page.waitForTimeout(randomDelay(1200, 2200));
-
-    const session = { context, page, human, cookieSig: sig, lastUsedAt: Date.now() };
-    this.sessions.set(accountId, session);
-    return session;
   }
 
   private async makeCartPageMoreHuman(page: Page, human: HumanSimulator): Promise<void> {
@@ -288,13 +172,13 @@ export class CartScraper {
 
           const fatal = this.isFatalSessionError(error);
           if (fatal) {
-            await this.disposeSession(accountId, 'fatal_error');
+            await sharedBrowserManager.disposeSession(accountId);
             continue;
           }
 
           // 非致命错误：keepOpen 模式下保留 session（下次轮询继续用），否则释放
           if (!this.keepOpen) {
-            await this.disposeSession(accountId, 'scrape_error');
+            await sharedBrowserManager.disposeSession(accountId);
           }
 
           break;
@@ -573,7 +457,6 @@ export class CartScraper {
     }
 
     console.log(`[CartScraper] Update complete: updated=${updated}, missing=${missing}, failed=${failed}`);
-    await this.closeIdleSessions().catch(() => {});
     return { updated, failed, missing };
   }
 

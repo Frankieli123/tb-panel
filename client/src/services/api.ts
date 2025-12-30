@@ -115,6 +115,29 @@ export const api = {
       body: JSON.stringify({ url, accountId }),
     }),
 
+  addBatchCartModeProducts: (urls: string[], accountId: string) =>
+    request<{ batchJobId: string; accepted: number; rejected: number }>('/products/batch-add-cart-mode', {
+      method: 'POST',
+      headers: csrfToken ? { 'x-csrf-token': csrfToken } : undefined,
+      body: JSON.stringify({ urls, accountId }),
+    }),
+
+  getBatchAddProgress: (batchJobId: string) =>
+    request<{
+      status: 'running' | 'completed' | 'failed' | 'partial';
+      progress: { totalItems: number; currentIndex: number; completedItems: number; successItems: number; failedItems: number };
+      items: Array<{
+        index: number;
+        url: string;
+        taobaoId?: string;
+        status: 'pending' | 'running' | 'completed' | 'failed';
+        progress?: { total: number; current: number; success: number; failed: number };
+        logs: string[];
+        error?: string;
+        productId?: string;
+      }>;
+    }>(`/products/batch-add-progress/${batchJobId}`),
+
   getAddProgress: (jobId: string) =>
     request<{
       status: 'pending' | 'running' | 'completed' | 'failed';

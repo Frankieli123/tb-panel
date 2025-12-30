@@ -235,8 +235,8 @@ export default function Logs() {
                     {log.level}
                   </span>
                   <span className="text-purple-400 flex-shrink-0">[{log.source}]</span>
-                  <span className={`${getLevelColor(log.level)} break-all`}>
-                    {log.message.replace(/^\[[^\]]+\]\s*/, '')}
+                  <span className={`${getLevelColor(log.level)} break-all whitespace-pre-wrap`}>
+                    {log.message}
                   </span>
                 </div>
               ))}

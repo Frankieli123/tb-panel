@@ -4,7 +4,7 @@ import { X, ChevronDown, ChevronUp, Loader2, CheckCircle2, XCircle, Minimize2 } 
 export interface TaskProgress {
   jobId: string;
   title: string;
-  status: 'pending' | 'running' | 'completed' | 'failed';
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'partial';
   progress: {
     total: number;
     current: number;
@@ -13,6 +13,11 @@ export interface TaskProgress {
   };
   logs: string[];
   startedAt: number;
+  isBatch?: boolean;
+  batchItems?: Array<{
+    taobaoId?: string;
+    status: 'pending' | 'running' | 'completed' | 'failed';
+  }>;
 }
 
 interface TaskProgressPanelProps {
@@ -43,6 +48,8 @@ export default function TaskProgressPanel({ tasks, onDismiss }: TaskProgressPane
         return <Loader2 className="w-4 h-4 animate-spin text-orange-500" />;
       case 'completed':
         return <CheckCircle2 className="w-4 h-4 text-green-500" />;
+      case 'partial':
+        return <CheckCircle2 className="w-4 h-4 text-yellow-500" />;
       case 'failed':
         return <XCircle className="w-4 h-4 text-red-500" />;
     }
@@ -53,9 +60,11 @@ export default function TaskProgressPanel({ tasks, onDismiss }: TaskProgressPane
       case 'pending':
         return '等待中';
       case 'running':
-        return '进行中';
+        return '执行中';
       case 'completed':
         return '已完成';
+      case 'partial':
+        return '部分完成';
       case 'failed':
         return '失败';
     }
@@ -175,10 +184,15 @@ export default function TaskProgressPanel({ tasks, onDismiss }: TaskProgressPane
                       </span>
                     </div>
 
-                    {/* 最新日志和成功/失败统计 - 折叠状态也显示 */}
-                    {task.logs.length > 0 && (
+                    {/* 最新日志 - 批量任务只显示简洁进度，非批量任务显示日志 */}
+                    {!task.isBatch && task.logs.length > 0 && (
                       <p className="text-xs text-gray-600 mt-2 truncate">
                         {task.logs[task.logs.length - 1]}
+                      </p>
+                    )}
+                    {task.isBatch && task.status === 'running' && (
+                      <p className="text-xs text-gray-600 mt-2">
+                        正在处理第 {task.progress.current + 1} 个商品...
                       </p>
                     )}
                     {(task.progress.success > 0 || task.progress.failed > 0) && (
