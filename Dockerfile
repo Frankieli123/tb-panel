@@ -62,8 +62,9 @@ COPY --from=backend-builder /app/server/dist ./dist/
 # 复制前端构建产物到 nginx
 COPY --from=frontend-builder /app/client/dist /usr/share/nginx/html
 
-# Nginx 配置（修改为 localhost 后端）
-RUN cat > /etc/nginx/http.d/default.conf << 'EOF'
+# 创建 nginx 配置目录并写入配置
+RUN mkdir -p /etc/nginx/http.d /etc/nginx/conf.d && \
+    cat > /etc/nginx/http.d/default.conf << 'EOF'
 server {
     listen 80;
     server_name localhost;
@@ -75,6 +76,12 @@ server {
 
     location / {
         try_files $uri $uri/ /index.html;
+    }
+
+    location /health {
+        proxy_pass http://127.0.0.1:4000/health;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
     }
 
     location /api/ {
@@ -103,6 +110,9 @@ server {
 }
 EOF
 
+# 同时复制到 conf.d 目录（兼容不同 nginx 版本）
+RUN cp /etc/nginx/http.d/default.conf /etc/nginx/conf.d/default.conf 2>/dev/null || true
+
 # Supervisor 配置
 RUN cat > /etc/supervisord.conf << 'EOF'
 [supervisord]
@@ -122,8 +132,11 @@ stderr_logfile_maxbytes=0
 [program:backend]
 command=node /app/server/dist/index.js
 directory=/app/server
+environment=NODE_ENV="production",PORT="4000",HOST="0.0.0.0"
 autostart=true
 autorestart=true
+startsecs=5
+startretries=3
 stdout_logfile=/dev/stdout
 stdout_logfile_maxbytes=0
 stderr_logfile=/dev/stderr
@@ -150,9 +163,9 @@ ENV HOST=0.0.0.0
 # 暴露端口（nginx 80，后端 4000 仅内部使用）
 EXPOSE 80
 
-# 健康检查
+# 健康检查（直接检查后端）
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost/api/health || exit 1
+    CMD wget --no-verbose --tries=1 --spider http://localhost:4000/health || exit 1
 
 WORKDIR /app
 
