@@ -1,0 +1,30 @@
+# 依赖和构建产物
+node_modules/
+**/node_modules/
+**/dist/
+
+# Git
+.git/
+.gitignore
+
+# 日志
+*.log
+_tmp_*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 环境文件（根据需要可以保留）
+# .env
+# .env.*
+
+# 其他
+.claude/
+.serena/
+.windsurf/
+plan/
+*.md
+!README.md
