@@ -40,8 +40,10 @@ RUN npm run build
 # ==========================================
 FROM node:20-alpine AS production
 
-# 安装 nginx 和 supervisor
-RUN apk add --no-cache nginx supervisor
+# 安装 nginx、supervisor 和 OpenSSL 兼容库（Prisma 需要）
+RUN apk add --no-cache nginx supervisor && \
+    apk add --no-cache openssl1.1-compat 2>/dev/null || \
+    apk add --no-cache openssl
 
 WORKDIR /app
 
