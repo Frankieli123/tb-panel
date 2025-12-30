@@ -8,6 +8,9 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
+# Prisma 在 Alpine 需要 `openssl` 可执行文件用于识别 OpenSSL 3.x
+RUN apk add --no-cache openssl
+
 # 安装构建依赖
 COPY package*.json ./
 COPY prisma ./prisma/
@@ -29,6 +32,9 @@ RUN npm run build
 FROM node:20-alpine AS production
 
 WORKDIR /app
+
+# Prisma 在 Alpine 需要 `openssl` 可执行文件用于识别 OpenSSL 3.x
+RUN apk add --no-cache openssl
 
 # 安装生产依赖
 COPY package*.json ./
@@ -61,7 +67,7 @@ EXPOSE 4000
 
 # 健康检查
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:4000/health || exit 1
+    CMD wget -q --spider http://localhost:4000/health || exit 1
 
 # 启动命令
 CMD ["/app/start.sh"]

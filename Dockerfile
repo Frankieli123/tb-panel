@@ -24,6 +24,8 @@ FROM node:20-alpine AS backend-builder
 
 WORKDIR /app/server
 
+RUN apk add --no-cache openssl
+
 COPY server/package*.json ./
 COPY server/prisma ./prisma/
 
@@ -40,8 +42,8 @@ RUN npm run build
 # ==========================================
 FROM node:20-alpine AS production
 
-# 安装 nginx、supervisor（Alpine 3.x 已内置 OpenSSL 3）
-RUN apk add --no-cache nginx supervisor
+# 安装 nginx、supervisor，并提供 `openssl` 可执行文件供 Prisma 检测 OpenSSL 版本
+RUN apk add --no-cache nginx supervisor openssl
 
 WORKDIR /app
 
@@ -61,8 +63,9 @@ COPY --from=backend-builder /app/server/dist ./dist/
 COPY --from=frontend-builder /app/client/dist /usr/share/nginx/html
 
 # 创建 nginx 配置目录并写入配置
-RUN mkdir -p /etc/nginx/http.d /etc/nginx/conf.d && \
-    cat > /etc/nginx/http.d/default.conf << 'EOF'
+RUN mkdir -p /etc/nginx/http.d /etc/nginx/conf.d
+
+COPY <<'EOF' /etc/nginx/http.d/default.conf
 server {
     listen 80;
     server_name localhost;
@@ -112,7 +115,7 @@ EOF
 RUN cp /etc/nginx/http.d/default.conf /etc/nginx/conf.d/default.conf 2>/dev/null || true
 
 # Supervisor 配置
-RUN cat > /etc/supervisord.conf << 'EOF'
+COPY <<'EOF' /etc/supervisord.conf
 [supervisord]
 nodaemon=true
 logfile=/var/log/supervisord.log
@@ -142,7 +145,7 @@ stderr_logfile_maxbytes=0
 EOF
 
 # 启动脚本
-RUN cat > /app/start.sh << 'EOF'
+COPY <<'EOF' /app/start.sh
 #!/bin/sh
 cd /app/server
 echo "Running database migrations..."
@@ -163,7 +166,7 @@ EXPOSE 80
 
 # 健康检查（直接检查后端）
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:4000/health || exit 1
+    CMD wget -q --spider http://localhost:4000/health || exit 1
 
 WORKDIR /app
 
