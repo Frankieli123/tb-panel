@@ -62,8 +62,8 @@ COPY --from=backend-builder /app/server/dist ./dist/
 # 复制前端构建产物到 nginx
 COPY --from=frontend-builder /app/client/dist /usr/share/nginx/html
 
-# 创建 nginx 配置目录并写入配置
-RUN mkdir -p /etc/nginx/http.d /etc/nginx/conf.d
+# 创建 nginx 配置目录并写入配置（Alpine nginx: http.d 在 http{} 内被 include）
+RUN mkdir -p /etc/nginx/http.d
 
 COPY <<'EOF' /etc/nginx/http.d/default.conf
 server {
@@ -111,8 +111,8 @@ server {
 }
 EOF
 
-# 同时复制到 conf.d 目录（兼容不同 nginx 版本）
-RUN cp /etc/nginx/http.d/default.conf /etc/nginx/conf.d/default.conf 2>/dev/null || true
+# Alpine 的 `/etc/nginx/conf.d/*.conf` 会在 root context 被 include（不能放 `server {}`），确保目录为空
+RUN rm -f /etc/nginx/conf.d/default.conf 2>/dev/null || true
 
 # Supervisor 配置
 COPY <<'EOF' /etc/supervisord.conf
