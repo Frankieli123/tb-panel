@@ -3,63 +3,103 @@ import path from 'path';
 
 dotenv.config();
 
+function cleanEnv(value: string | undefined): string {
+  if (!value) return '';
+  const trimmed = value.trim();
+  if (trimmed.length >= 2) {
+    const first = trimmed[0];
+    const last = trimmed[trimmed.length - 1];
+    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+      return trimmed.slice(1, -1);
+    }
+  }
+  return trimmed;
+}
+
+function normalizedEnv(name: string): string {
+  const raw = process.env[name];
+  const cleaned = cleanEnv(raw);
+  if (raw !== undefined && cleaned !== raw) {
+    process.env[name] = cleaned;
+  }
+  return cleaned;
+}
+
+function envString(name: string, fallback = ''): string {
+  return normalizedEnv(name) || fallback;
+}
+
+function envInt(name: string, fallback: number): number {
+  const raw = normalizedEnv(name);
+  if (!raw) return fallback;
+  const parsed = parseInt(raw, 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function envBool(name: string, fallback: boolean): boolean {
+  const raw = normalizedEnv(name);
+  if (!raw) return fallback;
+  if (raw === 'true' || raw === '1') return true;
+  if (raw === 'false' || raw === '0') return false;
+  return fallback;
+}
+
+const nodeEnv = envString('NODE_ENV', 'development');
+
 export const config = {
-  env: process.env.NODE_ENV || 'development',
-  host: process.env.HOST || '127.0.0.1',
-  port: parseInt(process.env.PORT || '4000', 10),
-  apiKey: process.env.API_KEY || '', // 可选的API密钥认证
+  env: nodeEnv,
+  host: envString('HOST', '127.0.0.1'),
+  port: envInt('PORT', 4000),
+  apiKey: envString('API_KEY'), // 可选的API密钥认证
   agent: {
     // Agent/WebWorker 连接到中心后端时使用的鉴权 token（优先于 API_KEY）
-    token: process.env.AGENT_TOKEN || '',
+    token: envString('AGENT_TOKEN'),
   },
 
   cors: {
-    origins: (process.env.CORS_ORIGINS || 'http://localhost:5180')
+    origins: envString('CORS_ORIGINS', 'http://localhost:5180')
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean),
   },
 
   auth: {
-    bootstrapInviteCode: process.env.BOOTSTRAP_INVITE_CODE || '',
-    cookieDomain: process.env.COOKIE_DOMAIN || '',
-    cookieSameSite: ((process.env.COOKIE_SAMESITE ||
-      (process.env.NODE_ENV === 'production' ? 'none' : 'lax')) as 'lax' | 'none'),
-    cookieSecure: process.env.COOKIE_SECURE
-      ? process.env.COOKIE_SECURE === 'true'
-      : process.env.NODE_ENV === 'production',
-    trustProxy: process.env.TRUST_PROXY === 'true',
+    bootstrapInviteCode: envString('BOOTSTRAP_INVITE_CODE'),
+    cookieDomain: envString('COOKIE_DOMAIN'),
+    cookieSameSite: (envString('COOKIE_SAMESITE', nodeEnv === 'production' ? 'none' : 'lax') as 'lax' | 'none'),
+    cookieSecure: envBool('COOKIE_SECURE', nodeEnv === 'production'),
+    trustProxy: envBool('TRUST_PROXY', false),
     sessionTtlMs:
-      parseInt(process.env.SESSION_TTL_DAYS || '1', 10) * 24 * 60 * 60 * 1000,
+      envInt('SESSION_TTL_DAYS', 1) * 24 * 60 * 60 * 1000,
     rememberMeTtlMs:
-      parseInt(process.env.REMEMBER_ME_TTL_DAYS || '30', 10) * 24 * 60 * 60 * 1000,
+      envInt('REMEMBER_ME_TTL_DAYS', 30) * 24 * 60 * 60 * 1000,
   },
 
   database: {
-    url: process.env.DATABASE_URL!,
+    url: envString('DATABASE_URL'),
   },
 
   redis: {
-    url: process.env.REDIS_URL!,
+    url: envString('REDIS_URL'),
   },
 
   smtp: {
-    host: process.env.SMTP_HOST || 'smtp.qq.com',
-    port: parseInt(process.env.SMTP_PORT || '465', 10),
-    user: process.env.SMTP_USER || '',
-    pass: process.env.SMTP_PASS || '',
-    from: process.env.SMTP_FROM || '',
+    host: envString('SMTP_HOST', 'smtp.qq.com'),
+    port: envInt('SMTP_PORT', 465),
+    user: envString('SMTP_USER'),
+    pass: envString('SMTP_PASS'),
+    from: envString('SMTP_FROM'),
   },
 
   wechat: {
-    webhookUrl: process.env.WECHAT_WEBHOOK_URL || '',
+    webhookUrl: envString('WECHAT_WEBHOOK_URL'),
   },
 
   scraper: {
-    minIntervalMs: parseInt(process.env.SCRAPER_MIN_INTERVAL_MS || '60000', 10),
-    maxIntervalMs: parseInt(process.env.SCRAPER_MAX_INTERVAL_MS || '180000', 10),
-    pageTimeoutMs: parseInt(process.env.SCRAPER_PAGE_TIMEOUT_MS || '30000', 10),
-    maxConcurrentAccounts: parseInt(process.env.MAX_CONCURRENT_ACCOUNTS || '3', 10),
+    minIntervalMs: envInt('SCRAPER_MIN_INTERVAL_MS', 60000),
+    maxIntervalMs: envInt('SCRAPER_MAX_INTERVAL_MS', 180000),
+    pageTimeoutMs: envInt('SCRAPER_PAGE_TIMEOUT_MS', 30000),
+    maxConcurrentAccounts: envInt('MAX_CONCURRENT_ACCOUNTS', 3),
     // 浏览器数据存储目录
     userDataDir: path.join(process.cwd(), 'browser-data'),
   },

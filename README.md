@@ -20,6 +20,21 @@
 
 ## 快速开始
 
+### Docker Compose 一键启动（推荐）
+
+1. 配置后端环境变量：`server/.env`（参考 `server/.env.example`）
+2. 启动：
+   ```bash
+   docker compose up -d --build
+   ```
+3. 访问：默认 `http://localhost:8080`（可通过 `TAOBAO_WEB_PORT=80 docker compose up -d --build` 修改）
+
+### 根目录 Dockerfile 单容器部署（Dokploy/Traefik）
+
+- 对外服务端口是 `80`（Nginx），不要把入口端口配置成 `4000`
+- 环境变量建议写成 `KEY=value`（不要包含外层引号）
+- 反向代理/HTTPS 场景建议设置 `TRUST_PROXY=true`
+
 ### 1. 配置后端（远端数据库/Redis）
 
 ```bash
@@ -41,7 +56,7 @@ npm install
 npm run dev
 ```
 
-访问 http://localhost:5173
+访问 http://localhost:5180
 
 ### 4. 添加淘宝账号
 
@@ -70,7 +85,7 @@ DATABASE_URL="postgresql://postgres:<password>@110.42.105.188:5212/postgres"
 REDIS_URL="redis://default:<password>@110.42.105.188:6896"
 
 # 服务器端口
-PORT=3000
+PORT=4000
 
 # 邮件通知 (QQ邮箱为例)
 SMTP_HOST=smtp.qq.com

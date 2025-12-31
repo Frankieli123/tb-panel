@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # 后端 API 服务
   server:
@@ -9,23 +7,15 @@ services:
     container_name: taobao-server
     restart: unless-stopped
     ports:
-      - "4000:4000"
+      - "${TAOBAO_SERVER_PORT:-4000}:4000"
+    env_file:
+      - ./server/.env
     environment:
-      - NODE_ENV=production
-      - PORT=4000
-      - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=${REDIS_URL}
-      - API_KEY=${API_KEY:-}
-      - AGENT_TOKEN=${AGENT_TOKEN:-}
-      - CORS_ORIGINS=${CORS_ORIGINS:-*}
-      - SMTP_HOST=${SMTP_HOST:-}
-      - SMTP_PORT=${SMTP_PORT:-465}
-      - SMTP_USER=${SMTP_USER:-}
-      - SMTP_PASS=${SMTP_PASS:-}
-      - SMTP_FROM=${SMTP_FROM:-}
-      - WECHAT_WEBHOOK_URL=${WECHAT_WEBHOOK_URL:-}
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 4000
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4000/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:4000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -41,9 +31,10 @@ services:
     container_name: taobao-client
     restart: unless-stopped
     ports:
-      - "80:80"
+      - "${TAOBAO_WEB_PORT:-8080}:80"
     depends_on:
-      - server
+      server:
+        condition: service_healthy
     networks:
       - taobao-network
 

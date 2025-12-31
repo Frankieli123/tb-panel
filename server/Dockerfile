@@ -48,8 +48,31 @@ RUN npm ci --omit=dev && \
 COPY --from=builder /app/dist ./dist/
 
 # 启动脚本（先运行迁移再启动服务）
-COPY <<EOF /app/start.sh
+COPY <<'EOF' /app/start.sh
 #!/bin/sh
+strip_outer_quotes() {
+  v="$1"
+  if [ "${v#\"}" != "$v" ] && [ "${v%\"}" != "$v" ]; then
+    v="${v#\"}"
+    v="${v%\"}"
+  fi
+  if [ "${v#\'}" != "$v" ] && [ "${v%\'}" != "$v" ]; then
+    v="${v#\'}"
+    v="${v%\'}"
+  fi
+  printf '%s' "$v"
+}
+
+if [ -n "${DATABASE_URL:-}" ]; then
+  DATABASE_URL="$(strip_outer_quotes "$DATABASE_URL")"
+  export DATABASE_URL
+fi
+
+if [ -n "${REDIS_URL:-}" ]; then
+  REDIS_URL="$(strip_outer_quotes "$REDIS_URL")"
+  export REDIS_URL
+fi
+
 echo "Running database migrations..."
 npx prisma migrate deploy
 echo "Starting server..."
@@ -67,7 +90,7 @@ EXPOSE 4000
 
 # 健康检查
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD wget -q --spider http://localhost:4000/health || exit 1
+    CMD wget -q --spider http://127.0.0.1:4000/health || exit 1
 
 # 启动命令
 CMD ["/app/start.sh"]
