@@ -1,6 +1,7 @@
 import { spawn, ChildProcess } from 'child_process';
 import { existsSync } from 'fs';
-import { mkdir } from 'fs/promises';
+import { mkdir, rm, writeFile } from 'fs/promises';
+import os from 'os';
 import path from 'path';
 import { chromium, Browser } from 'playwright';
 
@@ -13,9 +14,147 @@ export class ChromeLauncher {
   private browser: Browser | null = null;
   private readonly debugPort = 9222;
   private readonly userDataDir: string;
+  private readonly autoInstallChrome: boolean;
+  private installingChrome: Promise<string | null> | null = null;
 
   constructor() {
-    this.userDataDir = path.join(process.cwd(), 'data', 'chrome-automation');
+    this.userDataDir = this.resolveUserDataDir();
+    this.autoInstallChrome = /^(1|true)$/i.test(String(process.env.CHROME_AUTO_INSTALL ?? ''));
+  }
+
+  private resolveUserDataDir(): string {
+    const explicit = String(process.env.CHROME_USER_DATA_DIR || '').trim();
+    if (explicit) return explicit;
+
+    const agentHome = String(process.env.TAOBAO_AGENT_HOME || '').trim();
+    if (agentHome) return path.join(agentHome, 'chrome-profile');
+
+    return path.join(process.cwd(), 'data', 'chrome-automation');
+  }
+
+  private getAgentStoreDir(): string {
+    const explicit = String(process.env.TAOBAO_AGENT_HOME || '').trim();
+    if (explicit) return explicit;
+
+    const base =
+      String(process.env.PROGRAMDATA || '').trim() ||
+      String(process.env.APPDATA || '').trim() ||
+      os.homedir();
+
+    return path.join(base, 'TaobaoAgent');
+  }
+
+  private getChromeForTestingDir(): string {
+    const explicit = String(process.env.CHROME_FOR_TESTING_DIR || '').trim();
+    if (explicit) return explicit;
+    return path.join(this.getAgentStoreDir(), 'chrome-for-testing');
+  }
+
+  private getChromeForTestingExePath(dir: string): string {
+    // Currently only auto-install on Windows (agent MSI use-case)
+    return path.join(dir, 'chrome-win64', 'chrome.exe');
+  }
+
+  private escapePsSingleQuoted(input: string): string {
+    return input.replace(/'/g, "''");
+  }
+
+  private async expandZipWithPowerShell(zipPath: string, destDir: string): Promise<void> {
+    const z = this.escapePsSingleQuoted(zipPath);
+    const d = this.escapePsSingleQuoted(destDir);
+
+    await new Promise<void>((resolve, reject) => {
+      const ps = spawn(
+        'powershell',
+        [
+          '-NoProfile',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-Command',
+          `Expand-Archive -LiteralPath '${z}' -DestinationPath '${d}' -Force`,
+        ],
+        { stdio: 'ignore' }
+      );
+
+      ps.on('error', reject);
+      ps.on('exit', (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`Expand-Archive failed (exit ${code ?? 'unknown'})`));
+      });
+    });
+  }
+
+  private async resolveChromeForTestingDownloadUrl(): Promise<string> {
+    const url = 'https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json';
+    const res = await fetch(url, { redirect: 'follow' });
+    if (!res.ok) {
+      throw new Error(`Failed to fetch Chrome for Testing metadata: HTTP ${res.status}`);
+    }
+
+    const data: any = await res.json();
+    const downloads = data?.channels?.Stable?.downloads?.chrome;
+    const found = Array.isArray(downloads) ? downloads.find((d: any) => d?.platform === 'win64') : null;
+    const dlUrl = found?.url ? String(found.url) : '';
+    if (!dlUrl) {
+      throw new Error('Chrome for Testing download URL not found (Stable/win64)');
+    }
+
+    return dlUrl;
+  }
+
+  private async downloadToFile(url: string, filePath: string): Promise<void> {
+    const res = await fetch(url, { redirect: 'follow' });
+    if (!res.ok) {
+      throw new Error(`Download failed: HTTP ${res.status}`);
+    }
+    const buf = Buffer.from(await res.arrayBuffer());
+    await writeFile(filePath, buf);
+  }
+
+  private async ensureChromeForTestingInstalled(): Promise<string | null> {
+    if (process.platform !== 'win32') return null;
+
+    const dir = this.getChromeForTestingDir();
+    const exePath = this.getChromeForTestingExePath(dir);
+    if (existsSync(exePath)) return exePath;
+
+    if (this.installingChrome) return this.installingChrome;
+
+    this.installingChrome = (async () => {
+      await mkdir(dir, { recursive: true });
+
+      const dlUrl = await this.resolveChromeForTestingDownloadUrl();
+      console.log('[ChromeLauncher] Chrome not found. Auto-installing Chrome for Testing...');
+      console.log(`[ChromeLauncher] Downloading: ${dlUrl}`);
+
+      const zipPath = path.join(dir, 'chrome-win64.zip');
+      const tmpZipPath = `${zipPath}.tmp`;
+      const extractedDir = path.join(dir, 'chrome-win64');
+
+      await rm(tmpZipPath, { force: true }).catch(() => {});
+      await rm(zipPath, { force: true }).catch(() => {});
+      await rm(extractedDir, { recursive: true, force: true }).catch(() => {});
+
+      await this.downloadToFile(dlUrl, tmpZipPath);
+      await this.expandZipWithPowerShell(tmpZipPath, dir);
+      await rm(tmpZipPath, { force: true }).catch(() => {});
+
+      if (!existsSync(exePath)) {
+        throw new Error(`Chrome for Testing install failed: ${exePath} not found`);
+      }
+
+      console.log(`[ChromeLauncher] Chrome for Testing installed at: ${exePath}`);
+      return exePath;
+    })()
+      .catch((err) => {
+        console.warn('[ChromeLauncher] Auto-install failed:', err);
+        return null;
+      })
+      .finally(() => {
+        this.installingChrome = null;
+      });
+
+    return this.installingChrome;
   }
 
   /**
@@ -55,7 +194,12 @@ export class ChromeLauncher {
     await mkdir(this.userDataDir, { recursive: true });
 
     // 检测 Chrome 安装路径
-    const chromePath = this.findChromePath();
+    let chromePath = this.findChromePath();
+
+    if (!chromePath && this.autoInstallChrome) {
+      chromePath = await this.ensureChromeForTestingInstalled();
+    }
+
     if (!chromePath) {
       throw new Error('Chrome/Chromium not found. Please install Google Chrome or Chromium.');
     }
@@ -168,6 +312,12 @@ export class ChromeLauncher {
    * 检测系统中的 Chrome 安装路径
    */
   private findChromePath(): string | null {
+    const envPath = String(process.env.CHROME_PATH || process.env.CHROME_EXECUTABLE_PATH || '').trim();
+    if (envPath && existsSync(envPath)) return envPath;
+
+    const cftExe = this.getChromeForTestingExePath(this.getChromeForTestingDir());
+    if (existsSync(cftExe)) return cftExe;
+
     const platform = process.platform;
     const possiblePaths: string[] = [];
 

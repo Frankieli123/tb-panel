@@ -121,6 +121,19 @@ MAX_CONCURRENT_ACCOUNTS=3       # 最大并发账号数
 3. 绑定账号到某个 Agent：`PUT /api/accounts/:id/agent`，body 为 `{ "agentId": "<your-agent-id>" }`
 4. 查看在线 Agent：`GET /api/agents`
 
+### Windows MSI（Agent 执行机）
+
+适用于：给执行机一键安装（内置 Node 运行时），安装后从开始菜单启动 Agent。
+
+1. 在本仓库根目录构建 MSI：
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File scripts/build-agent-msi.ps1 -Domain tb.slee.cc
+   ```
+2. 产物：`release/taobao-agent_tb.slee.cc_win-x64.msi`
+3. 执行机安装后：开始菜单 + 桌面会出现 `Start Agent` / `Pair Agent` / `Agent 状态` / `Agent 托盘`（托盘默认随开机启动）
+4. 更适合小白：首次运行若未配对，会自动打开本机状态页（`http://127.0.0.1:17880/`），直接在页面里输入配对码（PAIR_CODE）即可
+5. Chrome 自动安装：若执行机未安装 Chrome/Chromium，首次运行会自动下载 Chrome for Testing（需要联网）
+
 ## 风险提示
 
 1. **账号风险**: 请使用小号，不要使用主账号

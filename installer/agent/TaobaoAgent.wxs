@@ -1,0 +1,175 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi" xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+  <Product
+    Id="*"
+    Name="$(var.ProductName)"
+    Language="2052"
+    Codepage="936"
+    Version="$(var.ProductVersion)"
+    Manufacturer="$(var.Manufacturer)"
+    UpgradeCode="{5B6A8E50-9CF9-4EBC-8B39-74F9F6D2A6E7}"
+  >
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" Platform="x64" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version is already installed." AllowSameVersionUpgrades="yes" />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="WixShellExecTarget" Value="[INSTALLFOLDER]TaobaoAgentTray.exe" />
+
+    <CustomAction
+      Id="LaunchTray"
+      BinaryKey="WixCA"
+      DllEntry="WixShellExec"
+      Impersonate="yes"
+    />
+
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+
+    <Feature Id="MainFeature" Title="$(var.ProductName)" Level="1">
+      <ComponentGroupRef Id="AppFiles" />
+      <ComponentRef Id="StartMenuShortcuts" />
+      <ComponentRef Id="DesktopShortcuts" />
+      <ComponentRef Id="AgentDataFolderComponent" />
+      <ComponentRef Id="TrayStartupShortcut" />
+    </Feature>
+
+    <UIRef Id="WixUI_Minimal" />
+    <UIRef Id="WixUI_ErrorProgressText" />
+
+    <UI>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchTray">NOT Installed</Publish>
+    </UI>
+  </Product>
+
+  <Fragment>
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="TaobaoAgent" />
+      </Directory>
+
+      <Directory Id="CommonProgramsFolder">
+        <Directory Id="ApplicationProgramsFolder" Name="$(var.ProductName)" />
+      </Directory>
+
+      <Directory Id="CommonAppDataFolder">
+        <Directory Id="AgentDataFolder" Name="TaobaoAgent" />
+      </Directory>
+
+      <Directory Id="CommonStartupFolder" />
+
+      <Directory Id="CommonDesktopFolder" />
+    </Directory>
+  </Fragment>
+
+  <Fragment>
+    <DirectoryRef Id="AgentDataFolder">
+      <Component Id="AgentDataFolderComponent" Guid="{5B13B65E-38E7-4C18-8C28-08F4F4CF3AE7}">
+        <CreateFolder>
+          <util:PermissionEx User="Users" Domain="BUILTIN" GenericAll="yes" />
+        </CreateFolder>
+        <RegistryValue
+          Root="HKLM"
+          Key="Software\$(var.Manufacturer)\TaobaoAgent"
+          Name="dataDir"
+          Type="string"
+          Value="1"
+          KeyPath="yes"
+        />
+      </Component>
+    </DirectoryRef>
+  </Fragment>
+
+  <Fragment>
+    <DirectoryRef Id="ApplicationProgramsFolder">
+      <Component Id="StartMenuShortcuts" Guid="{A3D5741C-9ABF-4AE7-9A4F-BA9B5E0C5A28}">
+        <Shortcut
+          Id="StatusShortcut"
+          Name="Agent 状态"
+          Target="[INSTALLFOLDER]open-status.cmd"
+          WorkingDirectory="INSTALLFOLDER"
+        />
+        <Shortcut
+          Id="TrayShortcut"
+          Name="Agent 托盘"
+          Target="[INSTALLFOLDER]TaobaoAgentTray.exe"
+          WorkingDirectory="INSTALLFOLDER"
+        />
+        <Shortcut
+          Id="StartAgentShortcut"
+          Name="Start Agent"
+          Target="[INSTALLFOLDER]start-agent.cmd"
+          WorkingDirectory="INSTALLFOLDER"
+        />
+        <Shortcut
+          Id="PairAgentShortcut"
+          Name="Pair Agent"
+          Target="[INSTALLFOLDER]pair-agent.cmd"
+          WorkingDirectory="INSTALLFOLDER"
+        />
+
+        <RemoveFolder Id="ApplicationProgramsFolder" On="uninstall" />
+        <RegistryValue
+          Root="HKLM"
+          Key="Software\$(var.Manufacturer)\TaobaoAgent"
+          Name="installed"
+          Type="integer"
+          Value="1"
+          KeyPath="yes"
+        />
+      </Component>
+    </DirectoryRef>
+  </Fragment>
+
+  <Fragment>
+    <DirectoryRef Id="CommonStartupFolder">
+      <Component Id="TrayStartupShortcut" Guid="{D49CE18E-4B9F-4E9C-9CE0-3D3217A5E945}">
+        <Shortcut
+          Id="TrayStartupShortcutLink"
+          Name="$(var.ProductName)"
+          Target="[INSTALLFOLDER]TaobaoAgentTray.exe"
+          WorkingDirectory="INSTALLFOLDER"
+        />
+        <RegistryValue
+          Root="HKLM"
+          Key="Software\$(var.Manufacturer)\TaobaoAgent"
+          Name="startup"
+          Type="integer"
+          Value="1"
+          KeyPath="yes"
+        />
+      </Component>
+    </DirectoryRef>
+  </Fragment>
+
+  <Fragment>
+    <DirectoryRef Id="CommonDesktopFolder">
+      <Component Id="DesktopShortcuts" Guid="{CE6A1B7B-7F3E-4F8A-9E9D-0F8EFCA9275B}">
+        <Shortcut
+          Id="DesktopStatusShortcut"
+          Name="Taobao Agent - 状态"
+          Target="[INSTALLFOLDER]open-status.cmd"
+          WorkingDirectory="INSTALLFOLDER"
+        />
+        <Shortcut
+          Id="DesktopStartAgentShortcut"
+          Name="Taobao Agent - Start"
+          Target="[INSTALLFOLDER]start-agent.cmd"
+          WorkingDirectory="INSTALLFOLDER"
+        />
+        <Shortcut
+          Id="DesktopPairAgentShortcut"
+          Name="Taobao Agent - Pair"
+          Target="[INSTALLFOLDER]pair-agent.cmd"
+          WorkingDirectory="INSTALLFOLDER"
+        />
+        <RegistryValue
+          Root="HKLM"
+          Key="Software\$(var.Manufacturer)\TaobaoAgent"
+          Name="desktop"
+          Type="integer"
+          Value="1"
+          KeyPath="yes"
+        />
+      </Component>
+    </DirectoryRef>
+  </Fragment>
+</Wix>

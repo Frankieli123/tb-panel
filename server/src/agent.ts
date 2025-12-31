@@ -1,11 +1,13 @@
 import dotenv from 'dotenv';
 import { randomUUID } from 'crypto';
 import fs from 'fs/promises';
+import http from 'node:http';
 import os from 'os';
 import path from 'path';
 import { WebSocket } from 'ws';
 import { autoCartAdder } from './services/autoCartAdder.js';
 import { cartScraper } from './services/cartScraper.js';
+import { AGENT_STATUS_HTML } from './ui/agentStatusPage.js';
 
 dotenv.config();
 
@@ -21,6 +23,17 @@ type AgentStore = {
   agentToken?: string;
   createdAt?: string;
   updatedAt?: string;
+};
+
+type LocalStatus = {
+  connected: boolean;
+  agentId: string;
+  wsUrl: string;
+  adminUrl: string;
+  hasToken: boolean;
+  lastError: string | null;
+  statusUrl: string;
+  logs: string[];
 };
 
 function getArgValue(flag: string): string | null {
@@ -42,6 +55,11 @@ function getArgValue(flag: string): string | null {
   return null;
 }
 
+function hasFlag(flag: string): boolean {
+  const argv = process.argv;
+  return argv.includes(flag) || argv.some((a) => typeof a === 'string' && a.startsWith(`${flag}=`));
+}
+
 function required(name: string, value: string | undefined | null): string {
   const v = String(value || '').trim();
   if (!v) throw new Error(`Missing required ${name}`);
@@ -58,6 +76,10 @@ function getAgentStoreDir(): string {
     os.homedir();
 
   return path.join(base, 'TaobaoAgent');
+}
+
+function isTruthy(value: unknown): boolean {
+  return /^(1|true|yes|y|on)$/i.test(String(value ?? '').trim());
 }
 
 async function loadStoredAgentStore(): Promise<AgentStore | null> {
@@ -113,6 +135,16 @@ async function getOrCreateAgentId(): Promise<string> {
   return generated;
 }
 
+function deriveAdminUrl(wsBase: string): string {
+  const url = new URL(wsBase);
+  if (url.protocol === 'ws:') url.protocol = 'http:';
+  if (url.protocol === 'wss:') url.protocol = 'https:';
+  url.pathname = '/';
+  url.search = '';
+  url.hash = '';
+  return url.toString();
+}
+
 function deriveHttpRedeemUrl(wsBase: string): string {
   const url = new URL(wsBase);
   if (url.protocol === 'ws:') url.protocol = 'http:';
@@ -148,45 +180,218 @@ async function redeemPairCode(options: { wsBase: string; agentId: string; code: 
   return token;
 }
 
+async function ensureUiOpenedOnce(statusUrl: string): Promise<void> {
+  const dir = getAgentStoreDir();
+  const flagPath = path.join(dir, 'ui-opened.txt');
+  try {
+    await fs.access(flagPath);
+    return;
+  } catch {}
+
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(flagPath, new Date().toISOString(), 'utf-8');
+
+  const url = String(statusUrl || '').trim();
+  if (!url) return;
+
+  try {
+    if (process.platform === 'win32') {
+      const { spawn } = await import('node:child_process');
+      spawn('cmd', ['/c', 'start', '""', url], { detached: true, stdio: 'ignore' }).unref();
+      return;
+    }
+
+    const { spawn } = await import('node:child_process');
+    const opener = process.platform === 'darwin' ? 'open' : 'xdg-open';
+    spawn(opener, [url], { detached: true, stdio: 'ignore' }).unref();
+  } catch {}
+}
+
+async function startStatusServer(options: {
+  port: number;
+  logs: string[];
+  getStatus: () => LocalStatus;
+  pair: (code: string) => Promise<void>;
+}): Promise<{ port: number; url: string }> {
+  const basePort = Number.isFinite(options.port) ? options.port : 17880;
+
+  const addLog = (msg: string) => {
+    const line = `[${new Date().toISOString()}] ${msg}`;
+    options.logs.push(line);
+    if (options.logs.length > 250) options.logs.splice(0, options.logs.length - 250);
+  };
+
+  const readJsonBody = async (req: http.IncomingMessage): Promise<any> => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const raw = Buffer.concat(chunks).toString('utf-8');
+    if (!raw.trim()) return null;
+    return JSON.parse(raw);
+  };
+
+  const sendJson = (res: http.ServerResponse, status: number, payload: any) => {
+    res.statusCode = status;
+    res.setHeader('content-type', 'application/json; charset=utf-8');
+    res.setHeader('cache-control', 'no-store');
+    res.end(JSON.stringify(payload));
+  };
+
+  const server = http.createServer(async (req, res) => {
+    try {
+      const method = String(req.method || 'GET').toUpperCase();
+      const url = new URL(String(req.url || '/'), 'http://127.0.0.1');
+      const pathname = url.pathname;
+
+      if (method === 'GET' && (pathname === '/' || pathname === '/index.html')) {
+        res.statusCode = 200;
+        res.setHeader('content-type', 'text/html; charset=utf-8');
+        res.setHeader('cache-control', 'no-store');
+        res.end(AGENT_STATUS_HTML);
+        return;
+      }
+
+      if (method === 'GET' && pathname === '/api/status') {
+        sendJson(res, 200, { success: true, data: options.getStatus() });
+        return;
+      }
+
+      if (method === 'POST' && pathname === '/api/pair') {
+        const body = await readJsonBody(req);
+        const code = String(body?.code || '').trim();
+        if (!code) {
+          sendJson(res, 400, { success: false, error: 'Missing code' });
+          return;
+        }
+        await options.pair(code);
+        sendJson(res, 200, { success: true });
+        return;
+      }
+
+      sendJson(res, 404, { success: false, error: 'Not found' });
+    } catch (err: any) {
+      const msg = err?.message ? String(err.message) : String(err);
+      addLog(`Status server error: ${msg}`);
+      sendJson(res, 500, { success: false, error: msg });
+    }
+  });
+
+  const tryListen = (port: number) =>
+    new Promise<void>((resolve, reject) => {
+      const onError = (err: any) => reject(err);
+      server.once('error', onError);
+      server.listen(port, '127.0.0.1', () => {
+        server.off('error', onError);
+        resolve();
+      });
+    });
+
+  let chosenPort = basePort;
+  for (let i = 0; i <= 10; i++) {
+    try {
+      chosenPort = basePort + i;
+      await tryListen(chosenPort);
+      break;
+    } catch (err: any) {
+      const code = String(err?.code || '');
+      if (code !== 'EADDRINUSE') throw err;
+      if (i === 10) throw err;
+    }
+  }
+
+  const url = `http://127.0.0.1:${chosenPort}/`;
+  addLog(`Status UI ready: ${url}`);
+  console.log(`[Agent] Status UI: ${url}`);
+  return { port: chosenPort, url };
+}
+
 async function main(): Promise<void> {
   const agentId = await getOrCreateAgentId();
   const wsBase =
     String(process.env.AGENT_WS_URL || getArgValue('--ws') || '').trim() ||
     `ws://127.0.0.1:${process.env.PORT || '4000'}/ws/agent`;
 
+  const uiMode = isTruthy(process.env.AGENT_UI || process.env.AGENT_STATUS_UI);
+  const statusPort = Number.parseInt(String(process.env.AGENT_STATUS_PORT || '').trim(), 10);
+  const statusLogs: string[] = [];
+
+  const addLog = (msg: string) => {
+    const line = `[${new Date().toISOString()}] ${msg}`;
+    statusLogs.push(line);
+    if (statusLogs.length > 250) statusLogs.splice(0, statusLogs.length - 250);
+  };
+
   const envToken = String(process.env.AGENT_TOKEN || process.env.API_KEY || '').trim();
   const pairCode = String(process.env.AGENT_PAIR_CODE || getArgValue('--pair') || '').trim();
+  const pairOnly = /^(1|true)$/i.test(String(process.env.AGENT_PAIR_ONLY || '').trim()) || hasFlag('--pair-only');
 
   const stored = await loadStoredAgentStore();
   const storedToken = String(stored?.agentToken || '').trim();
 
   let token = envToken || storedToken;
-  if (!token && pairCode) {
-    token = await redeemPairCode({ wsBase, agentId, code: pairCode });
-    await saveStoredAgentStore({ agentId, agentToken: token, createdAt: stored?.createdAt });
-    console.log(`[Agent] Paired successfully and saved token to ${path.join(getAgentStoreDir(), 'agent.json')}`);
-  }
+  const adminUrl = String(process.env.AGENT_ADMIN_URL || '').trim() || deriveAdminUrl(wsBase);
 
-  if (!token) {
-    throw new Error('Missing AGENT_TOKEN (or API_KEY). Use --pair <CODE> for first-time pairing.');
-  }
+  const status: LocalStatus = {
+    connected: false,
+    agentId,
+    wsUrl: wsBase,
+    adminUrl,
+    hasToken: Boolean(token),
+    lastError: null,
+    statusUrl: '',
+    logs: statusLogs,
+  };
 
-  const url = new URL(wsBase);
-  if (!url.searchParams.get('agentId')) {
-    url.searchParams.set('agentId', agentId);
-  }
+  const getStatus = (): LocalStatus => ({ ...status, logs: statusLogs.slice(-250) });
 
-  const connect = () => {
-    const ws = new WebSocket(url.toString(), {
+  let ws: WebSocket | null = null;
+  let reconnectTimer: NodeJS.Timeout | null = null;
+
+  const clearReconnect = () => {
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  };
+
+  const stopWs = () => {
+    clearReconnect();
+    if (!ws) return;
+    try {
+      ws.close(1000, 'Stopping');
+    } catch {}
+    ws = null;
+    status.connected = false;
+  };
+
+  const connectWs = () => {
+    clearReconnect();
+    stopWs();
+
+    if (!token) {
+      status.hasToken = false;
+      status.connected = false;
+      return;
+    }
+
+    status.hasToken = true;
+    const url = new URL(wsBase);
+    if (!url.searchParams.get('agentId')) {
+      url.searchParams.set('agentId', agentId);
+    }
+
+    addLog(`Connecting to ${url.toString()}`);
+    const wsConn = new WebSocket(url.toString(), {
       headers: {
         'x-agent-id': agentId,
         'x-agent-token': token,
       },
     });
+    ws = wsConn;
 
-    ws.on('open', () => {
+    wsConn.on('open', () => {
+      status.connected = true;
+      status.lastError = null;
+      addLog('Connected');
       console.log(`[Agent] Connected agentId=${agentId} url=${url.toString()}`);
-      ws.send(
+      wsConn.send(
         JSON.stringify({
           type: 'hello',
           agentId,
@@ -197,7 +402,7 @@ async function main(): Promise<void> {
       );
     });
 
-    ws.on('message', async (raw) => {
+    wsConn.on('message', async (raw) => {
       let msg: any;
       try {
         msg = JSON.parse(raw.toString());
@@ -207,7 +412,7 @@ async function main(): Promise<void> {
 
       const type = String(msg?.type || '');
       if (type === 'ping') {
-        ws.send(JSON.stringify({ type: 'pong', ts: Date.now() }));
+        wsConn.send(JSON.stringify({ type: 'pong', ts: Date.now() }));
         return;
       }
 
@@ -220,8 +425,8 @@ async function main(): Promise<void> {
       if (!requestId || !method) return;
 
       const sendProgress = (progress: any, log?: string) => {
-        if (ws.readyState !== WebSocket.OPEN) return;
-        ws.send(
+        if (wsConn.readyState !== WebSocket.OPEN) return;
+        wsConn.send(
           JSON.stringify({
             type: 'rpc_progress',
             requestId,
@@ -231,12 +436,11 @@ async function main(): Promise<void> {
         );
       };
 
-      // 长任务心跳：避免后端 keepalive 误判“无消息”而 terminate 导致前端进度停滞
       const startHeartbeat = () => {
         const timer = setInterval(() => {
-          if (ws.readyState !== WebSocket.OPEN) return;
+          if (wsConn.readyState !== WebSocket.OPEN) return;
           try {
-            ws.send(JSON.stringify({ type: 'pong', ts: Date.now() }));
+            wsConn.send(JSON.stringify({ type: 'pong', ts: Date.now() }));
           } catch {}
         }, 10_000);
         timer.unref?.();
@@ -256,7 +460,7 @@ async function main(): Promise<void> {
             onProgress: (progress, log) => sendProgress(progress, log),
           });
 
-          ws.send(JSON.stringify({ type: 'rpc_result', requestId, ok: true, result }));
+          wsConn.send(JSON.stringify({ type: 'rpc_result', requestId, ok: true, result }));
           return;
         }
 
@@ -264,13 +468,13 @@ async function main(): Promise<void> {
           const accountId = required('params.accountId', params.accountId as any);
           const cookies = String((params.cookies as any) || '');
           const result = await cartScraper.scrapeCart(accountId, cookies);
-          ws.send(JSON.stringify({ type: 'rpc_result', requestId, ok: true, result }));
+          wsConn.send(JSON.stringify({ type: 'rpc_result', requestId, ok: true, result }));
           return;
         }
 
-        ws.send(JSON.stringify({ type: 'rpc_result', requestId, ok: false, error: `Unknown method: ${method}` }));
+        wsConn.send(JSON.stringify({ type: 'rpc_result', requestId, ok: false, error: `Unknown method: ${method}` }));
       } catch (err: any) {
-        ws.send(
+        wsConn.send(
           JSON.stringify({
             type: 'rpc_result',
             requestId,
@@ -283,21 +487,81 @@ async function main(): Promise<void> {
       }
     });
 
-    ws.on('close', (code, reason) => {
-      console.warn(`[Agent] Disconnected agentId=${agentId} code=${code} reason=${String(reason || '')}`);
+    wsConn.on('close', (code, reason) => {
+      status.connected = false;
+      const why = String(reason || '');
+      const errMsg = why || `WS closed (${code})`;
+      status.lastError = errMsg;
+      addLog(`Disconnected: code=${code} reason=${why}`);
+
       const delay = 2000 + Math.floor(Math.random() * 3000);
-      setTimeout(connect, delay).unref?.();
+      if (!token) return;
+      reconnectTimer = setTimeout(connectWs, delay);
+      reconnectTimer.unref?.();
     });
 
-    ws.on('error', (err) => {
+    wsConn.on('error', (err) => {
+      const msg = err?.message ? String(err.message) : String(err);
+      status.lastError = msg;
+      addLog(`WS error: ${msg}`);
       console.warn(`[Agent] WS error agentId=${agentId}:`, err);
     });
   };
 
-  connect();
+  const doPair = async (code: string) => {
+    const normalized = String(code || '').trim();
+    if (!normalized) throw new Error('Missing code');
+
+    const newToken = await redeemPairCode({ wsBase, agentId, code: normalized });
+    token = newToken;
+    status.hasToken = true;
+    status.lastError = null;
+
+    await saveStoredAgentStore({ agentId, agentToken: token, createdAt: stored?.createdAt });
+    addLog(`Paired successfully (saved token)`);
+    console.log(`[Agent] Paired successfully and saved token to ${path.join(getAgentStoreDir(), 'agent.json')}`);
+
+    if (!pairOnly) {
+      connectWs();
+    }
+  };
+
+  if (!token && pairCode) {
+    await doPair(pairCode);
+  }
+
+  if (pairOnly) {
+    if (!token) {
+      throw new Error('Pair-only mode requires AGENT_TOKEN/API_KEY or --pair <CODE>.');
+    }
+    console.log('[Agent] Pair-only mode complete. Exiting.');
+    return;
+  }
+
+  if (uiMode) {
+    addLog('UI mode enabled');
+    const resolvedPort = Number.isFinite(statusPort) && statusPort > 0 ? statusPort : 17880;
+    const ui = await startStatusServer({ port: resolvedPort, logs: statusLogs, getStatus, pair: doPair });
+    status.statusUrl = ui.url;
+
+    if (!token) {
+      addLog('Not paired yet. Waiting for pair code...');
+      void ensureUiOpenedOnce(ui.url);
+    } else {
+      connectWs();
+    }
+    return;
+  }
+
+  if (!token) {
+    throw new Error('Missing AGENT_TOKEN (or API_KEY). Use --pair <CODE> for first-time pairing.');
+  }
+
+  connectWs();
 }
 
 main().catch((err) => {
+  const uiMode = isTruthy(process.env.AGENT_UI || process.env.AGENT_STATUS_UI);
   console.error('[Agent] Fatal:', err);
-  process.exit(1);
+  if (!uiMode) process.exit(1);
 });

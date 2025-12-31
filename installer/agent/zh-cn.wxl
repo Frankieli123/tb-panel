@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WixLocalization xmlns="http://schemas.microsoft.com/wix/2006/localization" Culture="zh-cn">
+  <String Id="msierrSecureObjectsFailedCreateSD">无法为安全对象创建安全描述符。</String>
+  <String Id="msierrSecureObjectsFailedSet">无法为安全对象设置权限。</String>
+  <String Id="msierrSecureObjectsUnknownType">未知的安全对象类型。</String>
+</WixLocalization>
+
