@@ -12,36 +12,69 @@ import { logService } from './services/logService.js';
 
 const app = express();
 
+function isDevLocalOrigin(origin: string): boolean {
+  return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
+}
+
+function defaultPort(protocol: string): string {
+  if (protocol === 'https:') return '443';
+  if (protocol === 'http:') return '80';
+  return '';
+}
+
+function isSameHostOrigin(origin: string, hostHeader: string | undefined): boolean {
+  if (!hostHeader) return false;
+
+  let originUrl: URL;
+  try {
+    originUrl = new URL(origin);
+  } catch {
+    return false;
+  }
+
+  let reqUrl: URL;
+  try {
+    reqUrl = new URL(`${originUrl.protocol}//${hostHeader}`);
+  } catch {
+    return false;
+  }
+
+  const originHost = originUrl.hostname.toLowerCase();
+  const reqHost = reqUrl.hostname.toLowerCase();
+  if (originHost !== reqHost) return false;
+
+  const expectedPort = defaultPort(originUrl.protocol);
+  const originPort = originUrl.port || expectedPort;
+  const reqPort = reqUrl.port || expectedPort;
+  return originPort === reqPort;
+}
+
 // 中间件
 if ((config as any).auth?.trustProxy) {
   app.set('trust proxy', 1);
 }
 
 app.use(
-  cors({
-    origin: (origin, callback) => {
-      const allowed = (config as any).cors?.origins as string[] | undefined;
-      if (!origin) {
-        callback(null, true);
-        return;
-      }
+  cors((req, callback) => {
+    const origin = String(req.header('origin') || '');
+    const allowed = ((config as any).cors?.origins as string[] | undefined) || [];
 
-      if (!allowed || allowed.includes(origin)) {
-        callback(null, true);
-        return;
-      }
+    if (!origin) {
+      callback(null, { origin: true, credentials: true });
+      return;
+    }
 
-      if (
-        config.env !== 'production' &&
-        /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin)
-      ) {
-        callback(null, true);
-        return;
-      }
+    const allowAll = allowed.includes('*');
+    const allowExact = allowed.includes(origin);
+    const allowDevLocal = config.env !== 'production' && isDevLocalOrigin(origin);
+    const allowSameHost = isSameHostOrigin(origin, req.header('host'));
 
-      callback(new Error('Not allowed by CORS'));
-    },
-    credentials: true,
+    if (allowed.length === 0 || allowAll || allowExact || allowDevLocal || allowSameHost) {
+      callback(null, { origin: true, credentials: true });
+      return;
+    }
+
+    callback(new Error('Not allowed by CORS'), { origin: false });
   })
 );
 app.use(express.json());

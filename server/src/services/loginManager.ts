@@ -35,6 +35,43 @@ interface LoginSession {
 
 type WsUser = { id: string; role: 'admin' | 'operator' };
 
+function isDevLocalOrigin(origin: string): boolean {
+  return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
+}
+
+function defaultPort(protocol: string): string {
+  if (protocol === 'https:') return '443';
+  if (protocol === 'http:') return '80';
+  return '';
+}
+
+function isSameHostOrigin(origin: string, hostHeader: string | undefined): boolean {
+  if (!hostHeader) return false;
+
+  let originUrl: URL;
+  try {
+    originUrl = new URL(origin);
+  } catch {
+    return false;
+  }
+
+  let reqUrl: URL;
+  try {
+    reqUrl = new URL(`${originUrl.protocol}//${hostHeader}`);
+  } catch {
+    return false;
+  }
+
+  const originHost = originUrl.hostname.toLowerCase();
+  const reqHost = reqUrl.hostname.toLowerCase();
+  if (originHost !== reqHost) return false;
+
+  const expectedPort = defaultPort(originUrl.protocol);
+  const originPort = originUrl.port || expectedPort;
+  const reqPort = reqUrl.port || expectedPort;
+  return originPort === reqPort;
+}
+
 // 判断是否为导航相关错误
 function isNavigationError(error: unknown): boolean {
   const msg = String(error ?? '');
@@ -99,10 +136,12 @@ class LoginManager {
     this.wss.on('connection', (ws, req) => {
       const origin = String(req.headers.origin || '');
       const allowed = ((config as any).cors?.origins as string[] | undefined) || [];
-      const isDevLocalOrigin =
-        config.env !== 'production' &&
-        /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
-      if (origin && allowed.length > 0 && !allowed.includes(origin) && !isDevLocalOrigin) {
+      const allowAll = allowed.includes('*');
+      const allowExact = allowed.includes(origin);
+      const allowDevLocal = config.env !== 'production' && isDevLocalOrigin(origin);
+      const allowSameHost = origin ? isSameHostOrigin(origin, String(req.headers.host || '')) : false;
+
+      if (origin && allowed.length > 0 && !allowAll && !allowExact && !allowDevLocal && !allowSameHost) {
         ws.close(1008, 'Forbidden origin');
         return;
       }
