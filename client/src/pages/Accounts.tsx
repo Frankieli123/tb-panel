@@ -378,23 +378,23 @@ export default function Accounts() {
                 </select>
               </div>
 
-              <div className="mt-4 flex gap-2">
+              <div className="mt-4 flex flex-wrap gap-2">
                 <button
                   onClick={() => void startLogin(account.id)}
-                  className="flex-1 flex items-center justify-center gap-2 text-sm font-medium text-white bg-orange-500 hover:bg-orange-600 py-2 rounded-lg transition-colors"
+                  className="flex-1 min-w-[120px] flex items-center justify-center gap-2 text-sm font-medium text-white bg-orange-500 hover:bg-orange-600 py-2 rounded-lg transition-colors"
                 >
                   <QrCode className="w-4 h-4" /> 登录
                 </button>
                 <button
                   onClick={() => setShowCookieModal(account.id)}
-                  className="flex items-center justify-center gap-2 text-sm font-medium text-gray-700 bg-gray-50 hover:bg-gray-100 px-3 py-2 rounded-lg transition-colors"
+                  className="flex-none flex items-center justify-center gap-2 text-sm font-medium text-gray-700 bg-gray-50 hover:bg-gray-100 px-3 py-2 rounded-lg transition-colors"
                   title="手动输入Cookie"
                 >
                   <Cookie className="w-4 h-4" />
                 </button>
                 <button
                   onClick={() => handleDeleteAccount(account.id)}
-                  className="px-3 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                  className="flex-none px-3 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
                 >
                   <Trash2 className="w-4 h-4" />
                 </button>
@@ -489,8 +489,8 @@ export default function Accounts() {
       {/* QR Code Login Modal */}
       {loginState && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl w-full max-w-5xl shadow-xl overflow-hidden">
-            <div className="flex items-center justify-between p-4 border-b">
+          <div className="bg-white rounded-2xl w-full max-w-2xl shadow-xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div className="flex items-center justify-between p-4 border-b flex-shrink-0">
               <h3 className="text-lg font-bold">淘宝登录</h3>
               <button
                 onClick={cancelLogin}
@@ -500,7 +500,7 @@ export default function Accounts() {
               </button>
             </div>
 
-            <div className="p-6">
+            <div className="p-6 overflow-y-auto">
               {loginState.status === 'connecting' && (
                 <div className="flex flex-col items-center justify-center py-12">
                   <Loader2 className="w-8 h-8 text-orange-500 animate-spin" />
@@ -517,12 +517,12 @@ export default function Accounts() {
 
               {(loginState.status === 'scanning' || loginState.screenshot) && (
                 <div className="flex flex-col items-center w-full">
-                  <div className="relative bg-gray-50 rounded-xl overflow-hidden w-full flex items-center justify-center border border-gray-200" style={{ minHeight: 500 }}>
+                  <div className="relative bg-gray-50 rounded-xl overflow-hidden w-full flex items-center justify-center border border-gray-200 min-h-[300px] md:min-h-[500px]">
                     {loginState.screenshot ? (
                       <img
                         src={`data:image/jpeg;base64,${loginState.screenshot}`}
                         alt="Login Page"
-                        className="w-full h-auto object-contain max-h-[700px]"
+                        className="w-full h-auto object-contain max-h-[50vh] md:max-h-[700px]"
                       />
                     ) : (
                       <div className="flex flex-col items-center justify-center text-gray-400 py-20">

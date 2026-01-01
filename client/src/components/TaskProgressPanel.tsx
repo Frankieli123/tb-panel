@@ -86,7 +86,7 @@ export default function TaskProgressPanel({ tasks, onDismiss }: TaskProgressPane
   };
 
   return (
-    <div className="fixed bottom-4 right-4 z-40 w-96 max-w-[calc(100vw-2rem)]">
+    <div className="fixed bottom-20 md:bottom-4 right-4 z-40 w-96 max-w-[calc(100vw-2rem)]">
       {/* 最小化状态 */}
       {minimized ? (
         <div
@@ -213,7 +213,7 @@ export default function TaskProgressPanel({ tasks, onDismiss }: TaskProgressPane
                   {isExpanded && (
                     <div className="px-4 pb-3">
                       <div className="bg-gray-900 rounded-lg p-3 max-h-48 overflow-y-auto">
-                        <div className="space-y-1 text-[11px] font-mono">
+                        <div className="space-y-1 text-[11px] font-mono break-all">
                           {task.logs.map((log, i) => (
                             <div key={i} className="text-gray-300">
                               {log}

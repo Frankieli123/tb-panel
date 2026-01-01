@@ -222,12 +222,12 @@ export default function SkuVariantPanel({ productId, productImageUrl }: SkuVaria
           <div className="text-sm text-gray-400 text-center py-10">暂无SKU数据</div>
         ) : (
           <div className="space-y-3">
-            <div className="flex items-center gap-2">
-              <div className="text-xs text-gray-500 font-bold whitespace-nowrap">
+            <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+              <div className="text-xs text-gray-500 font-bold whitespace-nowrap hidden sm:block">
                 {groupLabel ? `${groupLabel}:` : '规格:'}
               </div>
-              <div className="flex-1" />
-              <div className="relative w-44">
+              <div className="flex-1 hidden sm:block" />
+              <div className="relative w-full sm:w-44">
                 <Search className="w-3.5 h-3.5 text-gray-400 absolute left-2 top-1/2 -translate-y-1/2" />
                 <input
                   value={query}
@@ -270,8 +270,8 @@ export default function SkuVariantPanel({ productId, productImageUrl }: SkuVaria
                     className={`bg-white border rounded-xl overflow-hidden ${
                       recentChange
                         ? recentChange.direction === 'DOWN'
-                          ? 'border-red-200 ring-1 ring-red-100'
-                          : 'border-amber-200 ring-1 ring-amber-100'
+                          ? 'border-green-200 ring-1 ring-green-100'
+                          : 'border-red-200 ring-1 ring-red-100'
                         : 'border-gray-200'
                     }`}
                   >
@@ -306,8 +306,8 @@ export default function SkuVariantPanel({ productId, productImageUrl }: SkuVaria
                           className={`text-sm font-bold ${
                             recentChange
                               ? recentChange.direction === 'DOWN'
-                                ? 'text-red-600'
-                                : 'text-amber-800'
+                                ? 'text-green-600'
+                                : 'text-red-600'
                               : 'text-gray-900'
                           }`}
                         >
@@ -316,7 +316,7 @@ export default function SkuVariantPanel({ productId, productImageUrl }: SkuVaria
                         {recentChange && (
                           <div
                             className={`mt-0.5 inline-flex items-center justify-end gap-1 text-[10px] font-bold ${
-                              recentChange.direction === 'DOWN' ? 'text-red-600' : 'text-amber-800'
+                              recentChange.direction === 'DOWN' ? 'text-green-600' : 'text-red-600'
                             }`}
                           >
                             {recentChange.direction === 'DOWN' ? (

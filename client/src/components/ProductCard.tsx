@@ -84,20 +84,19 @@ export default function ProductCard({ product, onRefresh, onDelete }: ProductCar
           )}
           {recentChange && (
             <div
-              className={`absolute left-2 top-2 inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-bold shadow-sm ${
+              className={`absolute left-1 top-1 md:left-2 md:top-2 inline-flex items-center gap-0.5 md:gap-1 rounded-full border px-1.5 py-0.5 text-[9px] md:text-[10px] font-bold shadow-sm max-w-[calc(100%-8px)] ${
                 recentChange.direction === 'DOWN'
-                  ? 'bg-red-50 text-red-700 border-red-200'
-                  : 'bg-amber-50 text-amber-800 border-amber-200'
+                  ? 'bg-green-50 text-green-700 border-green-200'
+                  : 'bg-red-50 text-red-700 border-red-200'
               }`}
             >
               {recentChange.direction === 'DOWN' ? (
-                <TrendingDown className="w-3 h-3" />
+                <TrendingDown className="w-2.5 h-2.5 md:w-3 md:h-3 flex-shrink-0" />
               ) : (
-                <TrendingUp className="w-3 h-3" />
+                <TrendingUp className="w-2.5 h-2.5 md:w-3 md:h-3 flex-shrink-0" />
               )}
-              <span>
+              <span className="truncate">
                 {recentChange.direction === 'DOWN' ? '降' : '涨'} {formatMoney(recentChange.diff)}
-                {recentChange.percent !== null ? ` (${recentChange.percent.toFixed(0)}%)` : ''}
               </span>
             </div>
           )}
@@ -131,20 +130,20 @@ export default function ProductCard({ product, onRefresh, onDelete }: ProductCar
           </div>
 
           <div className="flex items-end justify-between mt-2">
-            <div>
-              <div className="flex items-baseline gap-2">
+            <div className="min-w-0 flex-1 mr-2">
+              <div className="flex items-baseline gap-2 flex-wrap">
                 <span className="text-xl md:text-2xl font-bold text-orange-600">
                   {product.currentPrice ? `¥${product.currentPrice}` : '-'}
                 </span>
                 {recentChange && (
                   <span
-                    className={`text-[11px] font-bold border px-2 py-0.5 rounded-full whitespace-nowrap ${
+                    className={`text-[10px] md:text-[11px] font-bold border px-1.5 md:px-2 py-0.5 rounded-full whitespace-nowrap ${
                       recentChange.direction === 'DOWN'
-                        ? 'text-red-600 bg-red-50 border-red-100'
-                        : 'text-amber-800 bg-amber-50 border-amber-100'
+                        ? 'text-green-700 bg-green-50 border-green-200'
+                        : 'text-red-700 bg-red-50 border-red-200'
                     }`}
                   >
-                    {recentChange.direction === 'DOWN' ? '最近降价' : '最近涨价'}
+                    {recentChange.direction === 'DOWN' ? '降价' : '涨价'}
                   </span>
                 )}
                 {product.originalPrice && product.currentPrice &&
@@ -154,22 +153,22 @@ export default function ProductCard({ product, onRefresh, onDelete }: ProductCar
                   </span>
                 )}
               </div>
-              <p className="text-[10px] md:text-xs text-gray-400">
+              <p className="text-[10px] md:text-xs text-gray-400 mt-0.5">
                 更新: {formatTime(product.lastCheckAt)}
               </p>
               {product.monitorMode === 'CART' && product.account && (
-                <p className="text-[10px] text-gray-500 flex items-center gap-1 mt-0.5">
-                  <User className="w-3 h-3" />
+                <p className="text-[10px] text-gray-500 flex items-center gap-1 mt-0.5 truncate">
+                  <User className="w-3 h-3 flex-shrink-0" />
                   {product.account.name}
                 </p>
               )}
             </div>
 
             {/* Mobile Actions (Compact) */}
-            <div className="flex gap-2 md:hidden">
+            <div className="flex gap-2 md:hidden flex-shrink-0 mb-0.5">
               <button
                 onClick={() => setIsExpanded(!isExpanded)}
-                className="p-1.5 bg-gray-50 rounded-lg text-gray-600"
+                className="p-1.5 bg-gray-50 rounded-lg text-gray-600 border border-gray-100"
               >
                 {isExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
               </button>
@@ -226,21 +225,21 @@ export default function ProductCard({ product, onRefresh, onDelete }: ProductCar
 
           {/* Mobile Actions Expanded */}
           <div className="flex justify-between items-center mt-4 md:hidden">
-            <div className={`px-3 py-1 rounded-full text-xs font-bold ${getStatusColor(product)}`}>
+            <div className={`px-3 py-1.5 rounded-full text-xs font-bold ${getStatusColor(product)}`}>
               {getStatusText(product)}
             </div>
             <div className="flex gap-3">
               <button
                 onClick={() => onRefresh(product.id)}
-                className="flex items-center gap-1 text-sm font-medium text-gray-600 bg-white border border-gray-200 px-3 py-1.5 rounded-lg shadow-sm"
+                className="flex items-center gap-1.5 text-sm font-medium text-gray-600 bg-white border border-gray-200 px-4 py-2 rounded-lg shadow-sm active:bg-gray-50"
               >
-                <RefreshCw className="w-3 h-3" /> 刷新
+                <RefreshCw className="w-3.5 h-3.5" /> 刷新
               </button>
               <button
                 onClick={() => onDelete(product.id)}
-                className="flex items-center gap-1 text-sm font-medium text-red-600 bg-white border border-red-100 px-3 py-1.5 rounded-lg shadow-sm"
+                className="flex items-center gap-1.5 text-sm font-medium text-red-600 bg-white border border-red-100 px-4 py-2 rounded-lg shadow-sm active:bg-red-50"
               >
-                <Trash2 className="w-3 h-3" /> 删除
+                <Trash2 className="w-3.5 h-3.5" /> 删除
               </button>
             </div>
           </div>

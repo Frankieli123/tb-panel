@@ -598,21 +598,34 @@ class SchedulerService {
 
       if (!userConfigs.length) return;
 
+      // 判断是降价还是涨价
+      const isPriceDrop = newPrice < oldPrice;
+      const isPriceUp = newPrice > oldPrice;
+
       for (const cfg of userConfigs) {
         const threshold = parseFloat(cfg.triggerValue.toString());
-        const shouldNotify =
-          cfg.triggerType === 'AMOUNT'
+        
+        // 降价通知判断
+        const shouldNotifyDrop =
+          isPriceDrop && (cfg.triggerType === 'AMOUNT'
             ? drop.amount >= threshold
-            : drop.percent >= threshold;
+            : drop.percent >= threshold);
 
-        if (!shouldNotify) continue;
+        // 涨价通知判断（仅在用户启用了涨价通知时）
+        const shouldNotifyUp =
+          isPriceUp && cfg.notifyOnPriceUp && (cfg.triggerType === 'AMOUNT'
+            ? Math.abs(drop.amount) >= threshold
+            : Math.abs(drop.percent) >= threshold);
 
-        await notificationService.sendPriceDropNotification({
+        if (!shouldNotifyDrop && !shouldNotifyUp) continue;
+
+        await notificationService.sendPriceChangeNotification({
           product,
           oldPrice,
           newPrice,
-          drop,
+          change: drop,
           config: cfg,
+          isPriceUp,
         });
       }
 

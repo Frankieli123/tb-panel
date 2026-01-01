@@ -105,6 +105,7 @@ export interface NotificationConfig {
   feishuWebhook: string | null;
   triggerType: 'AMOUNT' | 'PERCENT';
   triggerValue: number;
+  notifyOnPriceUp: boolean;
 }
 
 export interface SmtpConfig {

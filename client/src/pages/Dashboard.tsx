@@ -102,17 +102,17 @@ export default function Dashboard() {
             正在监控 <span className="font-bold text-orange-600">{products.length}</span> 个商品
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 w-full sm:w-auto">
           <button
             onClick={() => setIsBatchModalOpen(true)}
-            className="w-full sm:w-auto bg-white hover:bg-gray-50 text-gray-700 px-5 py-2.5 rounded-xl text-sm font-bold flex items-center justify-center gap-2 transition-all border border-gray-200"
+            className="flex-1 sm:flex-none w-full sm:w-auto bg-white hover:bg-gray-50 text-gray-700 px-5 py-2.5 rounded-xl text-sm font-bold flex items-center justify-center gap-2 transition-all border border-gray-200"
           >
             <Layers className="w-4 h-4" />
             批量添加
           </button>
           <button
             onClick={() => setIsModalOpen(true)}
-            className="w-full sm:w-auto bg-gray-900 hover:bg-gray-800 text-white px-5 py-2.5 rounded-xl text-sm font-bold flex items-center justify-center gap-2 transition-all shadow-lg shadow-gray-200"
+            className="flex-1 sm:flex-none w-full sm:w-auto bg-gray-900 hover:bg-gray-800 text-white px-5 py-2.5 rounded-xl text-sm font-bold flex items-center justify-center gap-2 transition-all shadow-lg shadow-gray-200"
           >
             <Plus className="w-4 h-4" />
             添加商品

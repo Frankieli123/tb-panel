@@ -210,7 +210,7 @@ if not errorlevel 1 (
 
 rem Start in background (best effort). If PowerShell is blocked, fall back to foreground.
 powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command ^
-  "Start-Process -FilePath '%RUN_NODE%' -ArgumentList @('%AGENT_JS%','--no-ui-open') -WorkingDirectory '%~dp0' -WindowStyle Hidden" ^
+  "try { `$ErrorActionPreference='Stop'; `$q=[char]34; `$args=`$q+`$env:AGENT_JS+`$q+' --no-ui-open'; Start-Process -FilePath `$env:RUN_NODE -ArgumentList `$args -WorkingDirectory (Get-Location).Path -WindowStyle Hidden -ErrorAction Stop; exit 0 } catch { exit 1 }" ^
   >nul 2>nul
 if errorlevel 1 (
   "%RUN_NODE%" "%AGENT_JS%" --no-ui-open

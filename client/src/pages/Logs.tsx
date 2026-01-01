@@ -155,12 +155,12 @@ export default function Logs() {
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
           <h2 className="text-2xl font-bold text-gray-900">系统日志</h2>
-          <p className="text-gray-500 text-sm mt-1 flex items-center gap-2">
+          <p className="text-gray-500 text-sm mt-1 flex items-center gap-2 flex-wrap">
             <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500'}`} />
             {isConnected ? '已连接' : '连接中...'} · 共 {filteredLogs.length} 条日志
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
           <button
             onClick={() => setIsPaused(!isPaused)}
             className={`p-2 rounded-lg border transition-colors ${
@@ -218,7 +218,7 @@ export default function Logs() {
 
       {/* Log Console */}
       <div className="bg-gray-900 rounded-xl border border-gray-700 overflow-hidden">
-        <div className="h-[600px] overflow-y-auto p-4 font-mono text-xs">
+        <div className="h-[400px] sm:h-[600px] overflow-y-auto p-4 font-mono text-xs">
           {filteredLogs.length === 0 ? (
             <div className="text-gray-500 text-center py-20">
               {logs.length === 0 ? '等待日志...' : '没有匹配的日志'}

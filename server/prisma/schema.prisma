@@ -154,8 +154,9 @@ model UserNotificationConfig {
   feishuWebhook String?
 
   // 触发条件
-  triggerType  TriggerType @default(AMOUNT)
-  triggerValue Decimal @default(10) @db.Decimal(10, 2) // 降价阈值
+  triggerType     TriggerType @default(AMOUNT)
+  triggerValue    Decimal @default(10) @db.Decimal(10, 2) // 降价阈值
+  notifyOnPriceUp Boolean @default(false) // 价格上调时也发送通知
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

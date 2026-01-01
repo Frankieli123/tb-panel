@@ -386,11 +386,69 @@ async function main(): Promise<void> {
     });
     ws = wsConn;
 
+    const heartbeatEveryMs = Math.max(
+      5_000,
+      Number.parseInt(String(process.env.AGENT_HEARTBEAT_MS || '').trim(), 10) || 25_000
+    );
+    const staleAfterMs = Math.max(
+      heartbeatEveryMs * 2 + 10_000,
+      Number.parseInt(String(process.env.AGENT_STALE_MS || '').trim(), 10) || 60_000
+    );
+
+    let lastInboundAt = Date.now();
+    let idleHeartbeat: ReturnType<typeof setInterval> | null = null;
+    let staleWatchdog: ReturnType<typeof setInterval> | null = null;
+
+    const stopKeepalive = () => {
+      if (idleHeartbeat) clearInterval(idleHeartbeat);
+      if (staleWatchdog) clearInterval(staleWatchdog);
+      idleHeartbeat = null;
+      staleWatchdog = null;
+    };
+
+    const markInbound = () => {
+      lastInboundAt = Date.now();
+    };
+
+    // Protocol-level keepalive from server (ws ping frames) does not show up as "message".
+    wsConn.on('ping', () => {
+      markInbound();
+    });
+
+    wsConn.on('pong', () => {
+      markInbound();
+    });
+
     wsConn.on('open', () => {
       status.connected = true;
       status.lastError = null;
       addLog('Connected');
       console.log(`[Agent] Connected agentId=${agentId} url=${url.toString()}`);
+
+      markInbound();
+      idleHeartbeat = setInterval(() => {
+        if (wsConn.readyState !== WebSocket.OPEN) return;
+        try {
+          wsConn.send(JSON.stringify({ type: 'pong', ts: Date.now() }));
+        } catch {}
+      }, heartbeatEveryMs);
+      idleHeartbeat.unref?.();
+
+      staleWatchdog = setInterval(() => {
+        if (wsConn.readyState !== WebSocket.OPEN) return;
+        const ageMs = Date.now() - lastInboundAt;
+        if (ageMs <= staleAfterMs) return;
+        addLog(`Stale WS (no inbound for ${Math.round(ageMs / 1000)}s). Reconnecting...`);
+        try {
+          wsConn.terminate();
+        } catch {
+          try {
+            wsConn.close(1001, 'Stale');
+          } catch {}
+        }
+      }, 15_000);
+      staleWatchdog.unref?.();
+
       wsConn.send(
         JSON.stringify({
           type: 'hello',
@@ -403,6 +461,7 @@ async function main(): Promise<void> {
     });
 
     wsConn.on('message', async (raw) => {
+      markInbound();
       let msg: any;
       try {
         msg = JSON.parse(raw.toString());
@@ -488,6 +547,7 @@ async function main(): Promise<void> {
     });
 
     wsConn.on('close', (code, reason) => {
+      stopKeepalive();
       status.connected = false;
       const why = String(reason || '');
       const errMsg = why || `WS closed (${code})`;

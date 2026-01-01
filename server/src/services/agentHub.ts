@@ -70,14 +70,23 @@ export class AgentHub {
       });
     });
 
-    // Keepalive: ping connected agents periodically
+    // Keepalive: protocol-level ping/pong (more standard than JSON ping/pong).
+    const pingIntervalMs = Math.max(
+      5_000,
+      Number.parseInt(String(process.env.AGENT_HUB_PING_MS || '').trim(), 10) || 25_000
+    );
+    const staleAfterMs = Math.max(
+      pingIntervalMs * 4,
+      Number.parseInt(String(process.env.AGENT_HUB_STALE_MS || '').trim(), 10) || 120_000
+    );
+
     setInterval(() => {
       const now = Date.now();
       for (const conn of this.agents.values()) {
         // 长任务（RPC）期间，Agent 可能长时间不回消息（例如在单个 SKU 内卡住/等待 UI），
         // 这里如果直接 terminate 会导致前端进度“卡在前几个成功数”。
         const hasPending = Array.from(this.pending.values()).some((p) => p.agentId === conn.agentId);
-        if (!hasPending && now - conn.lastSeenAt > 60_000) {
+        if (!hasPending && now - conn.lastSeenAt > staleAfterMs) {
           try {
             conn.ws.terminate();
           } catch {}
@@ -85,10 +94,10 @@ export class AgentHub {
           continue;
         }
         try {
-          conn.ws.send(JSON.stringify({ type: 'ping', ts: now }));
+          conn.ws.ping();
         } catch {}
       }
-    }, 15_000).unref?.();
+    }, pingIntervalMs).unref?.();
 
     console.log('[AgentHub] WebSocket server initialized path=/ws/agent');
   }
@@ -139,6 +148,14 @@ export class AgentHub {
     };
     this.agents.set(agentId, conn);
     console.log(`[AgentHub] Agent connected agentId=${agentId} userId=${userId ?? 'shared'}`);
+
+      ws.on('pong', () => {
+        conn.lastSeenAt = Date.now();
+      });
+
+      ws.on('ping', () => {
+        conn.lastSeenAt = Date.now();
+      });
 
       ws.on('message', (raw) => {
         conn.lastSeenAt = Date.now();

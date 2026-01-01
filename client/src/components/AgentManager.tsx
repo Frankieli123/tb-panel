@@ -249,15 +249,15 @@ export default function AgentManager({ agents, isLoading, error, onRefresh }: Ag
       {/* Pairing Modal */}
       {showPairModal && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-in fade-in duration-200">
-            <div className="bg-white rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden">
-                <div className="p-5 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
+            <div className="bg-white rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+                <div className="p-5 border-b border-gray-100 flex items-center justify-between bg-gray-50/50 flex-shrink-0">
                     <h3 className="font-bold text-gray-900">接入新节点</h3>
                     <button onClick={resetPairing} className="p-2 hover:bg-gray-200 rounded-full transition-colors">
                         <X className="w-5 h-5 text-gray-500" />
                     </button>
                 </div>
                 
-                <div className="p-6">
+                <div className="p-6 overflow-y-auto">
                     <div className="flex flex-col items-center justify-center text-center">
                          <div className="w-16 h-16 bg-orange-50 rounded-full flex items-center justify-center mb-4">
                             <Terminal className="w-8 h-8 text-orange-500" />
@@ -323,7 +323,7 @@ export default function AgentManager({ agents, isLoading, error, onRefresh }: Ag
                     </div>
                 </div>
 
-                <div className="p-5 border-t border-gray-100 bg-gray-50/50 flex justify-end">
+                <div className="p-5 border-t border-gray-100 bg-gray-50/50 flex justify-end flex-shrink-0">
                     <button
                         onClick={resetPairing}
                         className="px-5 py-2.5 bg-white border border-gray-200 text-gray-700 font-medium rounded-xl hover:bg-gray-50 transition-colors shadow-sm"

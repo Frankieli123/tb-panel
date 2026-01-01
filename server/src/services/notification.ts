@@ -5,12 +5,13 @@ import { formatPrice } from '../utils/helpers.js';
 
 const prisma = new PrismaClient();
 
-interface PriceDropNotification {
+interface PriceChangeNotification {
   product: Product;
   oldPrice: number;
   newPrice: number;
-  drop: { amount: number; percent: number };
+  change: { amount: number; percent: number };
   config: UserNotificationConfig;
+  isPriceUp: boolean;
 }
 
 class NotificationService {
@@ -87,11 +88,12 @@ class NotificationService {
     };
   }
 
-  async sendPriceDropNotification(data: PriceDropNotification): Promise<void> {
-    const { product, oldPrice, newPrice, drop, config: notifyConfig } = data;
+  async sendPriceChangeNotification(data: PriceChangeNotification): Promise<void> {
+    const { product, oldPrice, newPrice, change, config: notifyConfig, isPriceUp } = data;
 
-    const title = `【降价提醒】${product.title || '商品'}`;
-    const content = this.buildNotificationContent(product, oldPrice, newPrice, drop);
+    const titlePrefix = isPriceUp ? '【涨价提醒】' : '【降价提醒】';
+    const title = `${titlePrefix}${product.title || '商品'}`;
+    const content = this.buildNotificationContent(product, oldPrice, newPrice, change, isPriceUp);
 
     const promises: Promise<void>[] = [];
 
@@ -120,6 +122,23 @@ class NotificationService {
     }
 
     await Promise.allSettled(promises);
+  }
+
+  async sendPriceDropNotification(data: {
+    product: Product;
+    oldPrice: number;
+    newPrice: number;
+    drop: { amount: number; percent: number };
+    config: UserNotificationConfig;
+  }): Promise<void> {
+    await this.sendPriceChangeNotification({
+      product: data.product,
+      oldPrice: data.oldPrice,
+      newPrice: data.newPrice,
+      change: data.drop,
+      config: data.config,
+      isPriceUp: false,
+    });
   }
 
   async sendSystemAlert(title: string, content: string): Promise<void> {
@@ -164,13 +183,15 @@ class NotificationService {
     product: Product,
     oldPrice: number,
     newPrice: number,
-    drop: { amount: number; percent: number }
+    change: { amount: number; percent: number },
+    isPriceUp: boolean
   ): string {
+    const changeLabel = isPriceUp ? '涨幅' : '降幅';
     return `
 商品：${product.title || product.taobaoId}
 原价：${formatPrice(oldPrice)}
 现价：${formatPrice(newPrice)}
-降幅：${formatPrice(drop.amount)} (${drop.percent.toFixed(1)}%)
+${changeLabel}：${formatPrice(Math.abs(change.amount))} (${Math.abs(change.percent).toFixed(1)}%)
 链接：${product.url}
     `.trim();
   }
