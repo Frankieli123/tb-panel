@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Bell, Mail, MessageSquare, Save, CheckCircle2, Zap, Loader2, Shield, Send, TrendingUp, TrendingDown } from 'lucide-react';
+import { Bell, Mail, MessageSquare, Save, CheckCircle2, Zap, Loader2, Shield, Send, TrendingUp, TrendingDown, Building } from 'lucide-react';
 import { api } from '../services/api';
-import { NotificationConfig, SmtpConfig } from '../types';
+import { NotificationConfig, SmtpConfig, WecomConfig } from '../types';
 import { useAuth } from '../context/AuthContext';
 
 type NotificationChannel = 'email' | 'wechat' | 'dingtalk' | 'feishu';
@@ -23,6 +23,16 @@ export default function Notifications() {
   const [smtpDraft, setSmtpDraft] = useState<SmtpDraft>({ host: '', port: 465, user: '', from: '', pass: '' });
   const [smtpSaveStatus, setSmtpSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
   const [isTestingSmtp, setIsTestingSmtp] = useState(false);
+  const [wecomConfig, setWecomConfig] = useState<WecomConfig | null>(null);
+  const [wecomDraft, setWecomDraft] = useState<{
+    enabled: boolean;
+    corpId: string;
+    agentId: string;
+    secret: string;
+    toUser: string;
+  }>({ enabled: false, corpId: '', agentId: '', secret: '', toUser: '@all' });
+  const [wecomSaveStatus, setWecomSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
+  const [isTestingWecom, setIsTestingWecom] = useState(false);
 
   const { user } = useAuth();
   const isAdmin = user?.role === 'admin';
@@ -34,6 +44,7 @@ export default function Notifications() {
   useEffect(() => {
     if (!isAdmin) return;
     loadSmtpConfig();
+    loadWecomConfig();
   }, [isAdmin]);
 
   const loadConfig = async () => {
@@ -65,6 +76,22 @@ export default function Notifications() {
       });
     } catch (error) {
       console.error('Failed to load SMTP config:', error);
+    }
+  };
+
+  const loadWecomConfig = async () => {
+    try {
+      const data = await api.getWecomConfig();
+      setWecomConfig(data);
+      setWecomDraft({
+        enabled: data.enabled,
+        corpId: data.corpId,
+        agentId: data.agentId ? String(data.agentId) : '',
+        secret: '',
+        toUser: data.toUser || '@all',
+      });
+    } catch (error) {
+      console.error('Failed to load WeCom config:', error);
     }
   };
 
@@ -150,6 +177,57 @@ export default function Notifications() {
       alert('测试失败');
     } finally {
       setIsTestingSmtp(false);
+    }
+  };
+
+  const handleWecomSave = async () => {
+    setWecomSaveStatus('saving');
+    try {
+      const payload: Record<string, unknown> = {
+        enabled: wecomDraft.enabled,
+        corpId: wecomDraft.corpId.trim(),
+        toUser: wecomDraft.toUser.trim() || '@all',
+      };
+
+      const agentId = parseInt(wecomDraft.agentId, 10);
+      if (Number.isFinite(agentId) && agentId > 0) {
+        payload.agentId = agentId;
+      }
+
+      if (wecomDraft.secret.trim()) {
+        payload.secret = wecomDraft.secret.trim();
+      }
+
+      const next = await api.updateWecomConfig(payload as any);
+      setWecomConfig(next);
+      setWecomDraft((prev) => ({
+        ...prev,
+        secret: '',
+        agentId: next.agentId ? String(next.agentId) : prev.agentId,
+        toUser: next.toUser || prev.toUser,
+      }));
+      setWecomSaveStatus('saved');
+      setTimeout(() => setWecomSaveStatus('idle'), 3000);
+    } catch (error) {
+      console.error('Failed to save WeCom config:', error);
+      setWecomSaveStatus('idle');
+    }
+  };
+
+  const handleWecomTest = async () => {
+    if (!isAdmin) return;
+    setIsTestingWecom(true);
+    try {
+      const result = await api.testWecom();
+      if (result.success) {
+        alert('测试消息发送成功！');
+      } else {
+        alert(`发送失败: ${result.error}`);
+      }
+    } catch (error) {
+      alert('测试失败');
+    } finally {
+      setIsTestingWecom(false);
     }
   };
 
@@ -620,6 +698,98 @@ export default function Notifications() {
                   : smtpSaveStatus === 'saved'
                     ? '已保存'
                     : '保存发件配置'}
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
+
+      {isAdmin && wecomConfig && (
+        <section className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+          <div className="p-6 border-b border-gray-100 bg-gray-50/50">
+            <h3 className="font-bold text-gray-800 flex items-center gap-2">
+              <Building className="w-4 h-4 text-blue-500" />
+              企业微信应用（管理员）
+            </h3>
+          </div>
+          <div className="p-6 space-y-4">
+            <div className="flex items-center justify-between mb-4">
+              <span className="text-sm font-medium text-gray-700">启用状态</span>
+              <button
+                onClick={() => setWecomDraft((prev) => ({ ...prev, enabled: !prev.enabled }))}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                  wecomDraft.enabled ? 'bg-blue-500' : 'bg-gray-200'
+                }`}
+              >
+                <span
+                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition shadow-sm ${
+                    wecomDraft.enabled ? 'translate-x-6' : 'translate-x-1'
+                  }`}
+                />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">Corp ID</label>
+                <input
+                  type="text"
+                  value={wecomDraft.corpId}
+                  onChange={(e) => setWecomDraft((prev) => ({ ...prev, corpId: e.target.value }))}
+                  className="w-full px-4 py-2.5 rounded-xl border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">Agent ID</label>
+                <input
+                  type="text"
+                  value={wecomDraft.agentId}
+                  onChange={(e) => setWecomDraft((prev) => ({ ...prev, agentId: e.target.value }))}
+                  placeholder="1000003"
+                  className="w-full px-4 py-2.5 rounded-xl border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">Secret</label>
+                <input
+                  type="password"
+                  value={wecomDraft.secret}
+                  onChange={(e) => setWecomDraft((prev) => ({ ...prev, secret: e.target.value }))}
+                  placeholder={wecomConfig.hasSecret ? '如需修改 Secret，请在此输入' : '请输入 Secret'}
+                  className="w-full px-4 py-2.5 rounded-xl border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">To User</label>
+                <input
+                  type="text"
+                  value={wecomDraft.toUser}
+                  onChange={(e) => setWecomDraft((prev) => ({ ...prev, toUser: e.target.value }))}
+                  placeholder="@all"
+                  className="w-full px-4 py-2.5 rounded-xl border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 outline-none"
+                />
+              </div>
+            </div>
+
+            <div className="pt-2 flex flex-col sm:flex-row justify-end gap-3">
+              <button
+                onClick={handleWecomTest}
+                disabled={isTestingWecom}
+                className="text-sm font-medium text-blue-600 px-4 py-2 bg-blue-50 hover:bg-blue-100 rounded-lg disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                <Send className="w-4 h-4" />
+                {isTestingWecom ? '发送中...' : '发送测试'}
+              </button>
+              <button
+                onClick={handleWecomSave}
+                disabled={wecomSaveStatus === 'saving'}
+                className="text-sm font-bold text-white px-4 py-2 bg-gray-900 hover:bg-gray-800 rounded-lg disabled:opacity-50"
+              >
+                {wecomSaveStatus === 'saving'
+                  ? '保存中...'
+                  : wecomSaveStatus === 'saved'
+                    ? '已保存'
+                    : '保存企业微信配置'}
               </button>
             </div>
           </div>

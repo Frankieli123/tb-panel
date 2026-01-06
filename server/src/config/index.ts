@@ -95,6 +95,14 @@ export const config = {
     webhookUrl: envString('WECHAT_WEBHOOK_URL'),
   },
 
+  wecom: {
+    enabled: envBool('WECOM_ENABLED', false),
+    corpId: envString('WECOM_CORP_ID'),
+    corpSecret: envString('WECOM_CORP_SECRET'),
+    agentId: envInt('WECOM_AGENT_ID', 0),
+    toUser: envString('WECOM_TOUSER', '@all'),
+  },
+
   scraper: {
     minIntervalMs: envInt('SCRAPER_MIN_INTERVAL_MS', 60000),
     maxIntervalMs: envInt('SCRAPER_MAX_INTERVAL_MS', 180000),

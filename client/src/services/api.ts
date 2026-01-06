@@ -8,6 +8,7 @@ import type {
   TaobaoAccount,
   Variant,
   SmtpConfig,
+  WecomConfig,
   AgentConnection,
   AgentPairCode,
 } from '../types';
@@ -262,6 +263,31 @@ export const api = {
       },
       credentials: 'include',
       body: JSON.stringify({ to }),
+    }).then((r) => {
+      if (r.status === 401) {
+        window.dispatchEvent(new Event('auth:unauthorized'));
+      }
+      return r.json();
+    }),
+
+  getWecomConfig: () => request<WecomConfig>('/notifications/wecom'),
+
+  updateWecomConfig: (config: Partial<{ enabled: boolean; corpId: string; agentId: number; secret: string; toUser: string }>) =>
+    request<WecomConfig>('/notifications/wecom', {
+      method: 'PUT',
+      headers: csrfToken ? { 'x-csrf-token': csrfToken } : undefined,
+      body: JSON.stringify(config),
+    }),
+
+  testWecom: () =>
+    fetch(`${API_BASE}/notifications/wecom/test`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(csrfToken ? { 'x-csrf-token': csrfToken } : {}),
+      },
+      credentials: 'include',
+      body: JSON.stringify({}),
     }).then((r) => {
       if (r.status === 401) {
         window.dispatchEvent(new Event('auth:unauthorized'));

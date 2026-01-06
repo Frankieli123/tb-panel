@@ -97,6 +97,15 @@ SMTP_FROM=your_email@qq.com
 # 微信通知 (Server酱)
 WECHAT_WEBHOOK_URL=https://sctapi.ftqq.com/your_key.send
 
+# WeCom App (WeChat Work / 企业微信应用消息)
+WECOM_ENABLED=false
+WECOM_CORP_ID=
+WECOM_CORP_SECRET=
+WECOM_AGENT_ID=1000003
+WECOM_TOUSER=@all
+
+# 企业微信卡片点击/“查看更多”默认跳转到 `CORS_ORIGINS` 的第一个地址（会自动附带 `productId` 参数）。
+
 # 爬虫配置
 SCRAPER_MIN_INTERVAL_MS=60000   # 最小间隔1分钟
 SCRAPER_MAX_INTERVAL_MS=180000  # 最大间隔3分钟

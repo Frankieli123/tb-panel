@@ -28,6 +28,7 @@ interface TaskProgressPanelProps {
 export default function TaskProgressPanel({ tasks, onDismiss }: TaskProgressPanelProps) {
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
   const [minimized, setMinimized] = useState(false);
+  const activeCount = tasks.filter((t) => t.status === 'pending' || t.status === 'running').length;
 
   // 自动展开第一个运行中的任务
   useEffect(() => {
@@ -93,10 +94,21 @@ export default function TaskProgressPanel({ tasks, onDismiss }: TaskProgressPane
           onClick={() => setMinimized(false)}
           className="bg-white rounded-lg shadow-lg border border-gray-200 p-3 flex items-center gap-3 cursor-pointer hover:shadow-xl transition-shadow"
         >
-          <Loader2 className="w-4 h-4 animate-spin text-orange-500" />
-          <span className="text-sm font-medium text-gray-700">
-            {tasks.length} 个任务进行中
-          </span>
+          {activeCount > 0 ? (
+            <>
+              <Loader2 className="w-4 h-4 animate-spin text-orange-500" />
+              <span className="text-sm font-medium text-gray-700">
+                {activeCount} 个任务进行中
+              </span>
+            </>
+          ) : (
+            <>
+              <CheckCircle2 className="w-4 h-4 text-green-500" />
+              <span className="text-sm font-medium text-gray-700">
+                任务已完成（{tasks.length}）
+              </span>
+            </>
+          )}
         </div>
       ) : (
         <div className="bg-white rounded-xl shadow-2xl border border-gray-200 max-h-[600px] flex flex-col">

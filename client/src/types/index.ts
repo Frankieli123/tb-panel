@@ -116,6 +116,14 @@ export interface SmtpConfig {
   hasPass: boolean;
 }
 
+export interface WecomConfig {
+  enabled: boolean;
+  corpId: string;
+  agentId: number;
+  toUser: string;
+  hasSecret: boolean;
+}
+
 export interface SystemStatus {
   stats: {
     totalProducts: number;

@@ -17,6 +17,9 @@ interface PriceChangeNotification {
 class NotificationService {
   private emailTransporter: nodemailer.Transporter | null = null;
   private smtpCacheKey: string | null = null;
+  private wecomAccessToken: string | null = null;
+  private wecomTokenExpiresAtMs = 0;
+  private wecomTokenCacheKey: string | null = null;
 
   constructor() {
   }
@@ -55,6 +58,46 @@ class NotificationService {
     };
   }
 
+  private parseOptionalBool(input: string | undefined): boolean | null {
+    if (!input) return null;
+    const v = String(input).trim().toLowerCase();
+    if (v === '1' || v === 'true') return true;
+    if (v === '0' || v === 'false') return false;
+    return null;
+  }
+
+  private async loadWecomSettings(): Promise<{
+    corpId: string;
+    corpSecret: string;
+    agentId: number;
+    toUser: string;
+  } | null> {
+    const keys = ['wecom.enabled', 'wecom.corpId', 'wecom.agentId', 'wecom.secret', 'wecom.toUser'] as const;
+    const rows = await prisma.systemConfig.findMany({
+      where: { key: { in: [...keys] } },
+    });
+
+    const map = rows.reduce<Record<string, string>>((acc, row) => {
+      acc[row.key] = row.value;
+      return acc;
+    }, {});
+
+    const enabled = this.parseOptionalBool(map['wecom.enabled']) ?? config.wecom.enabled;
+    if (!enabled) return null;
+
+    const corpId = map['wecom.corpId'] || config.wecom.corpId;
+    const corpSecret = map['wecom.secret'] || config.wecom.corpSecret;
+    const agentId = parseInt(map['wecom.agentId'] || String(config.wecom.agentId), 10);
+    const toUser = (map['wecom.toUser'] || config.wecom.toUser || '@all').trim() || '@all';
+
+    if (!corpId || !corpSecret || !Number.isFinite(agentId) || agentId <= 0) {
+      console.warn('[Notification] WeCom App not fully configured');
+      return null;
+    }
+
+    return { corpId, corpSecret, agentId, toUser };
+  }
+
   private async getEmailTransport(): Promise<{ transporter: nodemailer.Transporter; from: string } | null> {
     const settings = await this.loadSmtpSettings();
     if (!settings) {
@@ -86,6 +129,61 @@ class NotificationService {
       transporter: this.emailTransporter,
       from: settings.from,
     };
+  }
+
+  private async getWecomAccessToken(settings: { corpId: string; corpSecret: string }): Promise<string> {
+    const cacheKey = `${settings.corpId}|${settings.corpSecret}`;
+    if (this.wecomTokenCacheKey !== cacheKey) {
+      this.wecomAccessToken = null;
+      this.wecomTokenExpiresAtMs = 0;
+      this.wecomTokenCacheKey = cacheKey;
+    }
+
+    const now = Date.now();
+    if (this.wecomAccessToken && now < this.wecomTokenExpiresAtMs - 60_000) {
+      return this.wecomAccessToken;
+    }
+
+    const url = new URL('https://qyapi.weixin.qq.com/cgi-bin/gettoken');
+    url.searchParams.set('corpid', settings.corpId);
+    url.searchParams.set('corpsecret', settings.corpSecret);
+
+    const res = await fetch(url, { method: 'GET' });
+    const payload = (await res.json().catch(() => null)) as any;
+
+    if (!res.ok) {
+      throw new Error(`WeCom gettoken failed HTTP ${res.status}`);
+    }
+
+    if (!payload || payload.errcode !== 0 || !payload.access_token) {
+      throw new Error(`WeCom gettoken error: ${payload?.errcode ?? 'unknown'} ${payload?.errmsg ?? ''}`.trim());
+    }
+
+    const expiresInSec = typeof payload.expires_in === 'number' ? payload.expires_in : 7200;
+    this.wecomAccessToken = String(payload.access_token);
+    this.wecomTokenExpiresAtMs = Date.now() + expiresInSec * 1000;
+
+    return this.wecomAccessToken;
+  }
+
+  private truncateText(input: string, maxLen: number): string {
+    const text = String(input ?? '').trim();
+    if (!text) return '';
+    if (text.length <= maxLen) return text;
+    const keep = Math.max(0, maxLen - 1);
+    return `${text.slice(0, keep)}…`;
+  }
+
+  private buildWecomMonitoringUrl(productId?: string): string {
+    const base = String(config.cors.origins[0] || '').trim();
+    if (!base) return '';
+    try {
+      const url = new URL(base);
+      if (productId) url.searchParams.set('productId', productId);
+      return url.toString();
+    } catch {
+      return base;
+    }
   }
 
   async sendPriceChangeNotification(data: PriceChangeNotification): Promise<void> {
@@ -122,6 +220,47 @@ class NotificationService {
     }
 
     await Promise.allSettled(promises);
+  }
+
+  async sendWecomAppPriceChangeNotification(data: Omit<PriceChangeNotification, 'config'>): Promise<void> {
+    const settings = await this.loadWecomSettings();
+    if (!settings) return;
+
+    const { product, oldPrice, newPrice, change, isPriceUp } = data;
+
+    try {
+      const titlePrefix = isPriceUp ? '【涨价提醒】' : '【降价提醒】';
+      const baseTitle = `${titlePrefix}${product.title || '商品'}`;
+
+      const direction = isPriceUp ? '上涨' : '下降';
+      const summary = `现价：${formatPrice(newPrice)}（原价：${formatPrice(oldPrice)}）${direction}：${formatPrice(Math.abs(change.amount))}（${Math.abs(change.percent).toFixed(1)}%）`;
+      const variants = await this.buildWecomVariantItems(product.id);
+
+      const imageUrl = product.imageUrl || 'https://www.taobao.com/favicon.ico';
+      const monitoringUrl = this.buildWecomMonitoringUrl(product.id) || product.url;
+
+      const displayedVariants = variants.slice(0, 4);
+      const hasMore = variants.length > 4;
+
+      const title = this.truncateText(baseTitle, 36);
+      const desc = this.truncateText(hasMore ? `变动规格:${variants.length}（前4） ${summary}` : summary, 44);
+
+      const card = {
+        card_type: 'news_notice',
+        main_title: { title, ...(desc ? { desc } : {}) },
+        card_image: { url: imageUrl },
+        vertical_content_list: displayedVariants.map((it) => ({ title: it.title, ...(it.desc ? { desc: it.desc } : {}) })),
+        jump_list: [{ type: 1, title: '查看更多', url: monitoringUrl }],
+        card_action: { type: 1, url: monitoringUrl },
+      };
+
+      const logContent = [summary, ...variants.map((it) => `${it.title}：${it.desc || ''}`)].join('\n');
+      await this.sendWecomTemplateCard(settings, card, product.id, title, logContent);
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      await this.logNotification(product.id, 'wecom', 'WeCom App', 'Send failed', false, errorMsg);
+      console.error('[Notification] WeCom App error:', errorMsg);
+    }
   }
 
   async sendPriceDropNotification(data: {
@@ -336,6 +475,140 @@ ${changeLabel}：${formatPrice(Math.abs(change.amount))} (${Math.abs(change.perc
     }
   }
 
+  private async buildWecomVariantItems(productId: string): Promise<Array<{ title: string; desc?: string }>> {
+    try {
+      const snapshots = await prisma.priceSnapshot.findMany({
+        where: { productId },
+        orderBy: { capturedAt: 'desc' },
+        take: 2,
+        select: { rawData: true },
+      });
+
+      const currentRaw = snapshots[0]?.rawData as any;
+      const prevRaw = snapshots[1]?.rawData as any;
+      const currentVariants = Array.isArray(currentRaw?.variants) ? currentRaw.variants : [];
+      const prevVariants = Array.isArray(prevRaw?.variants) ? prevRaw.variants : [];
+
+      const keyOf = (v: any): string => String(v?.skuId ?? v?.vidPath ?? v?.skuProperties ?? '').trim();
+
+      const labelOf = (v: any, fallbackKey: string): string => {
+        const raw =
+          String(v?.skuProperties ?? '').trim() ||
+          String(v?.skuId ?? '').trim() ||
+          String(v?.vidPath ?? '').trim() ||
+          fallbackKey ||
+          '规格';
+        const compact = raw.replace(/\s+/g, ' ');
+        return compact.length > 38 ? `${compact.slice(0, 35)}...` : compact;
+      };
+
+      const toPrice = (value: any): number | null => {
+        if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+        if (typeof value === 'string') {
+          const n = parseFloat(value);
+          return Number.isFinite(n) ? n : null;
+        }
+        return null;
+      };
+
+      const prevByKey = new Map<string, any>();
+      for (const v of prevVariants) {
+        const k = keyOf(v);
+        if (k && !prevByKey.has(k)) prevByKey.set(k, v);
+      }
+
+      const toCents = (n: number): number => Math.round(n * 100);
+
+      const items: Array<{
+        label: string;
+        current: number;
+        prev: number;
+        diff: number;
+      }> = [];
+
+      for (const v of currentVariants) {
+        const k = keyOf(v);
+        const current = toPrice(v?.finalPrice);
+        if (current === null || current <= 0) continue;
+        const prev = k ? toPrice(prevByKey.get(k)?.finalPrice) : null;
+        if (prev === null || prev <= 0) continue;
+        const diff = (toCents(current) - toCents(prev)) / 100;
+        if (diff === 0) continue;
+        items.push({ label: labelOf(v, k), current, prev, diff });
+      }
+
+      if (!items.length) return [];
+
+      items.sort((a, b) => {
+        const da = Math.abs(a.diff);
+        const db = Math.abs(b.diff);
+        if (db !== da) return db - da;
+        return a.current - b.current;
+      });
+
+      return items.map((it) => {
+        const title = this.truncateText(it.label, 38);
+        const arrow = it.diff > 0 ? '↑' : '↓';
+        return {
+          title,
+          desc: `${formatPrice(it.current)}（原 ${formatPrice(it.prev)}，${arrow}${formatPrice(Math.abs(it.diff))}）`,
+        };
+      });
+    } catch (error) {
+      console.warn('[Notification] WeCom variant summary failed:', error);
+      return [];
+    }
+  }
+
+  private async sendWecomTemplateCard(
+    settings: { corpId: string; corpSecret: string; agentId: number; toUser: string },
+    templateCard: any,
+    productId: string,
+    logTitle: string,
+    logContent: string
+  ): Promise<void> {
+    const sendOnce = async (): Promise<any> => {
+      const accessToken = await this.getWecomAccessToken({
+        corpId: settings.corpId,
+        corpSecret: settings.corpSecret,
+      });
+
+      const endpoint = new URL('https://qyapi.weixin.qq.com/cgi-bin/message/send');
+      endpoint.searchParams.set('access_token', accessToken);
+
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          touser: settings.toUser || '@all',
+          msgtype: 'template_card',
+          agentid: settings.agentId,
+          template_card: templateCard,
+        }),
+      });
+
+      const payload = (await res.json().catch(() => null)) as any;
+      if (!res.ok) {
+        throw new Error(`WeCom message/send failed HTTP ${res.status}`);
+      }
+      return payload;
+    };
+
+    let payload = await sendOnce();
+    if (payload && [40014, 42001, 42007, 42009].includes(payload.errcode)) {
+      this.wecomAccessToken = null;
+      this.wecomTokenExpiresAtMs = 0;
+      payload = await sendOnce();
+    }
+
+    if (!payload || payload.errcode !== 0) {
+      throw new Error(`WeCom message/send error: ${payload?.errcode ?? 'unknown'} ${payload?.errmsg ?? ''}`.trim());
+    }
+
+    await this.logNotification(productId, 'wecom', logTitle, logContent, true);
+    console.log('[Notification] WeCom App message sent');
+  }
+
   private async logNotification(
     productId: string,
     channel: string,
@@ -404,6 +677,35 @@ ${changeLabel}：${formatPrice(Math.abs(change.amount))} (${Math.abs(change.perc
   async testSmtp(to: string): Promise<{ success: boolean; error?: string }> {
     try {
       await this.sendEmail(to, '【SMTP测试】淘宝价格监控', '这是一条 SMTP 测试消息。', 'test');
+      return { success: true };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  async testWecomApp(): Promise<{ success: boolean; error?: string }> {
+    try {
+      const settings = await this.loadWecomSettings();
+      if (!settings) {
+        return { success: false, error: 'WeCom App not configured' };
+      }
+
+      const monitoringUrl = this.buildWecomMonitoringUrl();
+      const title = '【测试通知】Taobao 价格监控';
+      const desc = '这是一条企业微信应用测试消息。';
+      const card = {
+        card_type: 'news_notice',
+        main_title: { title, desc },
+        card_image: { url: 'https://www.taobao.com/favicon.ico' },
+        jump_list: monitoringUrl ? [{ type: 1, title: '查看更多', url: monitoringUrl }] : undefined,
+        card_action: { type: 1, url: monitoringUrl || 'https://www.taobao.com/' },
+      };
+
+      await this.sendWecomTemplateCard(settings, card, 'test', title, desc);
+
       return { success: true };
     } catch (error) {
       return {

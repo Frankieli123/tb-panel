@@ -355,7 +355,21 @@ if (-not $SkipNodeRuntime) {
 if (Test-Path $zipPath) {
   Remove-Item -Force $zipPath
 }
-Compress-Archive -Path (Join-Path $stageRoot '*') -DestinationPath $zipPath
+
+$zipOk = $false
+for ($i = 0; $i -lt 6; $i++) {
+  try {
+    Compress-Archive -Path (Join-Path $stageRoot '*') -DestinationPath $zipPath
+    $zipOk = $true
+    break
+  } catch {
+    if ($i -ge 5) { break }
+    Start-Sleep -Milliseconds (400 * ($i + 1))
+  }
+}
+if (-not $zipOk) {
+  Write-Warning "Failed to create zip (file lock?). MSI build can still proceed. Zip: $zipPath"
+}
 
 Write-Host "OK"
 Write-Host "  Stage: $stageRoot"

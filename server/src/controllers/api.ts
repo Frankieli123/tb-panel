@@ -769,6 +769,7 @@ const updateNotificationSchema = z.object({
   feishuWebhook: z.string().optional().nullable(),
   triggerType: z.enum(['AMOUNT', 'PERCENT']).optional(),
   triggerValue: z.number().nonnegative().optional(),
+  notifyOnPriceUp: z.boolean().optional(),
 });
 
 router.put('/notifications/config', requireSession, async (req: Request, res: Response) => {
@@ -843,6 +844,7 @@ router.post('/notifications/test', requireSession, async (req: Request, res: Res
 });
 
 const smtpKeys = ['smtp.host', 'smtp.port', 'smtp.user', 'smtp.pass', 'smtp.from'] as const;
+const wecomKeys = ['wecom.enabled', 'wecom.corpId', 'wecom.agentId', 'wecom.secret', 'wecom.toUser'] as const;
 
 router.get('/notifications/smtp', requireAdmin, async (req: Request, res: Response) => {
   try {
@@ -940,6 +942,118 @@ router.post('/notifications/smtp/test', requireAdmin, async (req: Request, res: 
       res.status(400).json({ success: false, error: error.errors });
       return;
     }
+    res.status(500).json({ success: false, error: String(error) });
+  }
+});
+
+router.get('/notifications/wecom', requireAdmin, async (_req: Request, res: Response) => {
+  try {
+    const rows = await prisma.systemConfig.findMany({
+      where: { key: { in: [...wecomKeys] } },
+    });
+
+    const map = rows.reduce<Record<string, string>>((acc, row) => {
+      acc[row.key] = row.value;
+      return acc;
+    }, {});
+
+    const enabled =
+      map['wecom.enabled'] !== undefined
+        ? /^(1|true)$/i.test(map['wecom.enabled'].trim())
+        : config.wecom.enabled;
+
+    const corpId = map['wecom.corpId'] || config.wecom.corpId;
+    const agentId = parseInt(map['wecom.agentId'] || String(config.wecom.agentId), 10);
+    const toUser = (map['wecom.toUser'] || config.wecom.toUser || '@all').trim() || '@all';
+
+    res.json({
+      success: true,
+      data: {
+        enabled,
+        corpId,
+        agentId: Number.isFinite(agentId) ? agentId : 0,
+        toUser,
+        hasSecret: !!(map['wecom.secret'] || config.wecom.corpSecret),
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: String(error) });
+  }
+});
+
+const updateWecomSchema = z.object({
+  enabled: z.boolean().optional(),
+  corpId: z.string().optional(),
+  agentId: z.number().int().positive().optional(),
+  secret: z.string().optional(),
+  toUser: z.string().optional(),
+});
+
+router.put('/notifications/wecom', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const data = updateWecomSchema.parse(req.body);
+    const entries: Array<{ key: (typeof wecomKeys)[number]; value: string }> = [];
+
+    if (data.enabled !== undefined) entries.push({ key: 'wecom.enabled', value: data.enabled ? 'true' : 'false' });
+    if (data.corpId !== undefined) entries.push({ key: 'wecom.corpId', value: data.corpId.trim() });
+    if (data.agentId !== undefined) entries.push({ key: 'wecom.agentId', value: String(data.agentId) });
+    if (data.toUser !== undefined) entries.push({ key: 'wecom.toUser', value: data.toUser.trim() });
+    if (typeof data.secret === 'string' && data.secret.trim()) {
+      entries.push({ key: 'wecom.secret', value: data.secret.trim() });
+    }
+
+    await Promise.all(
+      entries.map((row) =>
+        prisma.systemConfig.upsert({
+          where: { key: row.key },
+          update: { value: row.value },
+          create: { key: row.key, value: row.value },
+        })
+      )
+    );
+
+    const rows = await prisma.systemConfig.findMany({
+      where: { key: { in: [...wecomKeys] } },
+    });
+
+    const map = rows.reduce<Record<string, string>>((acc, row) => {
+      acc[row.key] = row.value;
+      return acc;
+    }, {});
+
+    const enabled =
+      map['wecom.enabled'] !== undefined
+        ? /^(1|true)$/i.test(map['wecom.enabled'].trim())
+        : config.wecom.enabled;
+
+    const corpId = map['wecom.corpId'] || config.wecom.corpId;
+    const agentId = parseInt(map['wecom.agentId'] || String(config.wecom.agentId), 10);
+    const toUser = (map['wecom.toUser'] || config.wecom.toUser || '@all').trim() || '@all';
+
+    res.json({
+      success: true,
+      data: {
+        enabled,
+        corpId,
+        agentId: Number.isFinite(agentId) ? agentId : 0,
+        toUser,
+        hasSecret: !!(map['wecom.secret'] || config.wecom.corpSecret),
+      },
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ success: false, error: error.errors });
+      return;
+    }
+    res.status(500).json({ success: false, error: String(error) });
+  }
+});
+
+router.post('/notifications/wecom/test', requireAdmin, async (_req: Request, res: Response) => {
+  try {
+    const result = await notificationService.testWecomApp();
+    res.json({ success: result.success, error: result.error });
+  } catch (error) {
     res.status(500).json({ success: false, error: String(error) });
   }
 });

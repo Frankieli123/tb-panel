@@ -401,12 +401,15 @@ class SchedulerService {
           where: { id: productId },
         });
 
-        const oldPrice = product?.currentPrice ? parseFloat(product.currentPrice.toString()) : null;
+        const oldPriceRaw = product?.currentPrice ? parseFloat(product.currentPrice.toString()) : null;
+        const oldPrice = typeof oldPriceRaw === 'number' && Number.isFinite(oldPriceRaw) ? oldPriceRaw : null;
         const variantPrices = (result.data.variants ?? [])
           .map((v) => v.finalPrice)
           .filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
         const minVariantPrice = variantPrices.length > 0 ? Math.min(...variantPrices) : null;
-        const newPrice = result.data.finalPrice ?? minVariantPrice;
+        const newPriceCandidate = result.data.finalPrice ?? minVariantPrice;
+        const newPrice =
+          typeof newPriceCandidate === 'number' && Number.isFinite(newPriceCandidate) ? newPriceCandidate : null;
 
         // 保存价格快照
         if (newPrice !== null) {
@@ -440,9 +443,9 @@ class SchedulerService {
           });
 
           // 检查是否需要发送通知
-          if (oldPrice !== null && newPrice < oldPrice) {
+          if (oldPrice !== null && newPrice !== oldPrice) {
             const drop = calculatePriceDrop(oldPrice, newPrice);
-            await this.checkAndNotify(productId, oldPrice, newPrice, drop);
+            await this.checkAndNotify(productId, oldPrice, newPrice, drop, account.userId);
           }
         }
 
@@ -577,7 +580,8 @@ class SchedulerService {
     productId: string,
     oldPrice: number,
     newPrice: number,
-    drop: { amount: number; percent: number }
+    drop: { amount: number; percent: number },
+    userId?: string | null
   ): Promise<void> {
     try {
       const product = await prisma.product.findUnique({
@@ -587,6 +591,7 @@ class SchedulerService {
 
       const userConfigs = await (prisma as any).userNotificationConfig.findMany({
         where: {
+          ...(userId ? { userId } : {}),
           OR: [
             { emailEnabled: true },
             { wechatEnabled: true },

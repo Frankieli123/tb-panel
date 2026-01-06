@@ -13,7 +13,7 @@
     <MajorUpgrade DowngradeErrorMessage="A newer version is already installed." AllowSameVersionUpgrades="yes" />
     <MediaTemplate EmbedCab="yes" />
 
-    <Property Id="WixShellExecTarget" Value="[INSTALLFOLDER]TaobaoAgentTray.exe" />
+    <Property Id="WixShellExecTarget" Value="[INSTALLFOLDER]open-status.cmd" />
 
     <CustomAction
       Id="LaunchTray"
@@ -83,27 +83,31 @@
       <Component Id="StartMenuShortcuts" Guid="{A3D5741C-9ABF-4AE7-9A4F-BA9B5E0C5A28}">
         <Shortcut
           Id="StatusShortcut"
-          Name="Agent 状态"
+          Name="$(var.ProductName) - 状态页"
           Target="[INSTALLFOLDER]open-status.cmd"
           WorkingDirectory="INSTALLFOLDER"
+          Advertise="no"
         />
         <Shortcut
           Id="TrayShortcut"
-          Name="Agent 托盘"
+          Name="$(var.ProductName) - 托盘 (TaobaoAgentTray)"
           Target="[INSTALLFOLDER]TaobaoAgentTray.exe"
           WorkingDirectory="INSTALLFOLDER"
+          Advertise="no"
         />
         <Shortcut
           Id="StartAgentShortcut"
-          Name="Start Agent"
+          Name="$(var.ProductName) - 启动"
           Target="[INSTALLFOLDER]start-agent.cmd"
           WorkingDirectory="INSTALLFOLDER"
+          Advertise="no"
         />
         <Shortcut
           Id="PairAgentShortcut"
-          Name="Pair Agent"
+          Name="$(var.ProductName) - 配对"
           Target="[INSTALLFOLDER]pair-agent.cmd"
           WorkingDirectory="INSTALLFOLDER"
+          Advertise="no"
         />
 
         <RemoveFolder Id="ApplicationProgramsFolder" On="uninstall" />
@@ -127,6 +131,7 @@
           Name="$(var.ProductName)"
           Target="[INSTALLFOLDER]TaobaoAgentTray.exe"
           WorkingDirectory="INSTALLFOLDER"
+          Advertise="no"
         />
         <RegistryValue
           Root="HKLM"
@@ -145,21 +150,24 @@
       <Component Id="DesktopShortcuts" Guid="{CE6A1B7B-7F3E-4F8A-9E9D-0F8EFCA9275B}">
         <Shortcut
           Id="DesktopStatusShortcut"
-          Name="Taobao Agent - 状态"
+          Name="$(var.ProductName) - 状态页"
           Target="[INSTALLFOLDER]open-status.cmd"
           WorkingDirectory="INSTALLFOLDER"
+          Advertise="no"
         />
         <Shortcut
           Id="DesktopStartAgentShortcut"
-          Name="Taobao Agent - Start"
+          Name="$(var.ProductName) - 启动"
           Target="[INSTALLFOLDER]start-agent.cmd"
           WorkingDirectory="INSTALLFOLDER"
+          Advertise="no"
         />
         <Shortcut
           Id="DesktopPairAgentShortcut"
-          Name="Taobao Agent - Pair"
+          Name="$(var.ProductName) - 配对"
           Target="[INSTALLFOLDER]pair-agent.cmd"
           WorkingDirectory="INSTALLFOLDER"
+          Advertise="no"
         />
         <RegistryValue
           Root="HKLM"

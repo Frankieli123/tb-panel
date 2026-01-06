@@ -68,38 +68,78 @@ export class CartScraper {
     productId: string,
     oldPrice: number,
     newPrice: number,
-    drop: { amount: number; percent: number }
+    drop: { amount: number; percent: number },
+    userId?: string | null
   ): Promise<void> {
     try {
       const product = await prisma.product.findUnique({ where: { id: productId } });
       if (!product) return;
 
-      const userConfigs = await (prisma as any).userNotificationConfig.findMany({
-        where: {
-          OR: [
-            { emailEnabled: true },
-            { wechatEnabled: true },
-            { dingtalkEnabled: true },
-            { feishuEnabled: true },
-          ],
-        },
-      });
+      let userConfigs: any[] = [];
+      if (userId) {
+        let cfg = await (prisma as any).userNotificationConfig.findUnique({
+          where: { userId },
+        });
+
+        if (!cfg) {
+          cfg = await (prisma as any).userNotificationConfig.create({
+            data: { userId },
+          });
+        }
+
+        userConfigs = [cfg];
+      } else {
+        userConfigs = await (prisma as any).userNotificationConfig.findMany({
+          where: {
+            OR: [
+              { emailEnabled: true },
+              { wechatEnabled: true },
+              { dingtalkEnabled: true },
+              { feishuEnabled: true },
+            ],
+          },
+        });
+      }
 
       if (!userConfigs.length) return;
 
+      const isPriceDrop = newPrice < oldPrice;
+      const isPriceUp = newPrice > oldPrice;
+
+      let anyTriggered = false;
       for (const cfg of userConfigs) {
         const threshold = parseFloat(cfg.triggerValue.toString());
-        const shouldNotify =
-          cfg.triggerType === 'AMOUNT' ? drop.amount >= threshold : drop.percent >= threshold;
 
-        if (!shouldNotify) continue;
+        const shouldNotifyDrop =
+          isPriceDrop && (cfg.triggerType === 'AMOUNT'
+            ? drop.amount >= threshold
+            : drop.percent >= threshold);
 
-        await notificationService.sendPriceDropNotification({
+        const shouldNotifyUp =
+          isPriceUp && cfg.notifyOnPriceUp && (cfg.triggerType === 'AMOUNT'
+            ? Math.abs(drop.amount) >= threshold
+            : Math.abs(drop.percent) >= threshold);
+
+        if (!shouldNotifyDrop && !shouldNotifyUp) continue;
+
+        anyTriggered = true;
+        await notificationService.sendPriceChangeNotification({
           product,
           oldPrice,
           newPrice,
-          drop,
           config: cfg,
+          change: drop,
+          isPriceUp,
+        });
+      }
+
+      if (anyTriggered) {
+        await notificationService.sendWecomAppPriceChangeNotification({
+          product,
+          oldPrice,
+          newPrice,
+          change: drop,
+          isPriceUp,
         });
       }
     } catch (error) {
@@ -287,6 +327,12 @@ export class CartScraper {
   }> {
     console.log(`[CartScraper] Updating prices from cart for account=${accountId}`);
 
+    const accountUserId =
+      (await prisma.taobaoAccount.findUnique({
+        where: { id: accountId },
+        select: { userId: true },
+      }))?.userId ?? null;
+
     // 0. 兼容旧数据：如果还没有 base 记录，自动合并一次
     await this.ensureBaseProducts(accountId);
 
@@ -434,9 +480,9 @@ export class CartScraper {
           }
         });
 
-        if (oldPrice !== null && Number.isFinite(oldPrice) && minPrice > 0 && minPrice < oldPrice) {
+        if (oldPrice !== null && Number.isFinite(oldPrice) && minPrice > 0 && minPrice !== oldPrice) {
           const drop = calculatePriceDrop(oldPrice, minPrice);
-          await this.checkAndNotify(updatedProduct.id, oldPrice, minPrice, drop);
+          await this.checkAndNotify(updatedProduct.id, oldPrice, minPrice, drop, accountUserId);
         }
 
         // 推送前端更新通知

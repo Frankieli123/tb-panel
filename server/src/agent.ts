@@ -82,6 +82,125 @@ function isTruthy(value: unknown): boolean {
   return /^(1|true|yes|y|on)$/i.test(String(value ?? '').trim());
 }
 
+function isPidRunning(pid: number): boolean {
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err: any) {
+    // Treat "permission denied" as "process exists" to avoid false takeover.
+    if (String(err?.code || '') === 'EPERM') return true;
+    return false;
+  }
+}
+
+async function openUrlBestEffort(url: string): Promise<void> {
+  const u = String(url || '').trim();
+  if (!u) return;
+  try {
+    if (process.platform === 'win32') {
+      const { spawn } = await import('node:child_process');
+      spawn('cmd', ['/c', 'start', '""', u], { detached: true, stdio: 'ignore' }).unref();
+      return;
+    }
+
+    const { spawn } = await import('node:child_process');
+    const opener = process.platform === 'darwin' ? 'open' : 'xdg-open';
+    spawn(opener, [u], { detached: true, stdio: 'ignore' }).unref();
+  } catch {}
+}
+
+async function findExistingStatusUiUrl(): Promise<string | null> {
+  for (let port = 17880; port <= 17890; port++) {
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 800);
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/api/status`, { signal: ctrl.signal });
+        if (res.ok) return `http://127.0.0.1:${port}/`;
+      } finally {
+        clearTimeout(t);
+      }
+    } catch {}
+  }
+  return null;
+}
+
+type AgentLock = { release: () => Promise<void> };
+
+async function acquireAgentLock(addLog: (msg: string) => void): Promise<AgentLock | null> {
+  const dir = getAgentStoreDir();
+  const lockPath = path.join(dir, 'agent.lock');
+  await fs.mkdir(dir, { recursive: true });
+
+  const tryCreate = async (): Promise<fs.FileHandle | null> => {
+    try {
+      return await fs.open(lockPath, 'wx');
+    } catch (err: any) {
+      if (String(err?.code || '') === 'EEXIST') return null;
+      throw err;
+    }
+  };
+
+  const handle = await tryCreate();
+  if (handle) {
+    try {
+      await handle.writeFile(
+        JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }, null, 2),
+        'utf-8'
+      );
+    } catch {}
+
+    const release = async () => {
+      try {
+        await handle.close();
+      } catch {}
+      try {
+        await fs.unlink(lockPath);
+      } catch {}
+    };
+
+    return { release };
+  }
+
+  // Lock exists: attempt to detect stale PID and recover.
+  let otherPid: number | null = null;
+  try {
+    const raw = await fs.readFile(lockPath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    const pidNum = Number.parseInt(String(parsed?.pid || '').trim(), 10);
+    if (Number.isFinite(pidNum) && pidNum > 0) otherPid = pidNum;
+  } catch {}
+
+  if (otherPid && !isPidRunning(otherPid)) {
+    try {
+      await fs.unlink(lockPath);
+    } catch {}
+    const retry = await tryCreate();
+    if (retry) {
+      try {
+        await retry.writeFile(
+          JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), recoveredFromPid: otherPid }, null, 2),
+          'utf-8'
+        );
+      } catch {}
+      const release = async () => {
+        try {
+          await retry.close();
+        } catch {}
+        try {
+          await fs.unlink(lockPath);
+        } catch {}
+      };
+      addLog(`Recovered stale lock from pid=${otherPid}`);
+      return { release };
+    }
+  }
+
+  addLog(`Another agent instance is running (pid=${otherPid ?? 'unknown'})`);
+  return null;
+}
+
 async function loadStoredAgentStore(): Promise<AgentStore | null> {
   const storePath = path.join(getAgentStoreDir(), 'agent.json');
   try {
@@ -194,17 +313,7 @@ async function ensureUiOpenedOnce(statusUrl: string): Promise<void> {
   const url = String(statusUrl || '').trim();
   if (!url) return;
 
-  try {
-    if (process.platform === 'win32') {
-      const { spawn } = await import('node:child_process');
-      spawn('cmd', ['/c', 'start', '""', url], { detached: true, stdio: 'ignore' }).unref();
-      return;
-    }
-
-    const { spawn } = await import('node:child_process');
-    const opener = process.platform === 'darwin' ? 'open' : 'xdg-open';
-    spawn(opener, [url], { detached: true, stdio: 'ignore' }).unref();
-  } catch {}
+  await openUrlBestEffort(url);
 }
 
 async function startStatusServer(options: {
@@ -319,6 +428,32 @@ async function main(): Promise<void> {
     statusLogs.push(line);
     if (statusLogs.length > 250) statusLogs.splice(0, statusLogs.length - 250);
   };
+
+  const lock = await acquireAgentLock(addLog);
+  if (!lock) {
+    // Best effort: open the already-running UI for non-technical users.
+    const existing = await findExistingStatusUiUrl();
+    if (existing) {
+      addLog(`Opening existing status UI: ${existing}`);
+      await openUrlBestEffort(existing);
+    }
+    return;
+  }
+
+  const releaseLock = async () => {
+    try {
+      await lock.release();
+    } catch {}
+  };
+  process.on('exit', () => {
+    void releaseLock();
+  });
+  process.on('SIGINT', () => {
+    void releaseLock().finally(() => process.exit(0));
+  });
+  process.on('SIGTERM', () => {
+    void releaseLock().finally(() => process.exit(0));
+  });
 
   const envToken = String(process.env.AGENT_TOKEN || process.env.API_KEY || '').trim();
   const pairCode = String(process.env.AGENT_PAIR_CODE || getArgValue('--pair') || '').trim();
@@ -553,6 +688,13 @@ async function main(): Promise<void> {
       const errMsg = why || `WS closed (${code})`;
       status.lastError = errMsg;
       addLog(`Disconnected: code=${code} reason=${why}`);
+
+      // Another instance (same agentId) took over this connection.
+      // Avoid reconnect storms by stopping here.
+      if (code === 1012) {
+        addLog('This agent was replaced by a new connection. Stop reconnecting.');
+        return;
+      }
 
       const delay = 2000 + Math.floor(Math.random() * 3000);
       if (!token) return;
