@@ -7,9 +7,15 @@ import path from 'path';
 import { WebSocket } from 'ws';
 import { autoCartAdder } from './services/autoCartAdder.js';
 import { cartScraper } from './services/cartScraper.js';
+import { chromeLauncher } from './services/chromeLauncher.js';
+import { sharedBrowserManager } from './services/sharedBrowserManager.js';
 import { AGENT_STATUS_HTML } from './ui/agentStatusPage.js';
 
 dotenv.config();
+
+const TAOBAO_LOGIN_URL = 'https://login.taobao.com/member/login.jhtml';
+const LOGIN_SCREENSHOT_INTERVAL_MS = 1500;
+const LOGIN_TIMEOUT_MS = 10 * 60 * 1000;
 
 type RpcMessage = {
   type: 'rpc';
@@ -35,6 +41,24 @@ type LocalStatus = {
   statusUrl: string;
   logs: string[];
 };
+
+function checkLoginByCookies(cookies: Array<{ name: string; domain: string }>): boolean {
+  const authCookieNames = ['_m_h5_tk', '_m_h5_tk_enc', 'login', 'munb', 'lgc', 'tracknick'];
+  const taobaoDomains = ['.taobao.com', '.tmall.com', '.alicdn.com'];
+
+  return authCookieNames.some((name) =>
+    cookies.some((c) => c.name === name && taobaoDomains.some((d) => c.domain.includes(d.replace('.', ''))))
+  );
+}
+
+async function waitForPageStable(page: any): Promise<void> {
+  try {
+    if (page?.isClosed?.()) return;
+    await page.waitForLoadState?.('domcontentloaded', { timeout: 10000 }).catch(() => {});
+    await page.waitForLoadState?.('networkidle', { timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout?.(500).catch(() => {});
+  } catch {}
+}
 
 function getArgValue(flag: string): string | null {
   const argv = process.argv;
@@ -478,6 +502,30 @@ async function main(): Promise<void> {
 
   const getStatus = (): LocalStatus => ({ ...status, logs: statusLogs.slice(-250) });
 
+  void (async () => {
+    try {
+      const chromePath = await chromeLauncher.ensureChromeAvailable();
+      if (chromePath) {
+        addLog(`Chrome ready: ${chromePath}`);
+        return;
+      }
+      if (/^(1|true)$/i.test(String(process.env.CHROME_AUTO_INSTALL ?? ''))) {
+        addLog('Chrome not found: auto-install is enabled but no executable resolved.');
+        return;
+      }
+      addLog('Chrome not found: set CHROME_AUTO_INSTALL=1 to enable auto-install.');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      addLog(`Chrome preinstall failed: ${msg}`);
+    }
+  })();
+
+  const loginControllers = new Map<string, AbortController>();
+  const cancelLoginForAccount = (accountId: string) => {
+    const ctrl = loginControllers.get(accountId);
+    if (ctrl) ctrl.abort();
+  };
+
   let ws: WebSocket | null = null;
   let reconnectTimer: NodeJS.Timeout | null = null;
 
@@ -663,6 +711,75 @@ async function main(): Promise<void> {
           const cookies = String((params.cookies as any) || '');
           const result = await cartScraper.scrapeCart(accountId, cookies);
           wsConn.send(JSON.stringify({ type: 'rpc_result', requestId, ok: true, result }));
+          return;
+        }
+
+        if (method === 'loginTaobao') {
+          const accountId = required('params.accountId', params.accountId as any);
+          cancelLoginForAccount(accountId);
+
+          const ctrl = new AbortController();
+          loginControllers.set(accountId, ctrl);
+
+          try {
+            await sharedBrowserManager.disposeSession(accountId).catch(() => {});
+            const session = await sharedBrowserManager.getOrCreateSession(accountId);
+
+            try {
+              await session.context.addInitScript(`
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+                Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] });
+                window.chrome = { runtime: {} };
+              `);
+            } catch {}
+
+            await session.page.goto(TAOBAO_LOGIN_URL, { waitUntil: 'domcontentloaded' });
+            await waitForPageStable(session.page);
+
+            const startedAt = Date.now();
+            while (Date.now() - startedAt < LOGIN_TIMEOUT_MS) {
+              if (ctrl.signal.aborted) throw new Error('Login cancelled');
+              if (session.page.isClosed()) throw new Error('Login page closed');
+
+              const screenshot = await session.page
+                .screenshot({ type: 'jpeg', quality: 85, timeout: 15000 })
+                .catch(() => null as any);
+
+              if (screenshot) {
+                sendProgress(
+                  { total: 1, current: 0, success: 0, failed: 0 },
+                  JSON.stringify({ type: 'screenshot', image: Buffer.from(screenshot).toString('base64') })
+                );
+              }
+
+              const currentUrl = session.page.url();
+              const isLoginPage = currentUrl.includes('login.taobao.com') || currentUrl.includes('login.tmall.com');
+              if (!isLoginPage) {
+                const cookies = await session.context.cookies().catch(() => [] as any[]);
+                if (checkLoginByCookies(cookies as any)) {
+                  const cookiesJson = JSON.stringify(cookies);
+                  wsConn.send(JSON.stringify({ type: 'rpc_result', requestId, ok: true, result: { cookies: cookiesJson } }));
+                  return;
+                }
+              }
+
+              await session.page.waitForTimeout(LOGIN_SCREENSHOT_INTERVAL_MS).catch(() => {});
+            }
+
+            throw new Error('Login timeout');
+          } finally {
+            if (loginControllers.get(accountId) === ctrl) {
+              loginControllers.delete(accountId);
+            }
+            await sharedBrowserManager.disposeSession(accountId).catch(() => {});
+          }
+        }
+
+        if (method === 'cancelLoginTaobao') {
+          const accountId = required('params.accountId', params.accountId as any);
+          cancelLoginForAccount(accountId);
+          wsConn.send(JSON.stringify({ type: 'rpc_result', requestId, ok: true, result: { cancelled: true } }));
           return;
         }
 

@@ -5,6 +5,7 @@ import { encryptCookies } from '../utils/helpers.js';
 import { config } from '../config/index.js';
 import { getCookieValue, getSessionByToken } from '../auth/session.js';
 import { SESSION_COOKIE_NAME } from '../auth/cookies.js';
+import { agentHub } from './agentHub.js';
 
 const prisma = new PrismaClient();
 
@@ -23,15 +24,24 @@ const DESKTOP_DEVICE = {
   timezoneId: 'Asia/Shanghai',
 };
 
-interface LoginSession {
-  accountId: string;
-  browser: Browser;
-  context: BrowserContext;
-  page: Page;
-  ws: WebSocket;
-  intervalId: NodeJS.Timeout | null;
-  isCapturing: boolean;
-}
+type LoginSession =
+  | {
+      mode: 'local';
+      accountId: string;
+      browser: Browser;
+      context: BrowserContext;
+      page: Page;
+      ws: WebSocket;
+      intervalId: NodeJS.Timeout | null;
+      isCapturing: boolean;
+    }
+  | {
+      mode: 'agent';
+      accountId: string;
+      agentId: string;
+      ws: WebSocket;
+      cancelled: boolean;
+    };
 
 type WsUser = { id: string; role: 'admin' | 'operator' };
 
@@ -317,6 +327,7 @@ class LoginManager {
       await waitForPageStable(page);
 
       const session: LoginSession = {
+        mode: 'local',
         accountId,
         browser,
         context,
@@ -338,12 +349,20 @@ class LoginManager {
       await this.captureAndCheck(session);
 
     } catch (error) {
+      const started = await this.startLoginViaAgent({ accountId, account, ws, user });
+      if (started) return;
+
       console.error('[LoginManager] Start session error:', error);
-      ws.send(JSON.stringify({ type: 'error', message: String(error) }));
+      const raw = error instanceof Error ? error.message : String(error);
+      const hint =
+        raw.includes('Executable') && raw.includes('doesn') && raw.includes('exist')
+          ? 'Playwright 浏览器未安装：请在服务器执行 `npx playwright install chromium`，或先连接 Windows Agent 并为账号绑定/设置默认 Agent 后重试。'
+          : raw;
+      ws.send(JSON.stringify({ type: 'error', message: hint }));
     }
   }
 
-  private async captureAndCheck(session: LoginSession): Promise<void> {
+  private async captureAndCheck(session: Extract<LoginSession, { mode: 'local' }>): Promise<void> {
     if (session.isCapturing) return;
     session.isCapturing = true;
 
@@ -424,22 +443,138 @@ class LoginManager {
     }
   }
 
+  private async startLoginViaAgent(options: {
+    accountId: string;
+    account: any;
+    ws: WebSocket;
+    user: WsUser;
+  }): Promise<boolean> {
+    const accountId = options.accountId;
+    const account = options.account;
+    const ws = options.ws;
+    const user = options.user;
+
+    const explicitAgentId = String(account?.agentId || '').trim();
+    const preferredAgentId =
+      !explicitAgentId && account?.userId
+        ? String(
+            (await (prisma as any).systemUser.findUnique({
+              where: { id: account.userId },
+              select: { preferredAgentId: true },
+            }))?.preferredAgentId || ''
+          ).trim()
+        : '';
+
+    const agentId = explicitAgentId || preferredAgentId;
+    if (!agentId) return false;
+    if (!agentHub.isConnected(agentId)) return false;
+
+    if (user.role === 'operator' && !agentHub.isOwnedBy(agentId, user.id)) {
+      ws.send(JSON.stringify({ type: 'error', message: 'Forbidden agent' }));
+      return true;
+    }
+
+    const session: LoginSession = { mode: 'agent', accountId, agentId, ws, cancelled: false };
+    this.sessions.set(accountId, session);
+    ws.send(JSON.stringify({ type: 'login_started', accountId }));
+
+    void (async () => {
+      try {
+        const result = await agentHub.call<any>(
+          agentId,
+          'loginTaobao',
+          { accountId },
+          {
+            timeoutMs: 12 * 60 * 1000,
+            onProgress: (_p, log) => {
+              if (!log) return;
+              const current = this.sessions.get(accountId);
+              if (current !== session) return;
+              if (current.mode !== 'agent' || current.cancelled) return;
+
+              let evt: any;
+              try {
+                evt = JSON.parse(log);
+              } catch {
+                return;
+              }
+
+              if (evt?.type === 'screenshot' && typeof evt?.image === 'string') {
+                if (ws.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify({ type: 'screenshot', accountId, image: evt.image }));
+                }
+              }
+            },
+          }
+        );
+
+        const current = this.sessions.get(accountId);
+        if (current !== session) return;
+        if (current.mode !== 'agent' || current.cancelled) return;
+
+        const cookiesJson = String(result?.cookies || '').trim();
+        if (!cookiesJson) {
+          throw new Error('Agent returned empty cookies');
+        }
+
+        await prisma.taobaoAccount.update({
+          where: { id: accountId },
+          data: {
+            cookies: encryptCookies(cookiesJson),
+            isActive: true,
+            lastLoginAt: new Date(),
+            status: 'IDLE',
+            errorCount: 0,
+            lastError: null,
+          },
+        });
+
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'login_success', accountId, message: '登录成功' }));
+        }
+      } catch (err) {
+        const current = this.sessions.get(accountId);
+        if (current !== session) return;
+        if (current.mode !== 'agent' || current.cancelled) return;
+
+        const msg = err instanceof Error ? err.message : String(err);
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'error', message: msg }));
+        }
+      } finally {
+        const current = this.sessions.get(accountId);
+        if (current === session) {
+          this.sessions.delete(accountId);
+        }
+      }
+    })();
+
+    return true;
+  }
+
   async cancelLoginSession(accountId: string): Promise<void> {
     const session = this.sessions.get(accountId);
     if (!session) return;
 
     console.log(`[LoginManager] Canceling session for account: ${accountId}`);
 
-    if (session.intervalId) {
-      clearInterval(session.intervalId);
-    }
+    if (session.mode === 'local') {
+      if (session.intervalId) {
+        clearInterval(session.intervalId);
+      }
 
-    try {
-      await session.page.close().catch(() => {});
-      await session.context.close().catch(() => {});
-      await session.browser.close().catch(() => {});
-    } catch {
-      // ignore
+      try {
+        await session.page.close().catch(() => {});
+        await session.context.close().catch(() => {});
+        await session.browser.close().catch(() => {});
+      } catch {
+        // ignore
+      }
+    } else {
+      session.cancelled = true;
+      await agentHub
+        .call(session.agentId, 'cancelLoginTaobao', { accountId }, { timeoutMs: 8_000 })
+        .catch(() => {});
     }
 
     if (session.ws.readyState === WebSocket.OPEN) {

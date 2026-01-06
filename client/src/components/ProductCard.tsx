@@ -220,11 +220,11 @@ export default function ProductCard({ product, onRefresh, onDelete }: ProductCar
 
       {/* Expanded Chart Area */}
       {isExpanded && (
-        <div className="border-t border-gray-100 bg-gray-50/50 p-4">
+        <div className="border-t border-gray-100 bg-gray-50/50">
           <SkuVariantPanel productId={product.id} productImageUrl={product.imageUrl} />
 
           {/* Mobile Actions Expanded */}
-          <div className="flex justify-between items-center mt-4 md:hidden">
+          <div className="flex justify-between items-center p-4 md:hidden">
             <div className={`px-3 py-1.5 rounded-full text-xs font-bold ${getStatusColor(product)}`}>
               {getStatusText(product)}
             </div>

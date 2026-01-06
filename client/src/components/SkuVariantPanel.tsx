@@ -21,6 +21,7 @@ export default function SkuVariantPanel({ productId, productImageUrl }: SkuVaria
   const [error, setError] = useState<string | null>(null);
 
   const [selectedGroup, setSelectedGroup] = useState<string>('');
+  const [selectedVariantKey, setSelectedVariantKey] = useState<string>('');
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
 
   const [historyByKey, setHistoryByKey] = useState<HistoryByVariantKey>({});
@@ -61,7 +62,9 @@ export default function SkuVariantPanel({ productId, productImageUrl }: SkuVaria
     const order = new Map<string, number>();
     let orderCounter = 0;
 
-    for (const v of variants) {
+    const variantsWithSelections = variants.filter((v) => (v.selections || []).length > 0);
+
+    for (const v of variantsWithSelections) {
       for (const s of v.selections || []) {
         const label = (s.label || '').trim();
         const value = (s.value || '').trim();
@@ -74,36 +77,42 @@ export default function SkuVariantPanel({ productId, productImageUrl }: SkuVaria
       }
     }
 
-    let bestLabel = '';
-    let bestSize = Number.POSITIVE_INFINITY;
-    let bestOrder = Number.POSITIVE_INFINITY;
+    const metrics: Array<{ label: string; uniqueCount: number; order: number }> = [];
 
     for (const [label, set] of counts.entries()) {
-      const size = set.size;
-      const ord = order.get(label) ?? 0;
-      if (size < bestSize || (size === bestSize && ord < bestOrder)) {
-        bestLabel = label;
-        bestSize = size;
-        bestOrder = ord;
+      const uniqueCount = set.size;
+      if (uniqueCount <= 1) continue;
+      metrics.push({
+        label,
+        uniqueCount,
+        order: order.get(label) ?? 0,
+      });
+    }
+
+    if (metrics.length < 2) return { label: '', values: [] };
+
+    let best = metrics[0];
+    for (const m of metrics) {
+      if (m.uniqueCount < best.uniqueCount || (m.uniqueCount === best.uniqueCount && m.order < best.order)) {
+        best = m;
       }
     }
 
-    const values = bestLabel ? Array.from(counts.get(bestLabel) ?? []) : [];
-    return { label: bestLabel, values };
+    const values = best.label ? Array.from(counts.get(best.label) ?? []) : [];
+    return { label: best.label, values };
   }, [variants]);
 
   const groupLabel = useMemo(() => {
-    return primaryDimension.label || variants.find((v) => v.selections && v.selections.length > 0)?.selections?.[0]?.label || '';
-  }, [primaryDimension.label, variants]);
+    return primaryDimension.label;
+  }, [primaryDimension.label]);
 
   const grouped = useMemo(() => {
+    if (!groupLabel) return {};
     const by: Record<string, Variant[]> = {};
 
     for (const v of variants) {
-      const key =
-        (groupLabel ? v.selections?.find((s) => (s.label || '').trim() === groupLabel)?.value : null) ||
-        v.selections?.[0]?.value ||
-        '默认';
+      const raw = v.selections?.find((s) => (s.label || '').trim() === groupLabel)?.value;
+      const key = (raw || '').trim() || '默认';
       if (!by[key]) by[key] = [];
       by[key].push(v);
     }
@@ -112,8 +121,8 @@ export default function SkuVariantPanel({ productId, productImageUrl }: SkuVaria
   }, [groupLabel, variants]);
 
   const groups = useMemo(() => {
+    if (!groupLabel) return [];
     const keys = Object.keys(grouped);
-    if (!groupLabel) return keys;
 
     const ordered: string[] = [];
     for (const v of primaryDimension.values) {
@@ -125,15 +134,14 @@ export default function SkuVariantPanel({ productId, productImageUrl }: SkuVaria
     return ordered;
   }, [groupLabel, grouped, primaryDimension.values]);
 
-  useEffect(() => {
-    if (groups.length === 0) return;
-    if (!selectedGroup || !groups.includes(selectedGroup)) {
-      setSelectedGroup(groups[0]);
-    }
+  const activeGroup = useMemo(() => {
+    if (groups.length === 0) return '';
+    if (selectedGroup && groups.includes(selectedGroup)) return selectedGroup;
+    return groups[0] || '';
   }, [groups, selectedGroup]);
 
   const currentVariants = useMemo(() => {
-    const list = groups.length > 0 ? grouped[selectedGroup] ?? [] : variants;
+    const list = groupLabel ? grouped[activeGroup] ?? [] : variants;
     const q = query.trim();
     if (!q) return list;
 
@@ -142,7 +150,35 @@ export default function SkuVariantPanel({ productId, productImageUrl }: SkuVaria
       const sub = getVariantSubtitle(v);
       return `${title} ${sub}`.toLowerCase().includes(q.toLowerCase());
     });
-  }, [groupLabel, grouped, groups.length, query, selectedGroup, variants]);
+  }, [activeGroup, groupLabel, grouped, groups.length, query, variants]);
+
+  useEffect(() => {
+    if (!groupLabel) {
+      if (selectedVariantKey) setSelectedVariantKey('');
+      return;
+    }
+
+    if (currentVariants.length === 0) {
+      if (selectedVariantKey) setSelectedVariantKey('');
+      return;
+    }
+
+    const keys = new Set(currentVariants.map((v) => v.variantKey));
+    if (!selectedVariantKey || !keys.has(selectedVariantKey)) {
+      setSelectedVariantKey(currentVariants[0].variantKey);
+    }
+  }, [currentVariants, groupLabel, selectedVariantKey]);
+
+  const activeVariant = useMemo(() => {
+    if (!groupLabel) return null;
+    if (currentVariants.length === 0) return null;
+    return currentVariants.find((v) => v.variantKey === selectedVariantKey) || currentVariants[0];
+  }, [currentVariants, groupLabel, selectedVariantKey]);
+
+  const displayVariants = useMemo(() => {
+    if (!groupLabel) return currentVariants;
+    return activeVariant ? [activeVariant] : [];
+  }, [activeVariant, currentVariants, groupLabel]);
 
   const toggleExpand = async (variantKey: string) => {
     const isExpanding = !expanded.has(variantKey);
@@ -208,8 +244,8 @@ export default function SkuVariantPanel({ productId, productImageUrl }: SkuVaria
   };
 
   return (
-    <div className="bg-gray-50/50">
-      <div className="p-4">
+    <div className="">
+      <div className="p-2 md:p-4">
         {isLoading ? (
           <div className="h-40 flex items-center justify-center text-gray-400">
             <Loader2 className="w-5 h-5 animate-spin" />
@@ -245,7 +281,7 @@ export default function SkuVariantPanel({ productId, productImageUrl }: SkuVaria
                     key={g}
                     onClick={() => setSelectedGroup(g)}
                     className={`px-3 py-1.5 text-xs font-medium rounded-full border transition-colors ${
-                      selectedGroup === g
+                      activeGroup === g
                         ? 'bg-orange-50 text-orange-700 border-orange-200'
                         : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-100'
                     }`}
@@ -256,8 +292,31 @@ export default function SkuVariantPanel({ productId, productImageUrl }: SkuVaria
               </div>
             )}
 
-            <div className="max-h-[520px] overflow-y-auto space-y-2 pr-1">
-              {currentVariants.map((v) => {
+            {groupLabel && currentVariants.length > 0 && (
+              <div className="w-full">
+                <select
+                  value={selectedVariantKey}
+                  onChange={(e) => setSelectedVariantKey(e.target.value)}
+                  className="w-full px-2 py-2 text-xs rounded-lg border border-gray-200 bg-white focus:outline-none"
+                >
+                  {currentVariants.map((v) => {
+                    const title = getVariantTitle(v, groupLabel);
+                    const opt = `${title} ${activeGroup}`.trim();
+                    return (
+                      <option key={v.variantKey} value={v.variantKey}>
+                        {opt}
+                      </option>
+                    );
+                  })}
+                </select>
+              </div>
+            )}
+
+            {displayVariants.length === 0 ? (
+              <div className="text-sm text-gray-400 text-center py-10">暂无匹配SKU</div>
+            ) : (
+              <div className="max-h-[520px] overflow-y-auto space-y-2 pr-1">
+                {displayVariants.map((v) => {
                 const isOpen = expanded.has(v.variantKey);
                 const title = getVariantTitle(v, groupLabel);
                 const subtitle = getVariantSubtitle(v);
@@ -362,8 +421,9 @@ export default function SkuVariantPanel({ productId, productImageUrl }: SkuVaria
                     )}
                   </div>
                 );
-              })}
-            </div>
+                })}
+              </div>
+            )}
           </div>
         )}
       </div>

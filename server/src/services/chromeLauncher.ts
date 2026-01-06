@@ -1,9 +1,11 @@
 import { spawn, ChildProcess } from 'child_process';
-import { existsSync } from 'fs';
-import { mkdir, rm, writeFile } from 'fs/promises';
+import { createWriteStream, existsSync } from 'fs';
+import { mkdir, rm } from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { chromium, Browser } from 'playwright';
+import { Readable } from 'stream';
+import { pipeline } from 'stream/promises';
 
 /**
  * Chrome 启动管理器
@@ -84,31 +86,171 @@ export class ChromeLauncher {
     });
   }
 
-  private async resolveChromeForTestingDownloadUrl(): Promise<string> {
-    const url = 'https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json';
-    const res = await fetch(url, { redirect: 'follow' });
+  private getChromeForTestingMirrorBases(): string[] {
+    const raw = String(
+      process.env.CHROME_FOR_TESTING_MIRROR_BASES ?? process.env.CHROME_FOR_TESTING_MIRROR_BASE ?? ''
+    ).trim();
+
+    const defaults = ['https://registry.npmmirror.com/-/binary/chrome-for-testing'];
+    const parts = raw
+      ? raw
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : defaults;
+
+    const unique: string[] = [];
+    for (const p of parts) {
+      const normalized = p.replace(/\/+$/, '');
+      if (!normalized) continue;
+      if (!unique.includes(normalized)) unique.push(normalized);
+    }
+    return unique.length > 0 ? unique : defaults;
+  }
+
+  private async fetchWithTimeout(url: string, init?: RequestInit & { timeoutMs?: number }): Promise<Response> {
+    const timeoutMs = Math.max(1_000, Number(init?.timeoutMs ?? 20_000));
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    (t as any).unref?.();
+    try {
+      const { timeoutMs: _ignored, ...rest } = init ?? {};
+      return await fetch(url, { ...rest, signal: ctrl.signal });
+    } finally {
+      clearTimeout(t);
+    }
+  }
+
+  private compareDottedVersion(a: string, b: string): number {
+    const pa = a.split('.').map((x) => Number.parseInt(x, 10));
+    const pb = b.split('.').map((x) => Number.parseInt(x, 10));
+    const n = Math.max(pa.length, pb.length, 4);
+    for (let i = 0; i < n; i++) {
+      const da = Number.isFinite(pa[i]) ? pa[i] : 0;
+      const db = Number.isFinite(pb[i]) ? pb[i] : 0;
+      if (da < db) return -1;
+      if (da > db) return 1;
+    }
+    return 0;
+  }
+
+  private async resolveChromeForTestingStableDownload(): Promise<{ version: string; url: string } | null> {
+    const metaUrl =
+      String(process.env.CHROME_FOR_TESTING_METADATA_URL || '').trim() ||
+      'https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json';
+
+    const res = await this.fetchWithTimeout(metaUrl, { redirect: 'follow', timeoutMs: 12_000 });
     if (!res.ok) {
       throw new Error(`Failed to fetch Chrome for Testing metadata: HTTP ${res.status}`);
     }
 
     const data: any = await res.json();
+    const version = String(data?.channels?.Stable?.version || '').trim();
     const downloads = data?.channels?.Stable?.downloads?.chrome;
     const found = Array.isArray(downloads) ? downloads.find((d: any) => d?.platform === 'win64') : null;
     const dlUrl = found?.url ? String(found.url) : '';
-    if (!dlUrl) {
-      throw new Error('Chrome for Testing download URL not found (Stable/win64)');
+    if (!version || !dlUrl) return null;
+    return { version, url: dlUrl };
+  }
+
+  private async resolveChromeForTestingLatestVersionFromMirror(): Promise<string> {
+    const bases = this.getChromeForTestingMirrorBases();
+    const errors: string[] = [];
+
+    for (const base of bases) {
+      const listUrl = `${base}/`;
+      try {
+        const res = await this.fetchWithTimeout(listUrl, { redirect: 'follow', timeoutMs: 12_000 });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+        const raw = (await res.json()) as Array<any>;
+        if (!Array.isArray(raw) || raw.length === 0) throw new Error('Empty list');
+
+        const versions = raw
+          .map((x) => String(x?.name || '').trim())
+          .map((s) => s.replace(/\/+$/, ''))
+          .filter((s) => /^\d+\.\d+\.\d+\.\d+$/.test(s));
+
+        if (versions.length === 0) throw new Error('No version directories');
+
+        versions.sort((a, b) => this.compareDottedVersion(a, b));
+        return versions[versions.length - 1];
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        errors.push(`${base}: ${msg}`);
+      }
     }
 
-    return dlUrl;
+    throw new Error(`Failed to resolve Chrome for Testing version from mirrors: ${errors.join('; ')}`);
+  }
+
+  private buildChromeForTestingMirrorUrl(base: string, version: string): string {
+    const normalizedBase = String(base || '').trim().replace(/\/+$/, '');
+    return `${normalizedBase}/${encodeURIComponent(version)}/win64/chrome-win64.zip`;
+  }
+
+  private async resolveChromeForTestingDownloadUrls(): Promise<{ version: string; urls: string[] }> {
+    const pinnedVersion = String(process.env.CHROME_FOR_TESTING_VERSION || '').trim();
+    const explicitUrl = String(process.env.CHROME_FOR_TESTING_DOWNLOAD_URL || '').trim();
+
+    let version = pinnedVersion;
+    let officialUrl = '';
+
+    if (!explicitUrl && !version) {
+      try {
+        const stable = await this.resolveChromeForTestingStableDownload();
+        if (stable) {
+          version = stable.version;
+          officialUrl = stable.url;
+        }
+      } catch {}
+    }
+
+    if (!version) {
+      version = await this.resolveChromeForTestingLatestVersionFromMirror();
+    }
+
+    const urls: string[] = [];
+    if (explicitUrl) urls.push(explicitUrl);
+    if (officialUrl) urls.push(officialUrl);
+
+    for (const base of this.getChromeForTestingMirrorBases()) {
+      urls.push(this.buildChromeForTestingMirrorUrl(base, version));
+    }
+
+    const unique: string[] = [];
+    for (const u of urls) {
+      const trimmed = String(u || '').trim();
+      if (!trimmed) continue;
+      if (!unique.includes(trimmed)) unique.push(trimmed);
+    }
+
+    return { version, urls: unique };
   }
 
   private async downloadToFile(url: string, filePath: string): Promise<void> {
-    const res = await fetch(url, { redirect: 'follow' });
+    const res = await this.fetchWithTimeout(url, { redirect: 'follow', timeoutMs: 120_000 });
     if (!res.ok) {
       throw new Error(`Download failed: HTTP ${res.status}`);
     }
-    const buf = Buffer.from(await res.arrayBuffer());
-    await writeFile(filePath, buf);
+    if (!res.body) {
+      throw new Error('Download failed: empty body');
+    }
+    await pipeline(Readable.fromWeb(res.body as any), createWriteStream(filePath));
+  }
+
+  private async downloadToFileWithFallback(urls: string[], filePath: string): Promise<string> {
+    const errors: string[] = [];
+    for (const url of urls) {
+      try {
+        await this.downloadToFile(url, filePath);
+        return url;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        errors.push(`${url}: ${msg}`);
+      }
+    }
+    throw new Error(`All download URLs failed: ${errors.join('; ')}`);
   }
 
   private async ensureChromeForTestingInstalled(): Promise<string | null> {
@@ -123,9 +265,11 @@ export class ChromeLauncher {
     this.installingChrome = (async () => {
       await mkdir(dir, { recursive: true });
 
-      const dlUrl = await this.resolveChromeForTestingDownloadUrl();
       console.log('[ChromeLauncher] Chrome not found. Auto-installing Chrome for Testing...');
-      console.log(`[ChromeLauncher] Downloading: ${dlUrl}`);
+
+      const { version, urls } = await this.resolveChromeForTestingDownloadUrls();
+      console.log(`[ChromeLauncher] Resolved Chrome for Testing version: ${version}`);
+      console.log(`[ChromeLauncher] Download candidates: ${urls.join(' | ')}`);
 
       const zipPath = path.join(dir, 'chrome-win64.zip');
       const tmpZipPath = `${zipPath}.tmp`;
@@ -135,7 +279,8 @@ export class ChromeLauncher {
       await rm(zipPath, { force: true }).catch(() => {});
       await rm(extractedDir, { recursive: true, force: true }).catch(() => {});
 
-      await this.downloadToFile(dlUrl, tmpZipPath);
+      const used = await this.downloadToFileWithFallback(urls, tmpZipPath);
+      console.log(`[ChromeLauncher] Downloaded from: ${used}`);
       await this.expandZipWithPowerShell(tmpZipPath, dir);
       await rm(tmpZipPath, { force: true }).catch(() => {});
 
@@ -160,6 +305,13 @@ export class ChromeLauncher {
   /**
    * 启动独立的 Chrome 实例
    */
+  async ensureChromeAvailable(): Promise<string | null> {
+    const existing = this.findChromePath();
+    if (existing) return existing;
+    if (!this.autoInstallChrome) return null;
+    return await this.ensureChromeForTestingInstalled();
+  }
+
   async launch(): Promise<Browser> {
     // 检查现有浏览器是否仍然健康
     if (this.browser) {
