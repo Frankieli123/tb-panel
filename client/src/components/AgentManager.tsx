@@ -132,57 +132,59 @@ export default function AgentManager({ agents, isLoading, error, onRefresh }: Ag
   return (
     <div className="space-y-4">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
-        <div className="flex items-center gap-2">
-          <h3 className="text-lg font-bold text-gray-900 flex items-center gap-2">
-             执行节点 (Agent)
-             <span className="text-xs font-normal bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full border border-gray-200">
-               {agents.length}
-             </span>
-          </h3>
-        </div>
-        
-        <div className="flex items-center gap-2">
-            {/* Settings Dropdown */}
-            <div className="flex items-center gap-2 bg-white px-3 py-1.5 rounded-lg border border-gray-200 shadow-sm">
-                <Settings className="w-3.5 h-3.5 text-gray-400" />
-                <select
-                    className="bg-transparent text-xs text-gray-600 font-medium focus:outline-none min-w-[100px] cursor-pointer"
-                    value={localAgentId}
-                    onChange={(e) => setLocalAgentId(e.target.value)}
-                    disabled={!autoBindToLocalAgent}
-                    title="默认执行节点：新账号将自动使用此节点"
-                >
-                    <option value="">无默认节点</option>
-                    {agents.map((a) => (
-                    <option key={a.agentId} value={a.agentId}>
-                        {a.agentId} {localAgentId === a.agentId ? '(默认)' : ''}
-                    </option>
-                    ))}
-                    {!!localAgentId && !localAgentOnline && (
-                    <option value={localAgentId}>[离线] {localAgentId}</option>
-                    )}
-                </select>
-                <div className="w-px h-3 bg-gray-200 mx-1"></div>
-                <label className="flex items-center gap-1.5 cursor-pointer" title="自动跟随：新账号自动绑定此节点">
-                    <input
-                        type="checkbox"
-                        className="rounded border-gray-300 text-orange-600 focus:ring-orange-500 w-3.5 h-3.5"
-                        checked={autoBindToLocalAgent}
-                        onChange={(e) => setAutoBindToLocalAgent(e.target.checked)}
-                    />
-                    <span className="text-xs text-gray-500">自动绑定</span>
-                </label>
+      <div className="flex flex-col gap-4">
+        <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
+            <div className="flex items-center gap-2">
+            <h3 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+                执行节点 (Agent)
+                <span className="text-xs font-normal bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full border border-gray-200">
+                {agents.length}
+                </span>
+            </h3>
             </div>
+            
+            <div className="flex flex-wrap items-center gap-2">
+                {/* Settings Dropdown */}
+                <div className="flex items-center gap-2 bg-white px-3 py-1.5 rounded-lg border border-gray-200 shadow-sm max-w-full overflow-x-auto">
+                    <Settings className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />
+                    <select
+                        className="bg-transparent text-xs text-gray-600 font-medium focus:outline-none min-w-[80px] cursor-pointer"
+                        value={localAgentId}
+                        onChange={(e) => setLocalAgentId(e.target.value)}
+                        disabled={!autoBindToLocalAgent}
+                        title="默认执行节点：新账号将自动使用此节点"
+                    >
+                        <option value="">无默认节点</option>
+                        {agents.map((a) => (
+                        <option key={a.agentId} value={a.agentId}>
+                            {a.agentId} {localAgentId === a.agentId ? '(默认)' : ''}
+                        </option>
+                        ))}
+                        {!!localAgentId && !localAgentOnline && (
+                        <option value={localAgentId}>[离线] {localAgentId}</option>
+                        )}
+                    </select>
+                    <div className="w-px h-3 bg-gray-200 mx-1 flex-shrink-0"></div>
+                    <label className="flex items-center gap-1.5 cursor-pointer whitespace-nowrap" title="自动跟随：新账号自动绑定此节点">
+                        <input
+                            type="checkbox"
+                            className="rounded border-gray-300 text-orange-600 focus:ring-orange-500 w-3.5 h-3.5"
+                            checked={autoBindToLocalAgent}
+                            onChange={(e) => setAutoBindToLocalAgent(e.target.checked)}
+                        />
+                        <span className="text-xs text-gray-500">自动绑定</span>
+                    </label>
+                </div>
 
-            <button
-                onClick={onRefresh}
-                disabled={isLoading}
-                className="p-1.5 hover:bg-white hover:shadow-sm rounded-lg text-gray-400 hover:text-gray-600 transition-all disabled:opacity-50 border border-transparent hover:border-gray-200"
-                title="刷新列表"
-            >
-                <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
-            </button>
+                <button
+                    onClick={onRefresh}
+                    disabled={isLoading}
+                    className="p-1.5 hover:bg-white hover:shadow-sm rounded-lg text-gray-400 hover:text-gray-600 transition-all disabled:opacity-50 border border-transparent hover:border-gray-200 flex-shrink-0"
+                    title="刷新列表"
+                >
+                    <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
+                </button>
+            </div>
         </div>
       </div>
 

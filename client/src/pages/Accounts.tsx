@@ -301,12 +301,12 @@ export default function Accounts() {
               }`}
             >
               <div className="flex items-start justify-between">
-                <div className="flex items-center gap-4">
-                  <div className="w-12 h-12 rounded-full bg-gradient-to-br from-orange-400 to-pink-500 flex items-center justify-center text-white font-bold text-lg">
+                <div className="flex items-center gap-4 min-w-0">
+                  <div className="w-12 h-12 rounded-full bg-gradient-to-br from-orange-400 to-pink-500 flex items-center justify-center text-white font-bold text-lg flex-shrink-0">
                     {account.name.charAt(0).toUpperCase()}
                   </div>
-                  <div>
-                    <h3 className="font-bold text-gray-900">{account.name}</h3>
+                  <div className="min-w-0">
+                    <h3 className="font-bold text-gray-900 truncate">{account.name}</h3>
                     <div className="flex items-center gap-2 mt-1">
                       {getStatusBadge(account)}
                       {account._count && (

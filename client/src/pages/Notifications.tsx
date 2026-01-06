@@ -797,7 +797,7 @@ export default function Notifications() {
       )}
 
       {/* Save Action Bar */}
-      <div className="sticky bottom-20 md:bottom-4 bg-white/80 backdrop-blur-md border border-gray-200 p-4 rounded-2xl shadow-lg flex justify-between items-center">
+      <div className="sticky bottom-28 md:bottom-4 bg-white/80 backdrop-blur-md border border-gray-200 p-4 rounded-2xl shadow-lg flex justify-between items-center z-20">
         <div className="text-sm text-gray-500 pl-2">
           {saveStatus === 'saved' ? (
             <span className="flex items-center gap-2 text-green-600 font-medium">
