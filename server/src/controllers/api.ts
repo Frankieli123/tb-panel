@@ -1134,6 +1134,23 @@ const updateScraperSchema = z.object({
   minDelay: z.number().min(0),
   maxDelay: z.number().min(0),
   pollingInterval: z.number().min(10),
+  quietHoursEnabled: z.boolean().optional(),
+  quietHoursStart: z
+    .string()
+    .regex(/^\d{2}:\d{2}$/)
+    .refine((v) => {
+      const [h, m] = v.split(':').map((x) => parseInt(x, 10));
+      return Number.isFinite(h) && Number.isFinite(m) && h >= 0 && h <= 23 && m >= 0 && m <= 59;
+    })
+    .optional(),
+  quietHoursEnd: z
+    .string()
+    .regex(/^\d{2}:\d{2}$/)
+    .refine((v) => {
+      const [h, m] = v.split(':').map((x) => parseInt(x, 10));
+      return Number.isFinite(h) && Number.isFinite(m) && h >= 0 && h <= 23 && m >= 0 && m <= 59;
+    })
+    .optional(),
 });
 
 router.put('/scraper/config', requireAdminOrApiKey, async (req: Request, res: Response) => {
@@ -1145,6 +1162,18 @@ router.put('/scraper/config', requireAdminOrApiKey, async (req: Request, res: Re
     }
 
     let scraperConfig = await (prisma as any).scraperConfig.findFirst();
+
+    const quietEnabled =
+      data.quietHoursEnabled !== undefined
+        ? data.quietHoursEnabled
+        : scraperConfig?.quietHoursEnabled ?? false;
+
+    const quietStart = data.quietHoursStart ?? scraperConfig?.quietHoursStart ?? '00:00';
+    const quietEnd = data.quietHoursEnd ?? scraperConfig?.quietHoursEnd ?? '00:00';
+
+    if (quietEnabled && quietStart === quietEnd) {
+      return res.status(400).json({ success: false, error: '静默时间开始与结束不能相同' });
+    }
 
     if (scraperConfig) {
       scraperConfig = await (prisma as any).scraperConfig.update({

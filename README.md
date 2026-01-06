@@ -87,6 +87,9 @@ REDIS_URL="redis://default:<password>@110.42.105.188:6896"
 # 服务器端口
 PORT=4000
 
+# 时区（影响“系统静默时间”等按本地时间计算的功能）
+TZ=Asia/Shanghai
+
 # 邮件通知 (QQ邮箱为例)
 SMTP_HOST=smtp.qq.com
 SMTP_PORT=465

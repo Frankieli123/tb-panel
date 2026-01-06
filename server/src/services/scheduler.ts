@@ -35,9 +35,33 @@ class SchedulerService {
   private mainLoopInterval: NodeJS.Timeout | null = null;
   private riskPauseUntilMs = 0;
   private riskStreak = 0;
+  private isQuietPaused = false;
 
   private isRiskPaused(nowMs: number): boolean {
     return nowMs < this.riskPauseUntilMs;
+  }
+
+  private parseTimeToMinutes(value: unknown): number | null {
+    const text = String(value ?? '').trim();
+    if (!/^\d{2}:\d{2}$/.test(text)) return null;
+    const [hhRaw, mmRaw] = text.split(':');
+    const hh = parseInt(hhRaw, 10);
+    const mm = parseInt(mmRaw, 10);
+    if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+    if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
+    return hh * 60 + mm;
+  }
+
+  private isWithinQuietHours(now: Date, scraperConfig: any): boolean {
+    if (!scraperConfig?.quietHoursEnabled) return false;
+
+    const startMin = this.parseTimeToMinutes(scraperConfig?.quietHoursStart);
+    const endMin = this.parseTimeToMinutes(scraperConfig?.quietHoursEnd);
+    if (startMin === null || endMin === null || startMin === endMin) return false;
+
+    const nowMin = now.getHours() * 60 + now.getMinutes();
+    if (startMin < endMin) return nowMin >= startMin && nowMin < endMin;
+    return nowMin >= startMin || nowMin < endMin;
   }
 
   private clearRiskPause(): void {
@@ -239,6 +263,20 @@ class SchedulerService {
 
       // 获取抓取配置
       const scraperConfig = await (prisma as any).scraperConfig.findFirst();
+      const quietNow = this.isWithinQuietHours(new Date(nowMs), scraperConfig);
+      if (quietNow) {
+        if (!this.isQuietPaused) {
+          console.log(
+            `[Scheduler] Quiet hours active (${String(scraperConfig?.quietHoursStart || '')}-${String(scraperConfig?.quietHoursEnd || '')}), skipping scheduling`
+          );
+        }
+        this.isQuietPaused = true;
+        return;
+      }
+      if (this.isQuietPaused) {
+        console.log('[Scheduler] Quiet hours ended, resuming scheduling');
+      }
+      this.isQuietPaused = false;
       const defaultIntervalMs = (scraperConfig?.pollingInterval ?? 60) * 60 * 1000;
 
       // 获取所有活跃账号
@@ -274,6 +312,12 @@ class SchedulerService {
     console.log(`[Scheduler] Cart scrape start accountId=${accountId} products=${productCount}`);
 
     try {
+      const scraperConfig = await (prisma as any).scraperConfig.findFirst();
+      if (this.isWithinQuietHours(new Date(), scraperConfig)) {
+        console.log(`[Scheduler] Quiet hours active, skip cart scrape accountId=${accountId}`);
+        return { success: true, updated: 0, failed: 0, missing: 0 };
+      }
+
       const account = await prisma.taobaoAccount.findUnique({
         where: { id: accountId },
         select: { id: true, name: true, cookies: true, agentId: true, userId: true }

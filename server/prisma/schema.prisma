@@ -200,6 +200,9 @@ model ScraperConfig {
   minDelay        Int      @default(60)    // 最小延迟(秒)
   maxDelay        Int      @default(180)   // 最大延迟(秒)
   pollingInterval Int      @default(60)    // 轮询间隔(分钟)
+  quietHoursEnabled Boolean @default(false) // 静默时间：不抓取
+  quietHoursStart   String  @default("00:00") // HH:mm（本地时区）
+  quietHoursEnd     String  @default("00:00") // HH:mm（本地时区）
   updatedAt       DateTime @updatedAt
 
   @@map("scraper_configs")

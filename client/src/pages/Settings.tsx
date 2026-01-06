@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Settings as SettingsIcon, Save, CheckCircle2, Shield, Clock, Loader2, AlertTriangle } from 'lucide-react';
+import { Settings as SettingsIcon, Save, CheckCircle2, Shield, Clock, Loader2, AlertTriangle, Moon } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { ScraperConfig } from '../types';
 
@@ -55,6 +56,8 @@ export default function Settings() {
   }
 
   const hasValidationError = config.minDelay > config.maxDelay;
+  const hasQuietHoursError = config.quietHoursEnabled && config.quietHoursStart === config.quietHoursEnd;
+  const isSaveDisabled = saveStatus === 'saving' || hasValidationError || hasQuietHoursError;
 
   return (
     <div className="space-y-6 max-w-3xl">
@@ -122,6 +125,74 @@ export default function Settings() {
         </div>
       </section>
 
+      {/* Quiet Hours */}
+      <section className="bg-white rounded-2xl shadow-sm border border-indigo-200 overflow-hidden ring-1 ring-indigo-500/10">
+        <div className="p-6 border-b border-gray-100 bg-indigo-50/30">
+          <h3 className="font-bold text-gray-800 flex items-center gap-2 text-lg">
+            <Moon className="w-5 h-5 text-indigo-600" />
+            系统静默时间
+          </h3>
+          <p className="text-sm text-gray-500 mt-1 ml-7">
+            设置系统的休息时间段，在此期间将暂停所有的自动抓取任务。
+          </p>
+        </div>
+        <div className="p-6 space-y-6">
+          <div className="flex items-center justify-between">
+            <span className="text-sm font-medium text-gray-700">启用静默时间</span>
+            <button
+              onClick={() => updateConfig({ quietHoursEnabled: !config.quietHoursEnabled })}
+              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 ${
+                config.quietHoursEnabled ? 'bg-indigo-600' : 'bg-gray-200'
+              }`}
+            >
+              <span
+                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                  config.quietHoursEnabled ? 'translate-x-6' : 'translate-x-1'
+                }`}
+              />
+            </button>
+          </div>
+
+          {config.quietHoursEnabled && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">开始时间</label>
+                <input
+                  type="time"
+                  value={config.quietHoursStart}
+                  onChange={(e) => updateConfig({ quietHoursStart: e.target.value })}
+                  className="w-full px-4 py-2.5 border border-gray-200 rounded-xl focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 outline-none transition-all"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">结束时间</label>
+                <input
+                  type="time"
+                  value={config.quietHoursEnd}
+                  onChange={(e) => updateConfig({ quietHoursEnd: e.target.value })}
+                  className="w-full px-4 py-2.5 border border-gray-200 rounded-xl focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 outline-none transition-all"
+                />
+              </div>
+            </div>
+          )}
+
+          {hasQuietHoursError && (
+            <div className="flex items-center gap-2 text-sm text-red-500 bg-red-50 p-3 rounded-lg">
+              <AlertTriangle className="w-4 h-4" />
+              开始时间和结束时间不能相同
+            </div>
+          )}
+
+          <div className="text-sm text-gray-500 bg-gray-50 p-4 rounded-xl space-y-1">
+            <p><span className="font-medium text-gray-700">说明：</span> 时间判定基于服务器时区。</p>
+            <p>支持跨夜设置（例如：23:00 到 06:00），系统会自动处理。</p>
+            <p className="pt-2 text-indigo-600">
+              提示：企业微信/钉钉/飞书的通知配置请前往 <Link to="/notifications" className="underline hover:text-indigo-800">通知设置</Link> 页面。
+            </p>
+          </div>
+        </div>
+      </section>
+
       {/* Polling Interval */}
       <section className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
         <div className="p-6 border-b border-gray-100 bg-gray-50/50">
@@ -172,7 +243,7 @@ export default function Settings() {
         </div>
         <button
           onClick={handleSave}
-          disabled={saveStatus === 'saving' || hasValidationError}
+          disabled={isSaveDisabled}
           className={`flex items-center gap-2 px-6 py-2.5 rounded-xl font-bold text-white transition-all ${
             saveStatus === 'saved'
               ? 'bg-green-500'
