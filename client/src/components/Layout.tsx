@@ -25,11 +25,13 @@ export default function Layout({ children }: LayoutProps) {
     { to: '/', icon: LayoutDashboard, label: '监控面板' },
     { to: '/accounts', icon: Users, label: '账号管理' },
     { to: '/notifications', icon: Bell, label: '通知设置' },
-    { to: '/settings', icon: Settings, label: '系统设置' },
-    ...(user?.role === 'admin' ? [
-      { to: '/invite-codes', icon: Key, label: '邀请码管理' },
-      { to: '/logs', icon: ScrollText, label: '系统日志' },
-    ] : []),
+    ...(user?.role === 'admin'
+      ? [
+          { to: '/settings', icon: Settings, label: '系统设置' },
+          { to: '/invite-codes', icon: Key, label: '邀请码管理' },
+          { to: '/logs', icon: ScrollText, label: '系统日志' },
+        ]
+      : []),
   ];
 
   return (

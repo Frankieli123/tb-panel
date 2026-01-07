@@ -88,11 +88,11 @@ export const api = {
     }),
 
   listInviteCodes: () => request<InviteCode[]>('/auth/invite-codes'),
-  createInviteCode: () =>
+  createInviteCode: (role: 'admin' | 'operator' = 'operator') =>
     request<{ code: string }>('/auth/invite-codes', {
       method: 'POST',
       headers: csrfToken ? { 'x-csrf-token': csrfToken } : undefined,
-      body: JSON.stringify({}),
+      body: JSON.stringify({ role }),
     }),
   disableInviteCode: (id: string) =>
     request<void>(`/auth/invite-codes/${encodeURIComponent(id)}/disable`, {

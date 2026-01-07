@@ -251,6 +251,7 @@ model SystemSession {
 model InviteCode {
   id        String   @id @default(uuid())
   code      String   @unique
+  role      SystemUserRole @default(operator)
   isActive  Boolean  @default(true)
   disabledAt DateTime?
   deletedAt DateTime?

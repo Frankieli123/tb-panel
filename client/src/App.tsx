@@ -74,9 +74,11 @@ function App() {
               path="/settings"
               element={
                 <RequireAuth>
-                  <Layout>
-                    <Settings />
-                  </Layout>
+                  <RequireAdmin>
+                    <Layout>
+                      <Settings />
+                    </Layout>
+                  </RequireAdmin>
                 </RequireAuth>
               }
             />

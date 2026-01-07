@@ -48,6 +48,7 @@ export default function InviteCodes() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastCreatedCode, setLastCreatedCode] = useState<string | null>(null);
+  const [createRole, setCreateRole] = useState<'admin' | 'operator'>('operator');
 
   const load = async () => {
     setIsLoading(true);
@@ -69,7 +70,7 @@ export default function InviteCodes() {
   const onCreate = async () => {
     setError(null);
     try {
-      const created = await api.createInviteCode();
+      const created = await api.createInviteCode(createRole);
       setLastCreatedCode(created.code);
       await load();
     } catch (err) {
@@ -131,6 +132,15 @@ export default function InviteCodes() {
             <RefreshCw className="w-4 h-4" />
             刷新
           </button>
+          <select
+            aria-label="邀请码角色"
+            value={createRole}
+            onChange={(e) => setCreateRole(e.target.value as 'admin' | 'operator')}
+            className="h-10 px-3 rounded-xl border border-gray-200 bg-white text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-orange-500/20"
+          >
+            <option value="operator">操作员</option>
+            <option value="admin">管理员</option>
+          </select>
           <button
             type="button"
             onClick={() => void onCreate()}
@@ -171,6 +181,7 @@ export default function InviteCodes() {
             <thead className="bg-gray-50">
               <tr className="text-left text-xs font-semibold text-gray-600">
                 <th className="px-4 py-3">邀请码</th>
+                <th className="px-4 py-3">角色</th>
                 <th className="px-4 py-3">状态</th>
                 <th className="px-4 py-3">创建</th>
                 <th className="px-4 py-3">使用</th>
@@ -180,13 +191,13 @@ export default function InviteCodes() {
             <tbody className="divide-y divide-gray-100">
               {isLoading ? (
                 <tr>
-                  <td className="px-4 py-6 text-sm text-gray-500" colSpan={5}>
+                  <td className="px-4 py-6 text-sm text-gray-500" colSpan={6}>
                     加载中...
                   </td>
                 </tr>
               ) : rows.length === 0 ? (
                 <tr>
-                  <td className="px-4 py-6 text-sm text-gray-500" colSpan={5}>
+                  <td className="px-4 py-6 text-sm text-gray-500" colSpan={6}>
                     暂无邀请码
                   </td>
                 </tr>
@@ -205,6 +216,17 @@ export default function InviteCodes() {
                           <Copy className="w-4 h-4" />
                         </button>
                       </div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span
+                        className={`inline-flex items-center px-2 py-1 text-xs font-semibold rounded-full ring-1 ${
+                          row.role === 'admin'
+                            ? 'bg-purple-50 text-purple-700 ring-purple-200'
+                            : 'bg-gray-100 text-gray-700 ring-gray-200'
+                        }`}
+                      >
+                        {row.role === 'admin' ? '管理员' : '操作员'}
+                      </span>
                     </td>
                     <td className="px-4 py-3">
                       <StatusBadge status={row.status} />

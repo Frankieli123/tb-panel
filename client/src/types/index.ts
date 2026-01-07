@@ -25,6 +25,7 @@ export interface Product {
 export interface InviteCode {
   id: string;
   code: string;
+  role: 'admin' | 'operator';
   isActive: boolean;
   disabledAt: string | null;
   deletedAt: string | null;

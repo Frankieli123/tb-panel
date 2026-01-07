@@ -20,6 +20,10 @@ const registerSchema = z.object({
   inviteCode: z.string().min(1),
 });
 
+const createInviteCodeSchema = z.object({
+  role: z.enum(['admin', 'operator']).optional(),
+});
+
 export default function createAuthRouter(prisma: PrismaClient): Router {
   const router = Router();
 
@@ -122,11 +126,12 @@ export default function createAuthRouter(prisma: PrismaClient): Router {
           throw new Error('Invalid invite code');
         }
 
+        const role = invite.role === 'admin' ? 'admin' : 'operator';
         const u = await tx.systemUser.create({
           data: {
             username: normalizedUsername,
             passwordHash,
-            role: 'operator',
+            role,
             isActive: true,
           },
         });
@@ -175,16 +180,22 @@ export default function createAuthRouter(prisma: PrismaClient): Router {
 
   router.post('/invite-codes', requireAdmin, async (req: Request, res: Response) => {
     try {
+      const { role } = createInviteCodeSchema.parse(req.body || {});
       const code = generateInviteCode();
       await (prisma as any).inviteCode.create({
         data: {
           code,
+          role: role ?? 'operator',
           isActive: true,
           createdById: req.systemAuth?.kind === 'session' ? req.systemAuth.user.id : null,
         },
       });
       res.json({ success: true, data: { code } });
     } catch (error) {
+      if (error instanceof z.ZodError) {
+        res.status(400).json({ success: false, error: error.errors });
+        return;
+      }
       res.status(500).json({ success: false, error: String(error) });
     }
   });
