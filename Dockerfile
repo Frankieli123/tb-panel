@@ -4,15 +4,26 @@
 # 前端 + 后端一体化部署
 # ==========================================
 
+# 默认使用镜像源，降低 `npm ci` 在部分网络环境下的 ETIMEDOUT 概率。
+# 如需改回官方源：docker build --build-arg NPM_REGISTRY=https://registry.npmjs.org/
+ARG NPM_REGISTRY=https://registry.npmmirror.com/
+
 # ==========================================
 # Stage 1: 构建前端
 # ==========================================
 FROM node:20-alpine AS frontend-builder
+ARG NPM_REGISTRY
 
 WORKDIR /app/client
 
 COPY client/package*.json ./
-RUN npm ci
+RUN sed -i "s#https://registry.npmjs.org/#${NPM_REGISTRY%/}/#g" package-lock.json 2>/dev/null || true && \
+    npm config set registry "${NPM_REGISTRY%/}/" && \
+    npm config set fetch-retries 5 && \
+    npm config set fetch-retry-mintimeout 20000 && \
+    npm config set fetch-retry-maxtimeout 120000 && \
+    npm config set fetch-timeout 600000 && \
+    npm ci --no-audit --no-fund
 
 COPY client/ ./
 RUN npm run build
@@ -21,6 +32,7 @@ RUN npm run build
 # Stage 2: 构建后端
 # ==========================================
 FROM node:20-alpine AS backend-builder
+ARG NPM_REGISTRY
 
 WORKDIR /app/server
 
@@ -29,7 +41,13 @@ RUN apk add --no-cache openssl
 COPY server/package*.json ./
 COPY server/prisma ./prisma/
 
-RUN npm ci
+RUN sed -i "s#https://registry.npmjs.org/#${NPM_REGISTRY%/}/#g" package-lock.json 2>/dev/null || true && \
+    npm config set registry "${NPM_REGISTRY%/}/" && \
+    npm config set fetch-retries 5 && \
+    npm config set fetch-retry-mintimeout 20000 && \
+    npm config set fetch-retry-maxtimeout 120000 && \
+    npm config set fetch-timeout 600000 && \
+    npm ci --no-audit --no-fund
 RUN npx prisma generate
 
 COPY server/tsconfig.json ./
@@ -41,10 +59,12 @@ RUN npm run build
 # Stage 3: 生产镜像
 # ==========================================
 FROM node:20-alpine AS production
+ARG NPM_REGISTRY
+
+RUN apk add --no-cache nginx supervisor openssl tzdata
 
 # 安装 nginx、supervisor，并提供 `openssl` 可执行文件供 Prisma 检测 OpenSSL 版本
 # tzdata 用于支持 TZ 时区（静默时间等按本地时间计算的功能）
-RUN apk add --no-cache nginx supervisor openssl tzdata
 
 WORKDIR /app
 
@@ -53,7 +73,13 @@ COPY server/package*.json ./server/
 COPY server/prisma ./server/prisma/
 
 WORKDIR /app/server
-RUN npm ci --omit=dev && \
+RUN sed -i "s#https://registry.npmjs.org/#${NPM_REGISTRY%/}/#g" package-lock.json 2>/dev/null || true && \
+    npm config set registry "${NPM_REGISTRY%/}/" && \
+    npm config set fetch-retries 5 && \
+    npm config set fetch-retry-mintimeout 20000 && \
+    npm config set fetch-retry-maxtimeout 120000 && \
+    npm config set fetch-timeout 600000 && \
+    npm ci --omit=dev --no-audit --no-fund && \
     npx prisma generate && \
     npm cache clean --force
 
