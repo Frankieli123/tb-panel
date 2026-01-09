@@ -81,6 +81,7 @@
   <Fragment>
     <DirectoryRef Id="ApplicationProgramsFolder">
       <Component Id="StartMenuShortcuts" Guid="{A3D5741C-9ABF-4AE7-9A4F-BA9B5E0C5A28}">
+        <CreateFolder />
         <Shortcut
           Id="StatusShortcut"
           Name="$(var.ProductName) - 状态页"

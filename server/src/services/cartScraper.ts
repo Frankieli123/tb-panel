@@ -1,7 +1,7 @@
 import { Page } from 'playwright';
 import { PrismaClient } from '@prisma/client';
 import { sharedBrowserManager } from './sharedBrowserManager.js';
-import { HumanSimulator, randomDelay } from './humanSimulator.js';
+import { HumanSimulator, randomDelay, randomRange } from './humanSimulator.js';
 import { notificationService } from './notification.js';
 import { frontendPush } from './frontendPush.js';
 import { calculatePriceDrop } from '../utils/helpers.js';
@@ -151,9 +151,9 @@ export class CartScraper {
     // 轻微鼠标/滚动，让行为更接近真人阅读购物车列表
     await human.occasionalWander().catch(() => {});
     if (Math.random() < 0.6) {
-      await human.randomScroll({ distance: randomDelay(120, 360) }).catch(() => {});
+      await human.randomScroll({ distance: randomRange(120, 360) }).catch(() => {});
       if (Math.random() < 0.35) {
-        await page.mouse.wheel(0, -randomDelay(80, 220)).catch(() => {});
+        await page.mouse.wheel(0, -randomRange(80, 220)).catch(() => {});
       }
     }
 
@@ -235,85 +235,169 @@ export class CartScraper {
   }
 
   private async extractCartData(page: Page): Promise<{ products: CartProduct[] }> {
-    const products = await page.evaluate(() => {
-      const items: any[] = [];
+    const productsByKey = new Map<string, CartProduct>();
 
-      // 基于真实DOM结构提取数据（2024淘宝购物车页面结构）
-      // 购物车商品容器：.trade-cart-item-info
-      const cartItems = Array.from(document.querySelectorAll('.trade-cart-item-info'));
+    const extractVisible = async (): Promise<{
+      items: CartProduct[];
+      scroll: { top: number; height: number; client: number };
+    } | null> => {
+      return page
+        .evaluate(() => {
+          const findScrollContainer = (): HTMLElement => {
+            const firstItem = document.querySelector('.trade-cart-item-info') as HTMLElement | null;
+            let el = firstItem?.parentElement as HTMLElement | null;
 
-      cartItems.forEach((item) => {
-        // 标题：a.title--dsuLK9IN
-        const titleEl = item.querySelector('a.title--dsuLK9IN');
-        const title = titleEl?.textContent?.trim() || '';
+            while (el && el !== document.body) {
+              if (el.scrollHeight > el.clientHeight + 32) return el;
+              el = el.parentElement;
+            }
 
-        // 图片：img.image--MC0kGGgi
-        const imageEl = item.querySelector('img.image--MC0kGGgi');
-        const imageSrc = imageEl?.getAttribute('src') || null;
-        // 补全图片协议
-        const imageUrl = imageSrc ? (imageSrc.startsWith('//') ? 'https:' + imageSrc : imageSrc) : null;
+            return (document.scrollingElement as HTMLElement) || document.documentElement;
+          };
 
-        // 价格容器：.trade-cart-item-price
-        const priceContainer = item.querySelector('.trade-cart-item-price');
+          const items: any[] = [];
+          const cartItems = Array.from(document.querySelectorAll('.trade-cart-item-info'));
 
-        // 获取所有价格容器（通常有2个：券后价和券前价）
-        const priceContainers = priceContainer ? Array.from(priceContainer.querySelectorAll('.trade-price-container')) : [];
+          for (const item of cartItems) {
+            const titleEl = item.querySelector('a.title--dsuLK9IN');
+            const title = titleEl?.textContent?.trim() || '';
 
-        let finalPrice = 0;
-        let originalPrice: number | null = null;
+            const imageEl = item.querySelector('img.image--MC0kGGgi');
+            const imageSrc = imageEl?.getAttribute('src') || null;
+            const imageUrl = imageSrc ? (imageSrc.startsWith('//') ? 'https:' + imageSrc : imageSrc) : null;
 
-        if (priceContainers.length > 0) {
-          // 第一个价格容器：券后价
-          const firstContainer = priceContainers[0];
-          const priceInteger1 = firstContainer?.querySelector('.trade-price-integer')?.textContent?.trim() || '0';
-          const priceDecimal1 = firstContainer?.querySelector('.trade-price-decimal')?.textContent?.trim() || '0';
-          finalPrice = parseFloat(`${priceInteger1}.${priceDecimal1}`);
+            const priceContainer = item.querySelector('.trade-cart-item-price');
+            const priceContainers = priceContainer ? Array.from(priceContainer.querySelectorAll('.trade-price-container')) : [];
 
-          // 第二个价格容器：券前价（如果存在）
-          if (priceContainers.length > 1) {
-            const secondContainer = priceContainers[1];
-            const priceInteger2 = secondContainer?.querySelector('.trade-price-integer')?.textContent?.trim() || '0';
-            const priceDecimal2 = secondContainer?.querySelector('.trade-price-decimal')?.textContent?.trim() || '0';
-            originalPrice = parseFloat(`${priceInteger2}.${priceDecimal2}`);
+            let finalPrice = 0;
+            let originalPrice: number | null = null;
+
+            if (priceContainers.length > 0) {
+              const firstContainer = priceContainers[0];
+              const priceInteger1 = firstContainer?.querySelector('.trade-price-integer')?.textContent?.trim() || '0';
+              const priceDecimal1 = firstContainer?.querySelector('.trade-price-decimal')?.textContent?.trim() || '0';
+              finalPrice = parseFloat(`${priceInteger1}.${priceDecimal1}`);
+
+              if (priceContainers.length > 1) {
+                const secondContainer = priceContainers[1];
+                const priceInteger2 = secondContainer?.querySelector('.trade-price-integer')?.textContent?.trim() || '0';
+                const priceDecimal2 = secondContainer?.querySelector('.trade-price-decimal')?.textContent?.trim() || '0';
+                originalPrice = parseFloat(`${priceInteger2}.${priceDecimal2}`);
+              }
+            }
+
+            const skuEl = item.querySelector('.trade-cart-item-sku-old');
+            const skuLabels = skuEl ? Array.from(skuEl.querySelectorAll('.label--T4deixnF')) : [];
+            const skuProperties = skuLabels.map((label) => label.textContent?.trim() || '').join(' ');
+
+            const linkEl = item.querySelector('a[href*="item.taobao.com"], a[href*="detail.tmall.com"]');
+            const href = linkEl?.getAttribute('href') || '';
+
+            const taobaoIdMatch = href.match(/[?&]id=(\d+)/);
+            const skuIdMatch = href.match(/[?&]skuId=(\d+)/);
+
+            const taobaoId = taobaoIdMatch ? taobaoIdMatch[1] : '';
+            const skuId = skuIdMatch ? skuIdMatch[1] : '';
+
+            if (!taobaoId) continue;
+
+            items.push({
+              taobaoId,
+              skuId,
+              skuProperties,
+              title,
+              imageUrl,
+              finalPrice,
+              originalPrice,
+              quantity: 1,
+              cartItemId: `${taobaoId}_${skuId}`,
+            });
           }
+
+          const container = findScrollContainer();
+          return {
+            items,
+            scroll: {
+              top: container.scrollTop || 0,
+              height: container.scrollHeight || 0,
+              client: container.clientHeight || window.innerHeight || 0,
+            },
+          };
+        })
+        .catch(() => null);
+    };
+
+    const scrollBy = async (delta: number): Promise<number> => {
+      return page
+        .evaluate((d) => {
+          const findScrollContainer = (): HTMLElement => {
+            const firstItem = document.querySelector('.trade-cart-item-info') as HTMLElement | null;
+            let el = firstItem?.parentElement as HTMLElement | null;
+
+            while (el && el !== document.body) {
+              if (el.scrollHeight > el.clientHeight + 32) return el;
+              el = el.parentElement;
+            }
+
+            return (document.scrollingElement as HTMLElement) || document.documentElement;
+          };
+
+          const container = findScrollContainer();
+          const before = container.scrollTop || 0;
+          container.scrollTop = before + d;
+          return container.scrollTop || 0;
+        }, delta)
+        .catch(() => 0);
+    };
+
+    let stableNoNewRounds = 0;
+    let stuckRounds = 0;
+    let lastTop: number | null = null;
+
+    for (let round = 0; round < 60; round++) {
+      const snapshot = await extractVisible();
+      if (!snapshot) break;
+
+      let added = 0;
+      for (const item of snapshot.items) {
+        const key = String(item.cartItemId || '').trim();
+        if (!key) continue;
+
+        if (!productsByKey.has(key)) {
+          productsByKey.set(key, item);
+          added++;
+          continue;
         }
 
-        // SKU属性：.trade-cart-item-sku-old 下的所有 .label--T4deixnF
-        const skuEl = item.querySelector('.trade-cart-item-sku-old');
-        const skuLabels = skuEl ? Array.from(skuEl.querySelectorAll('.label--T4deixnF')) : [];
-        const skuProperties = skuLabels.map(label => label.textContent?.trim() || '').join(' ');
+        const existing = productsByKey.get(key)!;
+        if (!existing.title && item.title) existing.title = item.title;
+        if (!existing.imageUrl && item.imageUrl) existing.imageUrl = item.imageUrl;
+        if ((!existing.finalPrice || existing.finalPrice <= 0) && item.finalPrice > 0) existing.finalPrice = item.finalPrice;
+        if (!existing.originalPrice && item.originalPrice) existing.originalPrice = item.originalPrice;
+        if (!existing.skuProperties && item.skuProperties) existing.skuProperties = item.skuProperties;
+      }
 
-        // 从链接中提取ID：<a href="...?id=875765952236&skuId=5880572559451">
-        const linkEl = item.querySelector('a[href*="item.taobao.com"], a[href*="detail.tmall.com"]');
-        const href = linkEl?.getAttribute('href') || '';
+      if (productsByKey.size === 0 && round === 0 && snapshot.items.length === 0) break;
 
-        const taobaoIdMatch = href.match(/[?&]id=(\d+)/);
-        const skuIdMatch = href.match(/[?&]skuId=(\d+)/);
+      stableNoNewRounds = added === 0 ? stableNoNewRounds + 1 : 0;
 
-        const taobaoId = taobaoIdMatch ? taobaoIdMatch[1] : '';
-        const skuId = skuIdMatch ? skuIdMatch[1] : '';
+      const { top, height, client } = snapshot.scroll;
+      const atBottom = height > 0 && client > 0 && top + client >= height - 2;
+      if (atBottom && stableNoNewRounds >= 2) break;
 
-        if (!taobaoId) {
-          return; // 跳过无效项
-        }
+      const step = Math.max(520, Math.min(1400, Math.floor((client || 800) * 0.85)));
+      const nextTop = await scrollBy(step);
 
-        items.push({
-          taobaoId,
-          skuId,
-          skuProperties,
-          title,
-          imageUrl,
-          finalPrice,
-          originalPrice,
-          quantity: 1,
-          cartItemId: `${taobaoId}_${skuId}`
-        });
-      });
+      if (lastTop !== null && nextTop === lastTop) stuckRounds++;
+      else stuckRounds = 0;
+      lastTop = nextTop;
 
-      return items;
-    });
+      if (stuckRounds >= 2 && stableNoNewRounds >= 1) break;
 
-    return { products };
+      await page.waitForTimeout(randomDelay(240, 520)).catch(() => {});
+    }
+
+    return { products: Array.from(productsByKey.values()) };
   }
 
   async updatePricesFromCart(

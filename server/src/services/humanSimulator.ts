@@ -1,7 +1,34 @@
 import { Page, ElementHandle } from 'playwright';
 
+let delayScaleOverride: number | null = null;
+
+export function setHumanDelayScale(scale: number | null | undefined): void {
+  if (scale === null || scale === undefined) {
+    delayScaleOverride = null;
+    return;
+  }
+
+  const n = Number(scale);
+  if (!Number.isFinite(n) || n <= 0) return;
+  delayScaleOverride = Math.max(0.1, Math.min(3, n));
+}
+
+export function getHumanDelayScale(): number {
+  if (delayScaleOverride !== null) return delayScaleOverride;
+
+  const raw = String(process.env.HUMAN_DELAY_SCALE ?? process.env.AUTO_CART_DELAY_SCALE ?? '').trim();
+  if (!raw) return 1;
+
+  const n = Number.parseFloat(raw);
+  if (!Number.isFinite(n) || n <= 0) return 1;
+  return Math.max(0.1, Math.min(3, n));
+}
+
 function randomDelay(min: number, max: number): number {
-  return Math.floor(Math.random() * (max - min + 1)) + min;
+  const delayScale = getHumanDelayScale();
+  const scaledMin = Math.max(0, Math.floor(min * delayScale));
+  const scaledMax = Math.max(scaledMin, Math.floor(max * delayScale));
+  return Math.floor(Math.random() * (scaledMax - scaledMin + 1)) + scaledMin;
 }
 
 function randomRange(min: number, max: number): number {

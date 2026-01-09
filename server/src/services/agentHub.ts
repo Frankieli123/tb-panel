@@ -29,9 +29,11 @@ type RpcProgress = {
 
 type PendingRpc = {
   agentId: string;
+  method: string;
   resolve: (value: any) => void;
   reject: (reason: any) => void;
   timeout: NodeJS.Timeout;
+  timeoutMs: number;
   onProgress?: (progress: RpcProgress, log?: string) => void;
 };
 
@@ -56,6 +58,17 @@ export class AgentHub {
   private wss: WebSocketServer | null = null;
   private agents = new Map<string, AgentConnection>();
   private pending = new Map<string, PendingRpc>();
+
+  private resetPendingTimeout(requestId: string): void {
+    const pending = this.pending.get(requestId);
+    if (!pending) return;
+
+    clearTimeout(pending.timeout);
+    pending.timeout = setTimeout(() => {
+      this.pending.delete(requestId);
+      pending.reject(new Error(`Agent RPC timeout: ${pending.method} agentId=${pending.agentId}`));
+    }, pending.timeoutMs);
+  }
 
   initWebSocket(_server: any): void {
     // Use noServer mode so multiple WS endpoints can share one HTTP server
@@ -185,7 +198,12 @@ export class AgentHub {
         if (type === 'rpc_progress') {
           const requestId = String(msg?.requestId || '');
           const pending = this.pending.get(requestId);
-          if (!pending?.onProgress) return;
+          if (!pending) return;
+          // Keep long-running RPCs alive as long as progress is still flowing.
+          // This avoids timing out on large SKU batches where total runtime can exceed the original timeoutMs.
+          this.resetPendingTimeout(requestId);
+
+          if (!pending.onProgress) return;
           const p = msg?.progress as RpcProgress;
           const log = typeof msg?.log === 'string' ? msg.log : undefined;
           if (
@@ -299,12 +317,20 @@ export class AgentHub {
     const timeoutMs = Math.max(3_000, options?.timeoutMs ?? 120_000);
 
     const result = new Promise<T>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.pending.delete(requestId);
-        reject(new Error(`Agent RPC timeout: ${method} agentId=${agentId}`));
-      }, timeoutMs);
+      const pending: PendingRpc = {
+        agentId,
+        method,
+        resolve,
+        reject,
+        timeoutMs,
+        timeout: setTimeout(() => {
+          this.pending.delete(requestId);
+          reject(new Error(`Agent RPC timeout: ${method} agentId=${agentId}`));
+        }, timeoutMs),
+        onProgress: options?.onProgress,
+      };
 
-      this.pending.set(requestId, { agentId, resolve, reject, timeout, onProgress: options?.onProgress });
+      this.pending.set(requestId, pending);
     });
 
     conn.ws.send(

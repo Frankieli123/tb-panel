@@ -140,6 +140,7 @@ export interface ScraperConfig {
   minDelay: number;      // 最小延迟(秒)
   maxDelay: number;      // 最大延迟(秒)
   pollingInterval: number; // 轮询间隔(分钟)
+  humanDelayScale: number; // 人类操作延迟缩放（<1 更快，>1 更慢）
   quietHoursEnabled: boolean;
   quietHoursStart: string;
   quietHoursEnd: string;

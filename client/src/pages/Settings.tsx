@@ -17,7 +17,11 @@ export default function Settings() {
     setIsLoading(true);
     try {
       const data = await api.getScraperConfig();
-      setConfig(data);
+      const humanDelayScale =
+        typeof data.humanDelayScale === 'number' && Number.isFinite(data.humanDelayScale)
+          ? data.humanDelayScale
+          : 1;
+      setConfig({ ...data, humanDelayScale });
     } catch (error) {
       console.error('Failed to load config:', error);
     } finally {
@@ -57,7 +61,8 @@ export default function Settings() {
 
   const hasValidationError = config.minDelay > config.maxDelay;
   const hasQuietHoursError = config.quietHoursEnabled && config.quietHoursStart === config.quietHoursEnd;
-  const isSaveDisabled = saveStatus === 'saving' || hasValidationError || hasQuietHoursError;
+  const hasDelayScaleError = config.humanDelayScale < 0.2 || config.humanDelayScale > 2.0;
+  const isSaveDisabled = saveStatus === 'saving' || hasValidationError || hasQuietHoursError || hasDelayScaleError;
 
   return (
     <div className="space-y-6 max-w-3xl">
@@ -109,6 +114,22 @@ export default function Settings() {
                 <span className="absolute right-4 top-2.5 text-gray-400 text-sm">秒</span>
               </div>
             </div>
+            <div className="md:col-span-2">
+              <label className="block text-sm font-medium text-gray-700 mb-2">操作速度倍率（影响加购/购物车抓取）</label>
+              <div className="relative">
+                <input
+                  type="number"
+                  min="0.2"
+                  max="2.0"
+                  step="0.1"
+                  value={config.humanDelayScale}
+                  onChange={(e) => updateConfig({ humanDelayScale: Number.parseFloat(e.target.value) || 1 })}
+                  className="w-full pl-4 pr-12 py-2.5 border border-gray-200 rounded-xl focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none transition-all"
+                />
+                <span className="absolute right-4 top-2.5 text-gray-400 text-sm">倍</span>
+              </div>
+              <p className="text-xs text-gray-400 mt-2">范围：0.2（更快）~ 2.0（更慢），默认 1.0</p>
+            </div>
           </div>
 
           {hasValidationError && (
@@ -117,10 +138,16 @@ export default function Settings() {
               最小延迟不能大于最大延迟
             </div>
           )}
+          {hasDelayScaleError && (
+            <div className="flex items-center gap-2 text-sm text-red-500 bg-red-50 p-3 rounded-lg">
+              <AlertTriangle className="w-4 h-4" />
+              操作速度倍率必须在 0.2 到 2.0 之间
+            </div>
+          )}
 
           <div className="text-sm text-gray-500 bg-gray-50 p-4 rounded-xl">
             <span className="font-medium text-gray-700">当前生效：</span>
-            每次抓取将在 <span className="text-orange-600 font-bold">{config.minDelay}</span> 到 <span className="text-orange-600 font-bold">{config.maxDelay}</span> 秒之间随机等待。
+            每次抓取将在 <span className="text-orange-600 font-bold">{config.minDelay}</span> 到 <span className="text-orange-600 font-bold">{config.maxDelay}</span> 秒之间随机等待，操作间隔按 <span className="text-orange-600 font-bold">{config.humanDelayScale}x</span> 缩放。
           </div>
         </div>
       </section>

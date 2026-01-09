@@ -139,17 +139,78 @@ export default function SkuVariantPanel({ productId, productImageUrl }: SkuVaria
     return groups[0] || '';
   }, [groups, selectedGroup]);
 
+  const scopeVariants = useMemo(() => {
+    return groupLabel ? grouped[activeGroup] ?? [] : variants;
+  }, [activeGroup, groupLabel, grouped, variants]);
+
+  const fixedSpecs = useMemo((): Array<{ label: string; value: string }> => {
+    const list = scopeVariants;
+    if (list.length === 0) return [];
+
+    const gl = (groupLabel || '').trim();
+    const counts = new Map<string, Set<string>>();
+    const appears = new Map<string, number>();
+    const order = new Map<string, number>();
+    let orderCounter = 0;
+
+    for (const v of list) {
+      const seenInVariant = new Set<string>();
+      for (const s of v.selections || []) {
+        const label = (s.label || '').trim();
+        const value = (s.value || '').trim();
+        if (!label || !value) continue;
+        if (gl && label === gl) continue;
+
+        if (!counts.has(label)) {
+          counts.set(label, new Set());
+          order.set(label, orderCounter++);
+        }
+        counts.get(label)!.add(value);
+
+        if (!seenInVariant.has(label)) {
+          appears.set(label, (appears.get(label) ?? 0) + 1);
+          seenInVariant.add(label);
+        }
+      }
+    }
+
+    const out: Array<{ label: string; value: string; order: number }> = [];
+    for (const [label, set] of counts.entries()) {
+      if (set.size !== 1) continue;
+      const appearCount = appears.get(label) ?? 0;
+      if (appearCount !== list.length) continue;
+      const value = Array.from(set)[0] ?? '';
+      if (!value) continue;
+      out.push({ label, value, order: order.get(label) ?? 0 });
+    }
+
+    out.sort((a, b) => a.order - b.order);
+    return out.map(({ label, value }) => ({ label, value }));
+  }, [groupLabel, scopeVariants]);
+
+  const hiddenLabels = useMemo(() => {
+    const set = new Set<string>();
+    const gl = (groupLabel || '').trim();
+    if (gl) set.add(gl);
+    for (const s of fixedSpecs) {
+      const label = (s.label || '').trim();
+      if (label) set.add(label);
+    }
+    return Array.from(set);
+  }, [fixedSpecs, groupLabel]);
+
   const currentVariants = useMemo(() => {
-    const list = groupLabel ? grouped[activeGroup] ?? [] : variants;
+    const list = scopeVariants;
     const q = query.trim();
     if (!q) return list;
 
+    const fixedText = fixedSpecs.map((s) => `${s.label}:${s.value}`).join(' ');
     return list.filter((v) => {
-      const title = getVariantTitle(v, groupLabel);
-      const sub = getVariantSubtitle(v);
-      return `${title} ${sub}`.toLowerCase().includes(q.toLowerCase());
+      const title = getVariantTitle(v, groupLabel, hiddenLabels);
+      const sub = getVariantSubtitle(v, hiddenLabels);
+      return `${title} ${sub} ${fixedText}`.toLowerCase().includes(q.toLowerCase());
     });
-  }, [activeGroup, groupLabel, grouped, groups.length, query, variants]);
+  }, [fixedSpecs, groupLabel, hiddenLabels, query, scopeVariants]);
 
   const displayVariants = currentVariants;
 
@@ -265,14 +326,20 @@ export default function SkuVariantPanel({ productId, productImageUrl }: SkuVaria
               </div>
             )}
 
+            {fixedSpecs.length > 0 && (
+              <div className="text-[11px] text-gray-500">
+                {fixedSpecs.map((s) => `${s.label}:${s.value}`).join(' / ')}
+              </div>
+            )}
+
             {displayVariants.length === 0 ? (
               <div className="text-sm text-gray-400 text-center py-10">暂无匹配SKU</div>
             ) : (
               <div className="max-h-[520px] overflow-y-auto space-y-2 pr-1">
                 {displayVariants.map((v) => {
                 const isOpen = expanded.has(v.variantKey);
-                const title = getVariantTitle(v, groupLabel);
-                const subtitle = getVariantSubtitle(v);
+                const title = getVariantTitle(v, groupLabel, hiddenLabels);
+                const subtitle = getVariantSubtitle(v, hiddenLabels);
                 const thumb = v.thumbnailUrl || productImageUrl || '';
                 const recentChange = getRecentChange(v);
 
@@ -384,16 +451,32 @@ export default function SkuVariantPanel({ productId, productImageUrl }: SkuVaria
   );
 }
 
-function getVariantTitle(v: Variant, primaryLabel: string) {
+function getVariantTitle(v: Variant, primaryLabel: string, excludedLabels: string[] = []) {
   // 优先使用 selections 显示规格
   if (v.selections && v.selections.length > 0) {
+    const exclude = new Set((excludedLabels || []).map((l) => (l || '').trim()).filter(Boolean));
     const label = (primaryLabel || '').trim();
-    if (!label) return v.selections.map((s) => s.value).join(' / ');
+    if (label) exclude.add(label);
 
-    const rest = v.selections.filter((s) => (s.label || '').trim() !== label);
-    if (rest.length > 0) return rest.map((s) => s.value).join(' / ');
+    const rest = v.selections
+      .filter((s) => {
+        const l = (s.label || '').trim();
+        if (l && exclude.has(l)) return false;
+        const value = (s.value || '').trim();
+        return !!value;
+      })
+      .map((s) => (s.value || '').trim())
+      .filter(Boolean);
 
-    return v.selections.find((s) => (s.label || '').trim() === label)?.value || v.skuProperties || v.variantKey;
+    if (rest.length > 0) return rest.join(' / ');
+
+    if (label) {
+      const own = v.selections.find((s) => (s.label || '').trim() === label)?.value;
+      const ownValue = (own || '').trim();
+      if (ownValue) return ownValue;
+    }
+
+    return v.skuProperties || v.variantKey;
   }
   
   // 没有 selections 时，使用 skuProperties（规格文本）
@@ -403,15 +486,23 @@ function getVariantTitle(v: Variant, primaryLabel: string) {
   return v.variantKey;
 }
 
-function getVariantSubtitle(v: Variant) {
+function getVariantSubtitle(v: Variant, excludedLabels: string[] = []) {
   if (!v.selections || v.selections.length === 0) return '';
+  const exclude = new Set((excludedLabels || []).map((l) => (l || '').trim()).filter(Boolean));
   const labelPart = v.selections
+    .filter((s) => {
+      const l = (s.label || '').trim();
+      if (l && exclude.has(l)) return false;
+      const value = (s.value || '').trim();
+      return !!value;
+    })
     .map((s) => {
-      const label = s.label || '';
-      const value = s.value || '';
+      const label = (s.label || '').trim();
+      const value = (s.value || '').trim();
       if (!label) return value;
       return `${label}:${value}`;
     })
+    .filter(Boolean)
     .join(' / ');
 
   return labelPart;

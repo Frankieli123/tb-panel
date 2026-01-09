@@ -8,6 +8,7 @@ import { WebSocket } from 'ws';
 import { autoCartAdder } from './services/autoCartAdder.js';
 import { cartScraper } from './services/cartScraper.js';
 import { chromeLauncher } from './services/chromeLauncher.js';
+import { setHumanDelayScale } from './services/humanSimulator.js';
 import { sharedBrowserManager } from './services/sharedBrowserManager.js';
 import { AGENT_STATUS_HTML } from './ui/agentStatusPage.js';
 
@@ -696,6 +697,13 @@ async function main(): Promise<void> {
           const accountId = required('params.accountId', params.accountId as any);
           const taobaoId = required('params.taobaoId', params.taobaoId as any);
           const cookies = String((params.cookies as any) || '');
+          const delayScaleRaw =
+            typeof (params as any).delayScale === 'number'
+              ? (params as any).delayScale
+              : Number.parseFloat(String((params as any).delayScale ?? ''));
+          if (Number.isFinite(delayScaleRaw) && delayScaleRaw > 0) {
+            setHumanDelayScale(delayScaleRaw);
+          }
 
           const result = await autoCartAdder.addAllSkusToCart(accountId, taobaoId, cookies, {
             headless: false,
@@ -709,6 +717,13 @@ async function main(): Promise<void> {
         if (method === 'scrapeCart') {
           const accountId = required('params.accountId', params.accountId as any);
           const cookies = String((params.cookies as any) || '');
+          const delayScaleRaw =
+            typeof (params as any).delayScale === 'number'
+              ? (params as any).delayScale
+              : Number.parseFloat(String((params as any).delayScale ?? ''));
+          if (Number.isFinite(delayScaleRaw) && delayScaleRaw > 0) {
+            setHumanDelayScale(delayScaleRaw);
+          }
           const result = await cartScraper.scrapeCart(accountId, cookies);
           wsConn.send(JSON.stringify({ type: 'rpc_result', requestId, ok: true, result }));
           return;

@@ -1,6 +1,6 @@
 import { Page, BrowserContext, Browser } from 'playwright';
 import { SkuParser, SkuCombination } from './skuParser.js';
-import { HumanSimulator, randomDelay } from './humanSimulator.js';
+import { HumanSimulator, randomDelay, randomRange } from './humanSimulator.js';
 import { sharedBrowserManager } from './sharedBrowserManager.js';
 import fs from 'fs/promises';
 import path from 'path';
@@ -134,7 +134,7 @@ export class AutoCartAdder {
       if (stableRounds >= 2) break;
 
       // 轻量滚动让更多购物车条目进入 DOM（更像人工翻看）
-      await this.humanSimulator.randomScroll({ distance: randomDelay(320, 760) }).catch(() => {});
+      await this.humanSimulator.randomScroll({ distance: randomRange(320, 760) }).catch(() => {});
       await this.humanSimulator.sleep(randomDelay(650, 1200));
       await this.closeFeatureTips().catch(() => {});
       await this.waitForOverlaysCleared().catch(() => {});
@@ -598,7 +598,7 @@ export class AutoCartAdder {
 
     if (Math.random() < 0.15) {
       console.log('[AutoCart] Random scroll...');
-      await this.humanSimulator.randomScroll({ distance: randomDelay(200, 500) });
+      await this.humanSimulator.randomScroll({ distance: randomRange(200, 500) });
     }
 
     console.log('[AutoCart] Occasional wander check...');

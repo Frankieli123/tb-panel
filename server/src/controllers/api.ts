@@ -2,7 +2,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { extractTaobaoId, buildMobileUrl, encryptCookies } from '../utils/helpers.js';
 import { schedulerService } from '../services/scheduler.js';
-import { cartScraper } from '../services/cartScraper.js';
+import { taskQueue } from '../services/taskQueue.js';
 import { notificationService } from '../services/notification.js';
 import { agentHub } from '../services/agentHub.js';
 import { agentAuthService } from '../services/agentAuth.js';
@@ -253,39 +253,34 @@ router.post('/products/:id/refresh', async (req: Request, res: Response) => {
     if (product.monitorMode === 'CART' && product.ownerAccountId) {
       const account = await prisma.taobaoAccount.findFirst({
         where: { id: product.ownerAccountId, ...buildVisibleAccountsWhere(req) },
-        select: { id: true, cookies: true, agentId: true, userId: true }
+        select: { id: true }
       });
       if (!account) {
         return res.status(404).json({ success: false, error: 'Account not found' });
       }
 
-      const preferredAgentId = account.userId
-        ? (await (prisma as any).systemUser.findUnique({
-            where: { id: account.userId },
-            select: { preferredAgentId: true },
-          }))?.preferredAgentId ?? null
-        : null;
+      const bucket = Math.floor(Date.now() / 15000);
+      const jobId = `cart_scrape_manual_${account.id}_${bucket}`;
 
-      const agentIdToUse =
-        account.agentId && agentHub.isConnected(account.agentId)
-          ? account.agentId
-          : preferredAgentId && agentHub.isConnected(preferredAgentId)
-            ? preferredAgentId
-            : null;
-
-      let result;
-      if (agentIdToUse) {
-        const cart = await agentHub.call<any>(
-          agentIdToUse,
-          'scrapeCart',
-          { accountId: account.id, cookies: account.cookies },
-          { timeoutMs: 120000 }
+      try {
+        await taskQueue.add(
+          'cart-scrape',
+          { accountId: account.id, force: true, source: 'manual_refresh', productId: product.id },
+          {
+            jobId,
+            priority: 0,
+            attempts: 1,
+            keepLogs: 200,
+            removeOnComplete: { age: 10 * 60, count: 200 },
+            removeOnFail: { age: 60 * 60, count: 200 },
+          }
         );
-        result = await cartScraper.updatePricesFromCart(account.id, account.cookies, { cartResult: cart });
-      } else {
-        result = await cartScraper.updatePricesFromCart(account.id, account.cookies);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!message.toLowerCase().includes('already exists')) throw error;
       }
-      return res.json({ success: true, message: `已刷新（更新${result.updated}，缺失${result.missing}，失败${result.failed}）` });
+
+      return res.json({ success: true, data: { queued: true, jobId } });
     }
 
     return res.status(410).json({ success: false, error: '该商品不是购物车模式，详情页抓取已移除' });
@@ -1144,6 +1139,7 @@ router.get('/scraper/config', requireAdminOrApiKey, async (req: Request, res: Re
           minDelay: 60,
           maxDelay: 180,
           pollingInterval: 60,
+          humanDelayScale: 1,
         },
       });
     }
@@ -1159,6 +1155,7 @@ const updateScraperSchema = z.object({
   minDelay: z.number().min(0),
   maxDelay: z.number().min(0),
   pollingInterval: z.number().min(10),
+  humanDelayScale: z.number().min(0.2).max(2).optional(),
   quietHoursEnabled: z.boolean().optional(),
   quietHoursStart: z
     .string()
