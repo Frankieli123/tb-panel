@@ -332,19 +332,44 @@ function getVariantKey(v: any): string | null {
   return s ? s : null;
 }
 
+function parseSelectionsFromSkuProperties(skuProperties: unknown): Array<{ label: string; value: string; vid?: undefined }> {
+  const raw = String(skuProperties ?? '').trim();
+  if (!raw) return [];
+
+  const normalized = raw.replace(/[；|｜]+/g, ';').replace(/\s*;\s*/g, ';').trim();
+  const selections: Array<{ label: string; value: string; vid?: undefined }> = [];
+
+  const pairRe = /([^:：;\s]+)\s*[:：]\s*([^;]+?)(?=\s+[^:：;\s]+\s*[:：]|;|$)/g;
+  for (const match of normalized.matchAll(pairRe)) {
+    const label = (match[1] || '').trim();
+    const value = (match[2] || '').trim();
+    if (!label || !value) continue;
+    selections.push({ label, value });
+  }
+
+  return selections;
+}
+
 function normalizeVariantForClient(v: any) {
+  const selectionsFromRaw = Array.isArray(v?.selections)
+    ? v.selections
+        .map((s: any) => ({
+          label: s?.label ?? '',
+          value: s?.value ?? '',
+          vid: s?.vid ?? undefined,
+        }))
+        .filter((s: any) => String(s?.label || '').trim() || String(s?.value || '').trim())
+    : [];
+
+  const parsedSelections = parseSelectionsFromSkuProperties(v?.skuProperties);
+  const selections = parsedSelections.length > selectionsFromRaw.length ? parsedSelections : selectionsFromRaw;
+
   return {
     variantKey: getVariantKey(v),
     skuId: v?.skuId ?? null,
     skuProperties: v?.skuProperties ?? null,
     vidPath: v?.vidPath ?? '',
-    selections: Array.isArray(v?.selections)
-      ? v.selections.map((s: any) => ({
-          label: s?.label ?? '',
-          value: s?.value ?? '',
-          vid: s?.vid ?? undefined,
-        }))
-      : [],
+    selections,
     finalPrice: typeof v?.finalPrice === 'number' ? v.finalPrice : null,
     originalPrice: typeof v?.originalPrice === 'number' ? v.originalPrice : null,
     thumbnailUrl: v?.thumbnailUrl ?? null,
