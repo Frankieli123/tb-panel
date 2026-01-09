@@ -21,7 +21,6 @@ export default function SkuVariantPanel({ productId, productImageUrl }: SkuVaria
   const [error, setError] = useState<string | null>(null);
 
   const [selectedGroup, setSelectedGroup] = useState<string>('');
-  const [selectedVariantKey, setSelectedVariantKey] = useState<string>('');
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
 
   const [historyByKey, setHistoryByKey] = useState<HistoryByVariantKey>({});
@@ -152,33 +151,7 @@ export default function SkuVariantPanel({ productId, productImageUrl }: SkuVaria
     });
   }, [activeGroup, groupLabel, grouped, groups.length, query, variants]);
 
-  useEffect(() => {
-    if (!groupLabel) {
-      if (selectedVariantKey) setSelectedVariantKey('');
-      return;
-    }
-
-    if (currentVariants.length === 0) {
-      if (selectedVariantKey) setSelectedVariantKey('');
-      return;
-    }
-
-    const keys = new Set(currentVariants.map((v) => v.variantKey));
-    if (!selectedVariantKey || !keys.has(selectedVariantKey)) {
-      setSelectedVariantKey(currentVariants[0].variantKey);
-    }
-  }, [currentVariants, groupLabel, selectedVariantKey]);
-
-  const activeVariant = useMemo(() => {
-    if (!groupLabel) return null;
-    if (currentVariants.length === 0) return null;
-    return currentVariants.find((v) => v.variantKey === selectedVariantKey) || currentVariants[0];
-  }, [currentVariants, groupLabel, selectedVariantKey]);
-
-  const displayVariants = useMemo(() => {
-    if (!groupLabel) return currentVariants;
-    return activeVariant ? [activeVariant] : [];
-  }, [activeVariant, currentVariants, groupLabel]);
+  const displayVariants = currentVariants;
 
   const toggleExpand = async (variantKey: string) => {
     const isExpanding = !expanded.has(variantKey);
@@ -289,26 +262,6 @@ export default function SkuVariantPanel({ productId, productImageUrl }: SkuVaria
                     {g}
                   </button>
                 ))}
-              </div>
-            )}
-
-            {groupLabel && currentVariants.length > 0 && (
-              <div className="w-full">
-                <select
-                  value={selectedVariantKey}
-                  onChange={(e) => setSelectedVariantKey(e.target.value)}
-                  className="w-full px-2 py-2 text-xs rounded-lg border border-gray-200 bg-white focus:outline-none"
-                >
-                  {currentVariants.map((v) => {
-                    const title = getVariantTitle(v, groupLabel);
-                    const opt = `${title} ${activeGroup}`.trim();
-                    return (
-                      <option key={v.variantKey} value={v.variantKey}>
-                        {opt}
-                      </option>
-                    );
-                  })}
-                </select>
               </div>
             )}
 
