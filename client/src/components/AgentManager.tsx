@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Copy, Terminal, Settings, RefreshCw, Plus, X } from 'lucide-react';
+import { Copy, Terminal, Settings, RefreshCw, Plus, X, Monitor, Globe, Clock, AlertCircle } from 'lucide-react';
 import { api } from '../services/api';
 import { getLoginWsUrl } from '../services/api';
-import type { AgentConnection } from '../types';
+import type { AgentConnection, BrowserStatus } from '../types';
 
 interface AgentManagerProps {
   agents: AgentConnection[];
@@ -42,6 +42,18 @@ export default function AgentManager({ agents, isLoading, error, onRefresh }: Ag
   const [pairExpiresAtMs, setPairExpiresAtMs] = useState<number | null>(null);
   const [pairNowMs, setPairNowMs] = useState(() => Date.now());
 
+  // Browser Status State
+  const [browserStatusAgentId, setBrowserStatusAgentId] = useState<string | null>(null);
+  const [browserStatus, setBrowserStatus] = useState<{
+    loading: boolean;
+    data: BrowserStatus | null;
+    error: string | null;
+  }>({
+    loading: false,
+    data: null,
+    error: null,
+  });
+
   // Persistence Effects
   useEffect(() => {
     try {
@@ -76,6 +88,22 @@ export default function AgentManager({ agents, isLoading, error, onRefresh }: Ag
     const id = window.setInterval(() => setPairNowMs(Date.now()), 1000);
     return () => window.clearInterval(id);
   }, [pairExpiresAtMs]);
+
+  useEffect(() => {
+    if (!browserStatusAgentId) return;
+
+    setBrowserStatus({ loading: true, data: null, error: null });
+
+    api.getAgentBrowserStatus(browserStatusAgentId)
+      .then((data) => setBrowserStatus({ loading: false, data, error: null }))
+      .catch((err) =>
+        setBrowserStatus({
+          loading: false,
+          data: null,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      );
+  }, [browserStatusAgentId]);
 
   const createPairCode = useCallback(async () => {
     setPairLoading(true);
@@ -127,6 +155,11 @@ export default function AgentManager({ agents, isLoading, error, onRefresh }: Ag
     setShowPairModal(false);
     setPairCode(null);
     setPairError(null);
+  };
+
+  const closeBrowserStatus = () => {
+    setBrowserStatusAgentId(null);
+    setBrowserStatus({ loading: false, data: null, error: null });
   };
 
   return (
@@ -226,9 +259,22 @@ export default function AgentManager({ agents, isLoading, error, onRefresh }: Ag
                     <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span>
                     <span className="text-green-600 font-medium">运行中</span>
                 </div>
-                <span className="text-gray-400" title="Last Seen">
-                    {new Date(agent.lastSeenAt).toLocaleTimeString()}
-                </span>
+                <div className="flex items-center gap-2">
+                    <span className="text-gray-400" title="Last Seen">
+                        {new Date(agent.lastSeenAt).toLocaleTimeString()}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setBrowserStatusAgentId(agent.agentId);
+                      }}
+                      className="p-1.5 hover:bg-orange-50 text-gray-400 hover:text-orange-600 rounded-lg transition-colors"
+                      title="查看浏览器状态"
+                    >
+                      <Monitor className="w-4 h-4" />
+                    </button>
+                </div>
             </div>
           </div>
         ))}
@@ -247,6 +293,99 @@ export default function AgentManager({ agents, isLoading, error, onRefresh }: Ag
             <span className="text-sm font-medium text-gray-500 group-hover:text-orange-600">接入新节点</span>
         </button>
       </div>
+
+      {/* Browser Status Modal */}
+      {!!browserStatusAgentId && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-in fade-in duration-200">
+          <div className="bg-white rounded-2xl w-full max-w-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div className="p-5 border-b border-gray-100 flex items-center justify-between bg-gray-50/50 flex-shrink-0">
+              <div className="flex items-center gap-2">
+                <Monitor className="w-5 h-5 text-gray-500" />
+                <h3 className="font-bold text-gray-900">浏览器状态 - {browserStatusAgentId}</h3>
+              </div>
+              <button
+                type="button"
+                onClick={closeBrowserStatus}
+                className="p-2 hover:bg-gray-200 rounded-full transition-colors"
+              >
+                <X className="w-5 h-5 text-gray-500" />
+              </button>
+            </div>
+
+            <div className="p-6 overflow-y-auto">
+              {browserStatus.loading ? (
+                <div className="flex flex-col items-center justify-center py-12 text-gray-400">
+                  <RefreshCw className="w-8 h-8 animate-spin mb-3" />
+                  <p>正在获取浏览器状态...</p>
+                </div>
+              ) : browserStatus.error ? (
+                <div className="p-8 text-center text-red-500 flex flex-col items-center">
+                  <AlertCircle className="w-10 h-10 mb-3 opacity-50" />
+                  <p>{browserStatus.error}</p>
+                </div>
+              ) : browserStatus.data ? (
+                <div className="space-y-6">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
+                    <div className="bg-gray-50 rounded-xl p-4 border border-gray-200">
+                      <div className="text-xs text-gray-400 mb-1">连接状态</div>
+                      <div className={`font-bold ${browserStatus.data.connected ? 'text-green-600' : 'text-red-500'}`}>
+                        {browserStatus.data.connected ? '已连接' : '未连接'}
+                      </div>
+                    </div>
+                    <div className="bg-gray-50 rounded-xl p-4 border border-gray-200">
+                      <div className="text-xs text-gray-400 mb-1">最近错误</div>
+                      <div className="text-gray-700 truncate" title={browserStatus.data.lastError || ''}>
+                        {browserStatus.data.lastError || '无'}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div>
+                    <h4 className="text-sm font-bold text-gray-900 mb-3 flex items-center gap-2">
+                      <Globe className="w-4 h-4 text-gray-400" />
+                      活跃会话 ({browserStatus.data.sessions.length})
+                    </h4>
+
+                    {browserStatus.data.sessions.length === 0 ? (
+                      <div className="text-center py-8 text-gray-400 text-sm bg-gray-50 rounded-xl border border-dashed border-gray-200">
+                        当前没有活跃的浏览器页面
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        {browserStatus.data.sessions.map((session, idx) => (
+                          <div
+                            key={`${session.accountId}_${idx}`}
+                            className="bg-gray-50 rounded-lg p-3 border border-gray-200 text-sm group hover:border-orange-200 transition-colors"
+                          >
+                            <div className="flex items-center justify-between mb-1.5">
+                              <span className="font-mono font-medium text-gray-700 bg-white px-1.5 py-0.5 rounded border border-gray-200 text-xs">
+                                {session.accountId}
+                              </span>
+                              <div className="flex items-center gap-1.5 text-xs text-gray-400">
+                                <Clock className="w-3 h-3" />
+                                <span>{new Date(session.lastUsedAt).toLocaleTimeString()}</span>
+                                {session.pageClosed ? (
+                                  <span className="bg-red-100 text-red-600 px-1.5 rounded">已关闭</span>
+                                ) : null}
+                              </div>
+                            </div>
+                            <div
+                              className="text-gray-500 truncate text-xs font-mono pl-1 border-l-2 border-gray-200 group-hover:border-orange-300"
+                              title={session.url || ''}
+                            >
+                              {session.url || '(空URL)'}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Pairing Modal */}
       {showPairModal && (

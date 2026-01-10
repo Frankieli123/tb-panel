@@ -80,6 +80,28 @@ export interface AgentPairCode {
   expiresInSec: number;
 }
 
+export interface BrowserSession {
+  accountId: string;
+  lastUsedAt: number;
+  pageClosed: boolean;
+  url: string | null;
+}
+
+export interface BrowserStatus {
+  agentId: string;
+  now: number;
+  connected: boolean;
+  lastError: string | null;
+  sessions: BrowserSession[];
+}
+
+export interface BrowserScreenshot {
+  agentId: string;
+  accountId: string;
+  now: number;
+  image: string; // base64 jpeg
+}
+
 export interface TaobaoAccount {
   id: string;
   name: string;
@@ -141,6 +163,10 @@ export interface ScraperConfig {
   maxDelay: number;      // 最大延迟(秒)
   pollingInterval: number; // 轮询间隔(分钟)
   humanDelayScale: number; // 人类操作延迟缩放（<1 更快，>1 更慢）
+  cartAddSkuDelayMinMs: number; // 加购：SKU 间隔最小(ms)
+  cartAddSkuDelayMaxMs: number; // 加购：SKU 间隔最大(ms)
+  cartAddProductDelayMinMs: number; // 加购：商品开始间隔最小(ms)
+  cartAddProductDelayMaxMs: number; // 加购：商品开始间隔最大(ms)
   quietHoursEnabled: boolean;
   quietHoursStart: string;
   quietHoursEnd: string;

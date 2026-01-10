@@ -204,6 +204,10 @@ model ScraperConfig {
   quietHoursEnabled Boolean @default(false) // 静默时间：不抓取
   quietHoursStart   String  @default("00:00") // HH:mm（本地时区）
   quietHoursEnd     String  @default("00:00") // HH:mm（本地时区）
+  cartAddSkuDelayMinMs     Int      @default(900)  // 加购：SKU 间隔最小(ms)
+  cartAddSkuDelayMaxMs     Int      @default(2200) // 加购：SKU 间隔最大(ms)
+  cartAddProductDelayMinMs Int      @default(0)    // 加购：商品开始间隔最小(ms)
+  cartAddProductDelayMaxMs Int      @default(0)    // 加购：商品开始间隔最大(ms)
   updatedAt       DateTime @updatedAt
 
   @@map("scraper_configs")

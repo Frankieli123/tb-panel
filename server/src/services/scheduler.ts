@@ -4,6 +4,7 @@ import { scraper, ScrapeResult } from './scraper.js';
 import { cartScraper } from './cartScraper.js';
 import { agentHub } from './agentHub.js';
 import { autoCartAdder } from './autoCartAdder.js';
+import { requestPauseForAddWithTimeout, resumeAdd } from './accountTaskControl.js';
 import { setHumanDelayScale } from './humanSimulator.js';
 import { notificationService } from './notification.js';
 import { randomDelay, sleep, calculatePriceDrop, encryptCookies } from '../utils/helpers.js';
@@ -101,7 +102,7 @@ class SchedulerService {
       },
       {
         connection: taskQueueConnection,
-        concurrency: 1, // 串行处理，避免并发风险
+        concurrency: 2, // 允许抓价抢占加购（加购会在 Agent 侧按 SKU 边界暂停/恢复）
       }
     );
 
@@ -155,9 +156,7 @@ class SchedulerService {
   }
 
   /**
-   * 购物车模式批量抓取调度
-   * 随机间隔策略：配置间隔 × (0.5~1.5 随机系数)
-   * 例如配置60分钟，实际执行间隔在30~90分钟之间
+   * 购物车模式批量抓取调度（仅使用 pollingInterval）
    */
   private async scheduleCartScraping(
     accounts: any[],
@@ -200,31 +199,16 @@ class SchedulerService {
 
         if (!sampleProduct) continue;
 
-        // 计算随机间隔范围：0.5~1.5 倍
-        const minInterval = defaultIntervalMs * 0.5;
-
+        // 到达轮询间隔才入队
         if (sampleProduct.lastCheckAt) {
           const timeSinceLastCheck = nowMs - sampleProduct.lastCheckAt.getTime();
-
-          // 如果还没到最小间隔（0.5倍），跳过
-          if (timeSinceLastCheck < minInterval) {
-            continue;
-          }
-
-          // 使用确定性随机数：基于 accountId 和 lastCheckAt 生成固定的随机系数
-          const seed = this.simpleHash(account.id + sampleProduct.lastCheckAt.getTime());
-          const randomFactor = 0.5 + (seed % 100) / 100; // 0.5 ~ 1.5
-          const targetInterval = defaultIntervalMs * randomFactor;
-
-          // 如果还没到目标时间，跳过
-          if (timeSinceLastCheck < targetInterval) {
+          if (timeSinceLastCheck < defaultIntervalMs) {
             continue;
           }
         }
 
-        // 使用 bucket 去重（避免在同一周期内重复添加任务）
-        const bucket = Math.floor(nowMs / defaultIntervalMs);
-        const jobId = `cart_scrape_${account.id}_${bucket}`;
+        // 去重：同一账号同时只允许一个定时 cart-scrape job
+        const jobId = `cart_scrape_${account.id}`;
 
         try {
           await taskQueue.add(
@@ -235,8 +219,9 @@ class SchedulerService {
             },
             {
               jobId,
-              priority: 100,
+              priority: 5,
               removeOnComplete: true,
+              removeOnFail: true,
               attempts: 2,
               backoff: {
                 type: 'exponential',
@@ -357,19 +342,105 @@ class SchedulerService {
 
       const agentIdToUse = account.agentId || preferredAgentId;
 
-      let result;
-      if (agentIdToUse && agentHub.isConnected(agentIdToUse)) {
-        const cart = await agentHub.call<any>(
-          agentIdToUse,
-          'scrapeCart',
-          { accountId, cookies: account.cookies, delayScale: humanDelayScale },
-          { timeoutMs: 120000 }
-        );
-        result = await cartScraper.updatePricesFromCart(accountId, account.cookies, { cartResult: cart });
+      const expectedTaobaoIds = await (async (): Promise<string[]> => {
+        const rowsBase = await prisma.product.findMany({
+          where: {
+            ownerAccountId: accountId,
+            monitorMode: 'CART',
+            skuId: CART_BASE_SKU_ID,
+            isActive: true,
+          },
+          select: { taobaoId: true },
+        });
+
+        const idsBase = Array.from(new Set(rowsBase.map((r) => String(r.taobaoId || '').trim()).filter(Boolean)));
+        if (idsBase.length > 0) return idsBase;
+
+        const rowsAll = await prisma.product.findMany({
+          where: { ownerAccountId: accountId, monitorMode: 'CART', isActive: true },
+          select: { taobaoId: true },
+        });
+
+        return Array.from(new Set(rowsAll.map((r) => String(r.taobaoId || '').trim()).filter(Boolean)));
+      })();
+
+      const expectedDistinctTaobaoIds =
+        expectedTaobaoIds.length > 0 ? expectedTaobaoIds.length : Math.max(0, Number(productCount) || 0);
+
+      const distinctCount = (cart: any): number => {
+        if (!cart?.success || !Array.isArray(cart?.products)) return 0;
+        const set = new Set<string>();
+        for (const p of cart.products) {
+          const id = p?.taobaoId ? String(p.taobaoId).trim() : '';
+          if (id) set.add(id);
+        }
+        return set.size;
+      };
+
+      const scrapeCart = async (): Promise<any> => {
+        if (agentIdToUse && agentHub.isConnected(agentIdToUse)) {
+          return agentHub.call<any>(
+            agentIdToUse,
+            'scrapeCart',
+            { accountId, cookies: account.cookies, delayScale: humanDelayScale, expectedTaobaoIds },
+            { timeoutMs: 120000 }
+          );
+        }
+
+        return cartScraper.scrapeCart(accountId, account.cookies, { expectedTaobaoIds });
+      };
+
+      let cart: any;
+      let bestDistinct = 0;
+
+      const pauseTimeoutMs = 20000;
+      const pausedUsingAgent = Boolean(agentIdToUse && agentHub.isConnected(agentIdToUse));
+
+      if (pausedUsingAgent && agentIdToUse) {
+        await agentHub
+          .call<any>(agentIdToUse, 'pauseAddForScrape', { accountId, timeoutMs: pauseTimeoutMs }, { timeoutMs: pauseTimeoutMs + 5000 })
+          .catch((err) => {
+            console.warn(`[Scheduler] Failed to pause add before cart scrape accountId=${accountId} agentId=${agentIdToUse}:`, err);
+          });
       } else {
-        // 执行购物车批量抓取（本机执行，兼容未启用 Agent 的场景）
-        result = await cartScraper.updatePricesFromCart(accountId, account.cookies);
+        await requestPauseForAddWithTimeout(accountId, pauseTimeoutMs).catch(() => {});
       }
+
+      try {
+        cart = await scrapeCart();
+        bestDistinct = distinctCount(cart);
+
+        if (!cart?.success) {
+          for (let attempt = 1; attempt <= 2; attempt++) {
+            await sleep(1500);
+            const next = await scrapeCart();
+            if (next?.success) {
+              cart = next;
+              bestDistinct = distinctCount(next);
+              break;
+            }
+          }
+        } else if (expectedDistinctTaobaoIds > 0 && bestDistinct < expectedDistinctTaobaoIds) {
+          for (let attempt = 1; attempt <= 2; attempt++) {
+            await sleep(1500);
+            const next = await scrapeCart();
+            const nextDistinct = distinctCount(next);
+            if (nextDistinct > bestDistinct) {
+              cart = next;
+              bestDistinct = nextDistinct;
+            }
+            if (bestDistinct >= expectedDistinctTaobaoIds) break;
+          }
+        }
+      } finally {
+        if (pausedUsingAgent && agentIdToUse) {
+          await agentHub.call<any>(agentIdToUse, 'resumeAddForScrape', { accountId }, { timeoutMs: 15000 }).catch(() => {});
+        } else {
+          resumeAdd(accountId);
+        }
+      }
+
+      const result = await cartScraper.updatePricesFromCart(accountId, account.cookies, { cartResult: cart });
 
       console.log(`[Scheduler] Cart scrape complete accountId=${accountId} updated=${result.updated} missing=${result.missing} failed=${result.failed}`);
 
@@ -400,6 +471,12 @@ class SchedulerService {
         ? scraperConfig.humanDelayScale
         : 1;
     setHumanDelayScale(humanDelayScale);
+    const cartAddSkuDelayMinMsRaw = Number((scraperConfig as any)?.cartAddSkuDelayMinMs);
+    const cartAddSkuDelayMaxMsRaw = Number((scraperConfig as any)?.cartAddSkuDelayMaxMs);
+    const cartAddSkuDelayMinMs = Number.isFinite(cartAddSkuDelayMinMsRaw) ? Math.max(0, Math.floor(cartAddSkuDelayMinMsRaw)) : 900;
+    const cartAddSkuDelayMaxMs = Number.isFinite(cartAddSkuDelayMaxMsRaw)
+      ? Math.max(cartAddSkuDelayMinMs, Math.floor(cartAddSkuDelayMaxMsRaw))
+      : 2200;
 
     await job.updateProgress({ total: 0, current: 0, success: 0, failed: 0 });
     await job.log(`开始处理商品 ${taobaoId}...`);
@@ -449,12 +526,20 @@ class SchedulerService {
       ? await agentHub.call<any>(
           agentIdToUse,
           'addAllSkusToCart',
-          { accountId, taobaoId, cookies: account.cookies, delayScale: humanDelayScale },
+          {
+            accountId,
+            taobaoId,
+            cookies: account.cookies,
+            delayScale: humanDelayScale,
+            skuDelayMinMs: cartAddSkuDelayMinMs,
+            skuDelayMaxMs: cartAddSkuDelayMaxMs,
+          },
           { timeoutMs: 30 * 60 * 1000, onProgress }
         )
       : await autoCartAdder.addAllSkusToCart(accountId, taobaoId, account.cookies, {
           headless: false,
           onProgress,
+          skuDelayMs: { min: cartAddSkuDelayMinMs, max: cartAddSkuDelayMaxMs },
         });
 
     const finalProgress = {
@@ -520,10 +605,10 @@ class SchedulerService {
           ? await agentHub.call<any>(
               agentIdToUse,
               'scrapeCart',
-              { accountId, cookies: account.cookies, delayScale: humanDelayScale },
+              { accountId, cookies: account.cookies, delayScale: humanDelayScale, expectedTaobaoIds: [taobaoId] },
               { timeoutMs: 120000 }
             )
-          : await cartScraper.scrapeCart(accountId, account.cookies);
+          : await cartScraper.scrapeCart(accountId, account.cookies, { expectedTaobaoIds: [taobaoId] });
 
         if (!cart.success) {
           lastCartError = cart.error || 'scrapeCart failed';
@@ -631,6 +716,23 @@ class SchedulerService {
         ? scraperConfig.humanDelayScale
         : 1;
     setHumanDelayScale(humanDelayScale);
+    const cartAddSkuDelayMinMsRaw = Number((scraperConfig as any)?.cartAddSkuDelayMinMs);
+    const cartAddSkuDelayMaxMsRaw = Number((scraperConfig as any)?.cartAddSkuDelayMaxMs);
+    const cartAddSkuDelayMinMs = Number.isFinite(cartAddSkuDelayMinMsRaw)
+      ? Math.max(0, Math.floor(cartAddSkuDelayMinMsRaw))
+      : 900;
+    const cartAddSkuDelayMaxMs = Number.isFinite(cartAddSkuDelayMaxMsRaw)
+      ? Math.max(cartAddSkuDelayMinMs, Math.floor(cartAddSkuDelayMaxMsRaw))
+      : 2200;
+
+    const cartAddProductDelayMinMsRaw = Number((scraperConfig as any)?.cartAddProductDelayMinMs);
+    const cartAddProductDelayMaxMsRaw = Number((scraperConfig as any)?.cartAddProductDelayMaxMs);
+    const cartAddProductDelayMinMs = Number.isFinite(cartAddProductDelayMinMsRaw)
+      ? Math.max(0, Math.floor(cartAddProductDelayMinMsRaw))
+      : 0;
+    const cartAddProductDelayMaxMs = Number.isFinite(cartAddProductDelayMaxMsRaw)
+      ? Math.max(cartAddProductDelayMinMs, Math.floor(cartAddProductDelayMaxMsRaw))
+      : cartAddProductDelayMinMs;
 
     const account = await prisma.taobaoAccount.findUnique({
       where: { id: accountId },
@@ -690,6 +792,16 @@ class SchedulerService {
       const item = items[i];
       const itemStatus = status.items[i];
 
+      if (i > 0 && cartAddProductDelayMaxMs > 0) {
+        const scaledMin = Math.max(0, Math.floor(cartAddProductDelayMinMs * humanDelayScale));
+        const scaledMax = Math.max(scaledMin, Math.floor(cartAddProductDelayMaxMs * humanDelayScale));
+        const delay = randomDelay(scaledMin, scaledMax);
+        if (delay > 0) {
+          await job.log(`[${item.index}] 加购防风控等待 ${delay}ms`);
+          await sleep(delay);
+        }
+      }
+
       status.progress.currentIndex = i;
       itemStatus.status = 'running';
       await job.log(`[${item.index}] 开始处理 taobaoId=${item.taobaoId}`);
@@ -713,6 +825,8 @@ class SchedulerService {
                 cookies: account.cookies,
                 existingCartSkus: Object.fromEntries(Array.from(existingCartSkus.entries()).map(([k, v]) => [k, Array.from(v)])),
                 delayScale: humanDelayScale,
+                skuDelayMinMs: cartAddSkuDelayMinMs,
+                skuDelayMaxMs: cartAddSkuDelayMaxMs,
               },
               { timeoutMs: 30 * 60 * 1000, onProgress }
             )
@@ -720,6 +834,7 @@ class SchedulerService {
               headless: false,
               onProgress,
               existingCartSkus,
+              skuDelayMs: { min: cartAddSkuDelayMinMs, max: cartAddSkuDelayMaxMs },
             });
 
         itemStatus.progress = {
@@ -780,15 +895,15 @@ class SchedulerService {
         if (matched.length === 0) {
           await job.log(`[${item.index}] cartProducts 为空，尝试 scrapeCart...`);
           let lastCartError: string | null = null;
-          for (let retry = 0; retry < 3; retry++) {
-            const cart = agentIdToUse
-              ? await agentHub.call<any>(
-                  agentIdToUse,
-                  'scrapeCart',
-                  { accountId, cookies: account.cookies, delayScale: humanDelayScale },
-                  { timeoutMs: 120000 }
-                )
-              : await cartScraper.scrapeCart(accountId, account.cookies);
+           for (let retry = 0; retry < 3; retry++) {
+             const cart = agentIdToUse
+               ? await agentHub.call<any>(
+                   agentIdToUse,
+                   'scrapeCart',
+                   { accountId, cookies: account.cookies, delayScale: humanDelayScale, expectedTaobaoIds: [item.taobaoId] },
+                   { timeoutMs: 120000 }
+                 )
+               : await cartScraper.scrapeCart(accountId, account.cookies, { expectedTaobaoIds: [item.taobaoId] });
             if (!cart.success) {
               lastCartError = cart.error || 'scrapeCart failed';
             } else {
@@ -1124,16 +1239,6 @@ class SchedulerService {
         throw new Error(result.error);
       }
 
-      // 随机延迟后继续（从数据库读取配置）
-      const scraperConfig = await (prisma as any).scraperConfig.findFirst();
-      const minDelayMs = (scraperConfig?.minDelay ?? 60) * 1000; // 默认60秒
-      const maxDelayMs = (scraperConfig?.maxDelay ?? 180) * 1000; // 默认180秒
-      const delay = randomDelay(minDelayMs, maxDelayMs);
-      timings.delayTargetMs = delay;
-      const delayStartAt = Date.now();
-      await sleep(delay);
-      timings.delayMs = Date.now() - delayStartAt;
-
       logTimings('success');
 
       return result;
@@ -1242,17 +1347,6 @@ class SchedulerService {
       },
       { priority: 1 } // 高优先级
     );
-  }
-
-  // 简单的字符串哈希函数（用于生成确定性随机数）
-  private simpleHash(str: string): number {
-    let hash = 0;
-    for (let i = 0; i < str.length; i++) {
-      const char = str.charCodeAt(i);
-      hash = ((hash << 5) - hash) + char;
-      hash = hash & hash; // Convert to 32bit integer
-    }
-    return Math.abs(hash);
   }
 
   // 获取调度状态

@@ -2,6 +2,7 @@ import { Page, BrowserContext, Browser } from 'playwright';
 import { SkuParser, SkuCombination } from './skuParser.js';
 import { HumanSimulator, randomDelay, randomRange } from './humanSimulator.js';
 import { sharedBrowserManager } from './sharedBrowserManager.js';
+import { isPauseRequested, markAddEnd, markAddStart, notifyPausedAtSafePoint, waitUntilResumed } from './accountTaskControl.js';
 import fs from 'fs/promises';
 import path from 'path';
 
@@ -306,12 +307,60 @@ export class AutoCartAdder {
     accountId: string,
     taobaoId: string,
     cookies?: string,
-    options?: { headless?: boolean; onProgress?: ProgressCallback; existingCartSkus?: Map<string, Set<string>> }
+    options?: {
+      headless?: boolean;
+      onProgress?: ProgressCallback;
+      existingCartSkus?: Map<string, Set<string>>;
+      skuDelayMs?: { min: number; max: number };
+    }
   ): Promise<AddAllSkusResult> {
     return this.runExclusive(async () => {
+      markAddStart(accountId);
       const startTime = Date.now();
       console.log(`[AutoCart] Start taobaoId=${taobaoId} accountId=${accountId}`);
       console.log(`[AutoCart] Mode: ${options?.headless === false ? 'Human-visible' : 'Headless'}`);
+
+      let lastProgress: { total: number; current: number; success: number; failed: number } = {
+        total: 0,
+        current: 0,
+        success: 0,
+        failed: 0,
+      };
+
+      const pauseIfRequested = async (logOnce?: string): Promise<void> => {
+        if (!isPauseRequested(accountId)) return;
+
+        notifyPausedAtSafePoint(accountId);
+
+        const send = (log?: string) => {
+          if (!options?.onProgress) return;
+          try {
+            options.onProgress(lastProgress, log);
+          } catch {}
+        };
+
+        if (logOnce) send(logOnce);
+
+        const resumed = waitUntilResumed(accountId);
+        while (isPauseRequested(accountId)) {
+          const done = await Promise.race([
+            resumed.then(() => true),
+            this.humanSimulator.sleep(2500).then(() => false),
+          ]);
+          if (done) break;
+          send();
+        }
+      };
+
+      const sleepInterruptible = async (ms: number): Promise<void> => {
+        let remaining = Math.max(0, Math.floor(ms));
+        while (remaining > 0) {
+          if (isPauseRequested(accountId)) break;
+          const step = Math.min(500, remaining);
+          await this.humanSimulator.sleep(step);
+          remaining -= step;
+        }
+      };
 
       try {
         // 复用或创建浏览器实例
@@ -329,6 +378,7 @@ export class AutoCartAdder {
               `【阶段1/5】使用预抓取的购物车数据，已存在 ${existedSkuProps.size} 个SKU`
             );
           }
+          lastProgress = { total: 0, current: 0, success: 0, failed: 0 };
           // 直接跳到商品页，不需要先打开购物车
         } else {
           if (options?.onProgress) {
@@ -337,6 +387,7 @@ export class AutoCartAdder {
               '【阶段1/5】打开购物车，预检查已存在的SKU...'
             );
           }
+          lastProgress = { total: 0, current: 0, success: 0, failed: 0 };
           await this.navigateToCartPage();
           existedSkuProps = await this.collectCartSkuPropertiesForTaobaoId(taobaoId);
           console.log(`[AutoCart] Cart precheck: taobaoId=${taobaoId} existedSkus=${existedSkuProps.size}`);
@@ -346,6 +397,7 @@ export class AutoCartAdder {
               `【阶段1/5】购物车预检查完成，已存在 ${existedSkuProps.size} 个SKU`
             );
           }
+          lastProgress = { total: 0, current: 0, success: 0, failed: 0 };
         }
 
         // 阶段2：打开商品详情页
@@ -355,6 +407,7 @@ export class AutoCartAdder {
             '【阶段2/5】打开商品详情页...'
           );
         }
+        lastProgress = { total: 0, current: 0, success: 0, failed: 0 };
         const openInfo = await this.openProductFromCartOrNavigate(taobaoId);
         await this.assertNotAuthPage('打开商品页');
 
@@ -376,6 +429,7 @@ export class AutoCartAdder {
             '【阶段3/5】解析商品SKU树...'
           );
         }
+        lastProgress = { total: 0, current: 0, success: 0, failed: 0 };
         const skuTree = await this.skuParser.parseSkuTree(taobaoId);
         console.log(`[AutoCart] Found ${skuTree.combinations.length} SKU combinations`);
 
@@ -398,10 +452,21 @@ export class AutoCartAdder {
             `【阶段4/5】开始加购：总计 ${shuffled.length} 个SKU，已存在 ${skippedCount} 个将跳过，需新加购 ${toAddCount} 个`
           );
         }
+        lastProgress = { total: shuffled.length, current: 0, success: 0, failed: 0 };
 
         const results: SkuAddResult[] = [];
+        const skuDelayMinMsRaw = (options as any)?.skuDelayMs?.min;
+        const skuDelayMaxMsRaw = (options as any)?.skuDelayMs?.max;
+        const skuDelayMinMs = Number.isFinite(Number(skuDelayMinMsRaw))
+          ? Math.max(0, Math.floor(Number(skuDelayMinMsRaw)))
+          : 900;
+        const skuDelayMaxMs = Number.isFinite(Number(skuDelayMaxMsRaw))
+          ? Math.max(skuDelayMinMs, Math.floor(Number(skuDelayMaxMsRaw)))
+          : 2200;
 
         for (let i = 0; i < shuffled.length; i++) {
+          await pauseIfRequested('【抢占】暂停加购，优先抓价中…');
+
           const sku = shuffled[i];
           console.log(`[AutoCart] Processing SKU ${i + 1}/${shuffled.length}: ${sku.properties}`);
 
@@ -433,6 +498,7 @@ export class AutoCartAdder {
             // 实时更新进度
             const successCount = results.filter((r) => r.success).length;
             const failedCount = results.filter((r) => !r.success).length;
+            lastProgress = { total: shuffled.length, current: i + 1, success: successCount, failed: failedCount };
             if (options?.onProgress) {
               options.onProgress(
                 { total: shuffled.length, current: i + 1, success: successCount, failed: failedCount },
@@ -442,10 +508,11 @@ export class AutoCartAdder {
 
             if (i < shuffled.length - 1) {
               // SKU 间隔：保持随机但适度加快；偶尔更长停顿更“像人”
-              let delay = randomDelay(900, 2200);
+              let delay = randomDelay(skuDelayMinMs, skuDelayMaxMs);
               if (Math.random() < 0.08) delay += randomDelay(2000, 5000);
               console.log(`[AutoCart] Waiting ${delay}ms before next SKU...`);
-              await this.humanSimulator.sleep(delay);
+              await sleepInterruptible(delay);
+              await pauseIfRequested('【抢占】暂停加购，优先抓价中…');
             }
           } catch (error: any) {
             console.error(`[AutoCart] Failed SKU: ${sku.skuId}`, error);
@@ -467,6 +534,7 @@ export class AutoCartAdder {
             // 更新失败进度
             const successCount = results.filter((r) => r.success).length;
             const failedCount = results.filter((r) => !r.success).length;
+            lastProgress = { total: shuffled.length, current: i + 1, success: successCount, failed: failedCount };
             if (options?.onProgress) {
               options.onProgress(
                 { total: shuffled.length, current: i + 1, success: successCount, failed: failedCount },
@@ -488,6 +556,12 @@ export class AutoCartAdder {
             '【阶段5/5】返回购物车页面刷新获取价格...'
           );
         }
+        lastProgress = {
+          total: shuffled.length,
+          current: shuffled.length,
+          success: successCount,
+          failed: shuffled.length - successCount,
+        };
         
         // 关闭商品详情页（当前页面）
         await this.page.close().catch(() => {});
@@ -519,6 +593,7 @@ export class AutoCartAdder {
           cartProducts, // 直接返回购物车数据，避免再次调用 scrapeCart
         };
       } finally {
+        markAddEnd(accountId);
         // 不关闭页面和 context，保持购物车页面打开供用户查看
         // 注意：浏览器实例会一直运行，直到用户手动关闭或下次任务复用
         console.log('[AutoCart] Task complete, keeping cart page open for user');

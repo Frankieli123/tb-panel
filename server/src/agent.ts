@@ -8,6 +8,7 @@ import { WebSocket } from 'ws';
 import { autoCartAdder } from './services/autoCartAdder.js';
 import { cartScraper } from './services/cartScraper.js';
 import { chromeLauncher } from './services/chromeLauncher.js';
+import { requestPauseForAddWithTimeout, resumeAdd } from './services/accountTaskControl.js';
 import { setHumanDelayScale } from './services/humanSimulator.js';
 import { sharedBrowserManager } from './services/sharedBrowserManager.js';
 import { AGENT_STATUS_HTML } from './ui/agentStatusPage.js';
@@ -639,7 +640,7 @@ async function main(): Promise<void> {
           agentId,
           name: process.env.AGENT_NAME || undefined,
           version: process.env.AGENT_VERSION || '1',
-          capabilities: { cart: true, addCart: true },
+          capabilities: { cart: true, addCart: true, browserStatus: true, browserScreenshot: true },
         })
       );
     });
@@ -697,6 +698,34 @@ async function main(): Promise<void> {
           const accountId = required('params.accountId', params.accountId as any);
           const taobaoId = required('params.taobaoId', params.taobaoId as any);
           const cookies = String((params.cookies as any) || '');
+          const existingCartSkusRaw = (params as any).existingCartSkus;
+          const existingCartSkus =
+            existingCartSkusRaw && typeof existingCartSkusRaw === 'object' && !Array.isArray(existingCartSkusRaw)
+              ? (() => {
+                  const map = new Map<string, Set<string>>();
+                  for (const [taobaoIdRaw, skuListRaw] of Object.entries(existingCartSkusRaw as any)) {
+                    const taobaoId = String(taobaoIdRaw || '').trim();
+                    if (!taobaoId) continue;
+                    const set = new Set<string>();
+                    if (Array.isArray(skuListRaw)) {
+                      for (const sku of skuListRaw) {
+                        const s = String(sku || '').trim();
+                        if (s) set.add(s);
+                      }
+                    }
+                    map.set(taobaoId, set);
+                  }
+                  return map.size > 0 ? map : undefined;
+                })()
+              : undefined;
+          const skuDelayMinMsRaw = Number((params as any).skuDelayMinMs);
+          const skuDelayMaxMsRaw = Number((params as any).skuDelayMaxMs);
+          const skuDelayMinMs = Number.isFinite(skuDelayMinMsRaw) ? Math.max(0, Math.floor(skuDelayMinMsRaw)) : null;
+          const skuDelayMaxMs = Number.isFinite(skuDelayMaxMsRaw)
+            ? Math.max(skuDelayMinMs ?? 0, Math.floor(skuDelayMaxMsRaw))
+            : null;
+          const skuDelayMs =
+            skuDelayMinMs !== null && skuDelayMaxMs !== null ? { min: skuDelayMinMs, max: skuDelayMaxMs } : undefined;
           const delayScaleRaw =
             typeof (params as any).delayScale === 'number'
               ? (params as any).delayScale
@@ -708,6 +737,8 @@ async function main(): Promise<void> {
           const result = await autoCartAdder.addAllSkusToCart(accountId, taobaoId, cookies, {
             headless: false,
             onProgress: (progress, log) => sendProgress(progress, log),
+            existingCartSkus,
+            skuDelayMs,
           });
 
           wsConn.send(JSON.stringify({ type: 'rpc_result', requestId, ok: true, result }));
@@ -717,6 +748,9 @@ async function main(): Promise<void> {
         if (method === 'scrapeCart') {
           const accountId = required('params.accountId', params.accountId as any);
           const cookies = String((params.cookies as any) || '');
+          const expectedTaobaoIds = Array.isArray((params as any).expectedTaobaoIds)
+            ? (params as any).expectedTaobaoIds.map((x: any) => String(x || '').trim()).filter(Boolean)
+            : undefined;
           const delayScaleRaw =
             typeof (params as any).delayScale === 'number'
               ? (params as any).delayScale
@@ -724,8 +758,90 @@ async function main(): Promise<void> {
           if (Number.isFinite(delayScaleRaw) && delayScaleRaw > 0) {
             setHumanDelayScale(delayScaleRaw);
           }
-          const result = await cartScraper.scrapeCart(accountId, cookies);
+          const result = await cartScraper.scrapeCart(accountId, cookies, { expectedTaobaoIds });
           wsConn.send(JSON.stringify({ type: 'rpc_result', requestId, ok: true, result }));
+          return;
+        }
+
+        if (method === 'pauseAddForScrape') {
+          const accountId = required('params.accountId', params.accountId as any);
+          const timeoutMsRaw = Number((params as any).timeoutMs);
+          const timeoutMs = Number.isFinite(timeoutMsRaw) ? Math.max(0, Math.floor(timeoutMsRaw)) : 20000;
+          const paused = await requestPauseForAddWithTimeout(accountId, timeoutMs);
+          wsConn.send(
+            JSON.stringify({
+              type: 'rpc_result',
+              requestId,
+              ok: true,
+              result: { accountId, paused },
+            })
+          );
+          return;
+        }
+
+        if (method === 'resumeAddForScrape') {
+          const accountId = required('params.accountId', params.accountId as any);
+          const resumed = resumeAdd(accountId);
+          wsConn.send(
+            JSON.stringify({
+              type: 'rpc_result',
+              requestId,
+              ok: true,
+              result: { accountId, resumed },
+            })
+          );
+          return;
+        }
+
+        if (method === 'getBrowserStatus') {
+          const sessions = sharedBrowserManager.listSessionSummaries();
+          wsConn.send(
+            JSON.stringify({
+              type: 'rpc_result',
+              requestId,
+              ok: true,
+              result: {
+                agentId,
+                now: Date.now(),
+                connected: status.connected,
+                lastError: status.lastError,
+                sessions,
+              },
+            })
+          );
+          return;
+        }
+
+        if (method === 'captureAccountScreenshot') {
+          const accountId = required('params.accountId', params.accountId as any);
+          const session = sharedBrowserManager.getSession(accountId);
+          if (!session) {
+            throw new Error('当前账号没有可截图任务（没有活跃浏览器会话）');
+          }
+          if (session.page.isClosed()) {
+            throw new Error('当前账号没有可截图任务（浏览器页面已关闭）');
+          }
+
+          const screenshot = await session.page
+            .screenshot({ type: 'jpeg', quality: 85, timeout: 15000 })
+            .catch(() => null as any);
+          if (!screenshot) {
+            throw new Error('Screenshot failed');
+          }
+
+          wsConn.send(
+            JSON.stringify({
+              type: 'rpc_result',
+              requestId,
+              ok: true,
+              result: {
+                agentId,
+                accountId,
+                now: Date.now(),
+                image: Buffer.from(screenshot).toString('base64'),
+              },
+            })
+          );
           return;
         }
 

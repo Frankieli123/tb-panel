@@ -139,6 +139,27 @@ class SharedBrowserManager {
     return this.sessions.get(accountId);
   }
 
+  listSessionSummaries(): Array<{ accountId: string; lastUsedAt: number; pageClosed: boolean; url: string | null }> {
+    return Array.from(this.sessions.values()).map((session) => {
+      const pageClosed = session.page.isClosed();
+      let url: string | null = null;
+      if (!pageClosed) {
+        try {
+          url = session.page.url();
+        } catch {
+          url = null;
+        }
+      }
+
+      return {
+        accountId: session.accountId,
+        lastUsedAt: session.lastUsedAt,
+        pageClosed,
+        url,
+      };
+    });
+  }
+
   updateLastUsed(accountId: string): void {
     const session = this.sessions.get(accountId);
     if (session) {

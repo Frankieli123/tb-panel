@@ -17,11 +17,36 @@ export default function Settings() {
     setIsLoading(true);
     try {
       const data = await api.getScraperConfig();
+      const n = (v: unknown, fallback: number) =>
+        typeof v === 'number' && Number.isFinite(v) ? v : fallback;
       const humanDelayScale =
         typeof data.humanDelayScale === 'number' && Number.isFinite(data.humanDelayScale)
           ? data.humanDelayScale
           : 1;
-      setConfig({ ...data, humanDelayScale });
+
+      const minDelay = Math.max(0, Math.floor(n(data.minDelay, 60)));
+      const maxDelay = Math.max(minDelay, Math.floor(n(data.maxDelay, 180)));
+      const pollingInterval = Math.max(10, Math.floor(n(data.pollingInterval, 60)));
+
+      const cartAddSkuDelayMinMs = Math.max(0, Math.floor(n(data.cartAddSkuDelayMinMs, 900)));
+      const cartAddSkuDelayMaxMs = Math.max(cartAddSkuDelayMinMs, Math.floor(n(data.cartAddSkuDelayMaxMs, 2200)));
+      const cartAddProductDelayMinMs = Math.max(0, Math.floor(n(data.cartAddProductDelayMinMs, 0)));
+      const cartAddProductDelayMaxMs = Math.max(
+        cartAddProductDelayMinMs,
+        Math.floor(n(data.cartAddProductDelayMaxMs, 0))
+      );
+
+      setConfig({
+        ...data,
+        minDelay,
+        maxDelay,
+        pollingInterval,
+        humanDelayScale,
+        cartAddSkuDelayMinMs,
+        cartAddSkuDelayMaxMs,
+        cartAddProductDelayMinMs,
+        cartAddProductDelayMaxMs,
+      });
     } catch (error) {
       console.error('Failed to load config:', error);
     } finally {
@@ -59,10 +84,16 @@ export default function Settings() {
     return <div className="text-center text-gray-500">加载失败</div>;
   }
 
-  const hasValidationError = config.minDelay > config.maxDelay;
   const hasQuietHoursError = config.quietHoursEnabled && config.quietHoursStart === config.quietHoursEnd;
   const hasDelayScaleError = config.humanDelayScale < 0.2 || config.humanDelayScale > 2.0;
-  const isSaveDisabled = saveStatus === 'saving' || hasValidationError || hasQuietHoursError || hasDelayScaleError;
+  const hasCartAddSkuDelayError = config.cartAddSkuDelayMinMs > config.cartAddSkuDelayMaxMs;
+  const hasCartAddProductDelayError = config.cartAddProductDelayMinMs > config.cartAddProductDelayMaxMs;
+  const isSaveDisabled =
+    saveStatus === 'saving' ||
+    hasQuietHoursError ||
+    hasDelayScaleError ||
+    hasCartAddSkuDelayError ||
+    hasCartAddProductDelayError;
 
   return (
     <div className="space-y-6 max-w-3xl">
@@ -80,62 +111,106 @@ export default function Settings() {
         <div className="p-6 border-b border-gray-100 bg-orange-50/30">
           <h3 className="font-bold text-gray-800 flex items-center gap-2 text-lg">
             <Shield className="w-5 h-5 text-orange-600" />
-            防风控随机延迟
+            加购间隔（防风控）
           </h3>
           <p className="text-sm text-gray-500 mt-1 ml-7">
-            在每次抓取任务之间增加随机等待时间，模拟真实用户行为，降低被淘宝封锁的风险。
+            仅影响加购流程的等待时间，不影响购物车监控抓价/刷新。
           </p>
         </div>
         <div className="p-6 space-y-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">最小延迟</label>
-              <div className="relative">
-                <input
-                  type="number"
-                  min="0"
-                  value={config.minDelay}
-                  onChange={(e) => updateConfig({ minDelay: parseInt(e.target.value) || 0 })}
-                  className="w-full pl-4 pr-12 py-2.5 border border-gray-200 rounded-xl focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none transition-all"
-                />
-                <span className="absolute right-4 top-2.5 text-gray-400 text-sm">秒</span>
+          <div className="space-y-3">
+            <div className="text-sm font-medium text-gray-700">SKU 间隔</div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">最小间隔</label>
+                <div className="relative">
+                  <input
+                    type="number"
+                    min="0"
+                    value={config.cartAddSkuDelayMinMs}
+                    onChange={(e) => updateConfig({ cartAddSkuDelayMinMs: parseInt(e.target.value) || 0 })}
+                    className="w-full pl-4 pr-12 py-2.5 border border-gray-200 rounded-xl focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none transition-all"
+                  />
+                  <span className="absolute right-4 top-2.5 text-gray-400 text-sm">ms</span>
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">最大间隔</label>
+                <div className="relative">
+                  <input
+                    type="number"
+                    min="0"
+                    value={config.cartAddSkuDelayMaxMs}
+                    onChange={(e) => updateConfig({ cartAddSkuDelayMaxMs: parseInt(e.target.value) || 0 })}
+                    className="w-full pl-4 pr-12 py-2.5 border border-gray-200 rounded-xl focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none transition-all"
+                  />
+                  <span className="absolute right-4 top-2.5 text-gray-400 text-sm">ms</span>
+                </div>
               </div>
             </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">最大延迟</label>
-              <div className="relative">
-                <input
-                  type="number"
-                  min="0"
-                  value={config.maxDelay}
-                  onChange={(e) => updateConfig({ maxDelay: parseInt(e.target.value) || 0 })}
-                  className="w-full pl-4 pr-12 py-2.5 border border-gray-200 rounded-xl focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none transition-all"
-                />
-                <span className="absolute right-4 top-2.5 text-gray-400 text-sm">秒</span>
-              </div>
-            </div>
-            <div className="md:col-span-2">
-              <label className="block text-sm font-medium text-gray-700 mb-2">操作速度倍率（影响加购/购物车抓取）</label>
-              <div className="relative">
-                <input
-                  type="number"
-                  min="0.2"
-                  max="2.0"
-                  step="0.1"
-                  value={config.humanDelayScale}
-                  onChange={(e) => updateConfig({ humanDelayScale: Number.parseFloat(e.target.value) || 1 })}
-                  className="w-full pl-4 pr-12 py-2.5 border border-gray-200 rounded-xl focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none transition-all"
-                />
-                <span className="absolute right-4 top-2.5 text-gray-400 text-sm">倍</span>
-              </div>
-              <p className="text-xs text-gray-400 mt-2">范围：0.2（更快）~ 2.0（更慢），默认 1.0</p>
-            </div>
+            <p className="text-xs text-gray-400">同一商品内多个 SKU 逐个加购时，每个 SKU 之间的随机等待。</p>
           </div>
 
-          {hasValidationError && (
+          <div className="space-y-3">
+            <div className="text-sm font-medium text-gray-700">商品开始间隔</div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">最小间隔</label>
+                <div className="relative">
+                  <input
+                    type="number"
+                    min="0"
+                    value={config.cartAddProductDelayMinMs}
+                    onChange={(e) => updateConfig({ cartAddProductDelayMinMs: parseInt(e.target.value) || 0 })}
+                    className="w-full pl-4 pr-12 py-2.5 border border-gray-200 rounded-xl focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none transition-all"
+                  />
+                  <span className="absolute right-4 top-2.5 text-gray-400 text-sm">ms</span>
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">最大间隔</label>
+                <div className="relative">
+                  <input
+                    type="number"
+                    min="0"
+                    value={config.cartAddProductDelayMaxMs}
+                    onChange={(e) => updateConfig({ cartAddProductDelayMaxMs: parseInt(e.target.value) || 0 })}
+                    className="w-full pl-4 pr-12 py-2.5 border border-gray-200 rounded-xl focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none transition-all"
+                  />
+                  <span className="absolute right-4 top-2.5 text-gray-400 text-sm">ms</span>
+                </div>
+              </div>
+            </div>
+            <p className="text-xs text-gray-400">批量加购多个商品时，每个商品开始前的随机等待（0 表示不等待）。</p>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">操作速度倍率（影响加购/购物车抓取）</label>
+            <div className="relative">
+              <input
+                type="number"
+                min="0.2"
+                max="2.0"
+                step="0.1"
+                value={config.humanDelayScale}
+                onChange={(e) => updateConfig({ humanDelayScale: Number.parseFloat(e.target.value) || 1 })}
+                className="w-full pl-4 pr-12 py-2.5 border border-gray-200 rounded-xl focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none transition-all"
+              />
+              <span className="absolute right-4 top-2.5 text-gray-400 text-sm">倍</span>
+            </div>
+            <p className="text-xs text-gray-400 mt-2">范围：0.2（更快）~ 2.0（更慢），默认 1.0</p>
+          </div>
+
+          {hasCartAddSkuDelayError && (
             <div className="flex items-center gap-2 text-sm text-red-500 bg-red-50 p-3 rounded-lg">
               <AlertTriangle className="w-4 h-4" />
-              最小延迟不能大于最大延迟
+              SKU 间隔最小值不能大于最大值
+            </div>
+          )}
+          {hasCartAddProductDelayError && (
+            <div className="flex items-center gap-2 text-sm text-red-500 bg-red-50 p-3 rounded-lg">
+              <AlertTriangle className="w-4 h-4" />
+              商品开始间隔最小值不能大于最大值
             </div>
           )}
           {hasDelayScaleError && (
@@ -147,7 +222,7 @@ export default function Settings() {
 
           <div className="text-sm text-gray-500 bg-gray-50 p-4 rounded-xl">
             <span className="font-medium text-gray-700">当前生效：</span>
-            每次抓取将在 <span className="text-orange-600 font-bold">{config.minDelay}</span> 到 <span className="text-orange-600 font-bold">{config.maxDelay}</span> 秒之间随机等待，操作间隔按 <span className="text-orange-600 font-bold">{config.humanDelayScale}x</span> 缩放。
+            SKU 间隔({config.cartAddSkuDelayMinMs}~{config.cartAddSkuDelayMaxMs}ms)；商品开始间隔({config.cartAddProductDelayMinMs}~{config.cartAddProductDelayMaxMs}ms)；操作速度按 <span className="text-orange-600 font-bold">{config.humanDelayScale}x</span> 缩放。
           </div>
         </div>
       </section>
@@ -252,7 +327,7 @@ export default function Settings() {
 
           <div className="text-sm text-gray-500 bg-gray-50 p-4 rounded-xl">
             <span className="font-medium text-gray-700">当前生效：</span>
-            系统将每 <span className="text-orange-600 font-bold">{config.pollingInterval}</span> 分钟检查一次所有监控商品的价格。
+            系统将每 <span className="text-orange-600 font-bold">{config.pollingInterval}</span> 分钟执行一次购物车监控（自动轮询）。
           </div>
         </div>
       </section>

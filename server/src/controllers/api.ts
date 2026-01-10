@@ -507,6 +507,87 @@ router.get('/agents', async (req: Request, res: Response) => {
   }
 });
 
+// 获取 Agent 浏览器状态（用于排查登录/页面是否卡住等）
+router.get('/agents/:agentId/browser-status', async (req: Request, res: Response) => {
+  try {
+    const agentId = String(req.params.agentId || '').trim();
+    if (!agentId) {
+      return res.status(400).json({ success: false, error: 'Invalid agentId' });
+    }
+
+    if (!agentHub.isConnected(agentId)) {
+      return res.status(409).json({ success: false, error: 'Agent offline' });
+    }
+
+    const auth = getSessionAuth(req);
+    if (auth && auth.user.role !== 'admin' && !agentHub.isOwnedBy(agentId, auth.user.id)) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+
+    const result = await agentHub.call<any>(agentId, 'getBrowserStatus', {}, { timeoutMs: 15000 });
+    res.json({ success: true, data: result });
+  } catch (error) {
+    res.status(500).json({ success: false, error: String(error) });
+  }
+});
+
+// 获取账号在 Agent 上的当前浏览器截图（单次截图，用于排查页面是否卡住）
+router.get('/accounts/:id/browser-screenshot', async (req: Request, res: Response) => {
+  try {
+    const accountId = String(req.params.id || '').trim();
+    if (!accountId) {
+      return res.status(400).json({ success: false, error: 'Invalid accountId' });
+    }
+
+    const account = await prisma.taobaoAccount.findFirst({
+      where: { id: accountId, ...buildVisibleAccountsWhere(req) },
+      select: { id: true, agentId: true, userId: true },
+    });
+
+    if (!account) {
+      return res.status(404).json({ success: false, error: 'Account not found' });
+    }
+
+    const preferredAgentId =
+      !account.agentId && account.userId
+        ? (await (prisma as any).systemUser.findUnique({
+            where: { id: account.userId },
+            select: { preferredAgentId: true },
+          }))?.preferredAgentId ?? null
+        : null;
+
+    const candidateAgentId =
+      account.agentId && agentHub.isConnected(account.agentId)
+        ? account.agentId
+        : preferredAgentId && agentHub.isConnected(preferredAgentId)
+          ? preferredAgentId
+          : account.agentId || preferredAgentId;
+
+    if (!candidateAgentId) {
+      return res.status(409).json({ success: false, error: 'No agent available' });
+    }
+
+    if (!agentHub.isConnected(candidateAgentId)) {
+      return res.status(409).json({ success: false, error: `Agent offline: ${candidateAgentId}` });
+    }
+
+    const auth = getSessionAuth(req);
+    if (auth && auth.user.role !== 'admin' && !agentHub.isOwnedBy(candidateAgentId, auth.user.id)) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+
+    const result = await agentHub.call<any>(
+      candidateAgentId,
+      'captureAccountScreenshot',
+      { accountId },
+      { timeoutMs: 20000 }
+    );
+    res.json({ success: true, data: result });
+  } catch (error) {
+    res.status(500).json({ success: false, error: String(error) });
+  }
+});
+
 // 获取账号列表
 router.get('/accounts', async (req: Request, res: Response) => {
   try {
@@ -1140,6 +1221,10 @@ router.get('/scraper/config', requireAdminOrApiKey, async (req: Request, res: Re
           maxDelay: 180,
           pollingInterval: 60,
           humanDelayScale: 1,
+          cartAddSkuDelayMinMs: 900,
+          cartAddSkuDelayMaxMs: 2200,
+          cartAddProductDelayMinMs: 0,
+          cartAddProductDelayMaxMs: 0,
         },
       });
     }
@@ -1156,6 +1241,10 @@ const updateScraperSchema = z.object({
   maxDelay: z.number().min(0),
   pollingInterval: z.number().min(10),
   humanDelayScale: z.number().min(0.2).max(2).optional(),
+  cartAddSkuDelayMinMs: z.number().min(0).optional(),
+  cartAddSkuDelayMaxMs: z.number().min(0).optional(),
+  cartAddProductDelayMinMs: z.number().min(0).optional(),
+  cartAddProductDelayMaxMs: z.number().min(0).optional(),
   quietHoursEnabled: z.boolean().optional(),
   quietHoursStart: z
     .string()
@@ -1184,6 +1273,18 @@ router.put('/scraper/config', requireAdminOrApiKey, async (req: Request, res: Re
     }
 
     let scraperConfig = await (prisma as any).scraperConfig.findFirst();
+
+    const cartAddSkuDelayMinMs = data.cartAddSkuDelayMinMs ?? scraperConfig?.cartAddSkuDelayMinMs ?? 900;
+    const cartAddSkuDelayMaxMs = data.cartAddSkuDelayMaxMs ?? scraperConfig?.cartAddSkuDelayMaxMs ?? 2200;
+    if (cartAddSkuDelayMinMs > cartAddSkuDelayMaxMs) {
+      return res.status(400).json({ success: false, error: '加购 SKU 间隔最小值不能大于最大值' });
+    }
+
+    const cartAddProductDelayMinMs = data.cartAddProductDelayMinMs ?? scraperConfig?.cartAddProductDelayMinMs ?? 0;
+    const cartAddProductDelayMaxMs = data.cartAddProductDelayMaxMs ?? scraperConfig?.cartAddProductDelayMaxMs ?? 0;
+    if (cartAddProductDelayMinMs > cartAddProductDelayMaxMs) {
+      return res.status(400).json({ success: false, error: '加购 商品开始间隔最小值不能大于最大值' });
+    }
 
     const quietEnabled =
       data.quietHoursEnabled !== undefined

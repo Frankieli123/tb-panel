@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
-import { Plus, Cookie, Trash2, AlertTriangle, Play, Pause, QrCode, X, Loader2 } from 'lucide-react';
+import { Plus, Cookie, Trash2, AlertTriangle, Play, Pause, QrCode, X, Loader2, Monitor } from 'lucide-react';
 import { api } from '../services/api';
 import { getLoginWsUrl } from '../services/api';
 import type { AgentConnection, TaobaoAccount } from '../types';
@@ -10,6 +10,13 @@ interface LoginState {
   status: 'connecting' | 'started' | 'scanning' | 'success' | 'error';
   screenshot?: string;
   message?: string;
+}
+
+interface ScreenshotState {
+  accountId: string;
+  loading: boolean;
+  image?: string;
+  error?: string;
 }
 
 export default function Accounts() {
@@ -25,6 +32,7 @@ export default function Accounts() {
   const [newAccountName, setNewAccountName] = useState('');
   const [cookieInput, setCookieInput] = useState('');
   const [loginState, setLoginState] = useState<LoginState | null>(null);
+  const [screenshotState, setScreenshotState] = useState<ScreenshotState | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
@@ -59,6 +67,21 @@ export default function Accounts() {
       setBindingAccountId(null);
     }
   }, [accounts]);
+
+  const captureAccountScreenshot = async (accountId: string) => {
+    setScreenshotState({ accountId, loading: true });
+    try {
+      const data = await api.getAccountBrowserScreenshot(accountId);
+      setScreenshotState({ accountId, loading: false, image: data.image });
+    } catch (error) {
+      console.error('Failed to capture screenshot:', error);
+      setScreenshotState({
+        accountId,
+        loading: false,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
 
   const startLogin = useCallback((accountId: string) => {
     // 关闭现有连接
@@ -386,6 +409,13 @@ export default function Accounts() {
                   <QrCode className="w-4 h-4" /> 登录
                 </button>
                 <button
+                  onClick={() => void captureAccountScreenshot(account.id)}
+                  className="flex-none flex items-center justify-center gap-2 text-sm font-medium text-gray-700 bg-gray-50 hover:bg-gray-100 px-3 py-2 rounded-lg transition-colors"
+                  title="查看当前 Agent 浏览器画面（单次截图）"
+                >
+                  <Monitor className="w-4 h-4" />
+                </button>
+                <button
                   onClick={() => setShowCookieModal(account.id)}
                   className="flex-none flex items-center justify-center gap-2 text-sm font-medium text-gray-700 bg-gray-50 hover:bg-gray-100 px-3 py-2 rounded-lg transition-colors"
                   title="手动输入Cookie"
@@ -560,6 +590,62 @@ export default function Accounts() {
                   >
                     重试
                   </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Agent Screenshot Modal */}
+      {screenshotState && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl w-full max-w-2xl shadow-xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div className="flex items-center justify-between p-4 border-b flex-shrink-0">
+              <h3 className="text-lg font-bold">当前画面</h3>
+              <button
+                onClick={() => setScreenshotState(null)}
+                className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 overflow-y-auto">
+              {screenshotState.loading ? (
+                <div className="flex flex-col items-center justify-center py-12">
+                  <Loader2 className="w-8 h-8 text-orange-500 animate-spin" />
+                  <p className="mt-4 text-gray-500">正在截图...</p>
+                </div>
+              ) : screenshotState.error ? (
+                <div className="flex flex-col items-center justify-center py-12">
+                  <p className="text-red-600 font-medium">{screenshotState.error}</p>
+                  <button
+                    onClick={() => void captureAccountScreenshot(screenshotState.accountId)}
+                    className="mt-4 px-4 py-2 text-sm font-medium text-white bg-orange-500 hover:bg-orange-600 rounded-lg"
+                  >
+                    重试
+                  </button>
+                </div>
+              ) : screenshotState.image ? (
+                <div className="flex flex-col items-center w-full">
+                  <div className="relative bg-gray-50 rounded-xl overflow-hidden w-full flex items-center justify-center border border-gray-200 min-h-[300px] md:min-h-[500px]">
+                    <img
+                      src={`data:image/jpeg;base64,${screenshotState.image}`}
+                      alt="Agent Screenshot"
+                      className="w-full h-auto object-contain max-h-[70vh] md:max-h-[800px]"
+                    />
+                  </div>
+                  <button
+                    onClick={() => void captureAccountScreenshot(screenshotState.accountId)}
+                    className="mt-4 px-4 py-2 text-sm font-medium text-white bg-orange-500 hover:bg-orange-600 rounded-lg"
+                  >
+                    重新截图
+                  </button>
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center py-12">
+                  <p className="text-gray-500">无可用截图</p>
                 </div>
               )}
             </div>

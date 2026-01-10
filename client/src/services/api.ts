@@ -11,6 +11,8 @@ import type {
   WecomConfig,
   AgentConnection,
   AgentPairCode,
+  BrowserScreenshot,
+  BrowserStatus,
 } from '../types';
 
 const API_ORIGIN = import.meta.env.DEV ? '' : ((import.meta.env.VITE_API_ORIGIN as string | undefined) ?? '');
@@ -171,6 +173,10 @@ export const api = {
   // 账号
   getAccounts: () => request<TaobaoAccount[]>('/accounts'),
   getAgents: () => request<AgentConnection[]>('/agents'),
+  getAgentBrowserStatus: (agentId: string) =>
+    request<BrowserStatus>(`/agents/${encodeURIComponent(agentId)}/browser-status`),
+  getAccountBrowserScreenshot: (accountId: string) =>
+    request<BrowserScreenshot>(`/accounts/${encodeURIComponent(accountId)}/browser-screenshot`),
   createAgentPairCode: (setAsDefault?: boolean) =>
     request<AgentPairCode>('/agents/pair-code', {
       method: 'POST',

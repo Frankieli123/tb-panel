@@ -185,7 +185,11 @@ export class CartScraper {
     await session.page.waitForTimeout(randomDelay(600, 1200));
   }
 
-  async scrapeCart(accountId: string, cookies?: string): Promise<CartScrapeResult> {
+  async scrapeCart(
+    accountId: string,
+    cookies?: string,
+    options?: { expectedTaobaoIds?: string[] }
+  ): Promise<CartScrapeResult> {
     console.log(`[CartScraper] Start scraping cart for account=${accountId}`);
 
     return this.runExclusive(async () => {
@@ -198,7 +202,7 @@ export class CartScraper {
           const session = await this.getOrCreateSession(accountId, cookies);
           await this.refreshCartPage(session);
 
-          const cartData = await this.extractCartData(session.page);
+          const cartData = await this.extractCartData(session.page, options);
           console.log(`[CartScraper] Found ${cartData.products.length} products in cart`);
 
           return {
@@ -234,8 +238,16 @@ export class CartScraper {
     });
   }
 
-  private async extractCartData(page: Page): Promise<{ products: CartProduct[] }> {
+  private async extractCartData(
+    page: Page,
+    options?: { expectedTaobaoIds?: string[] }
+  ): Promise<{ products: CartProduct[] }> {
     const productsByKey = new Map<string, CartProduct>();
+    const expectedRemaining = new Set<string>(
+      (options?.expectedTaobaoIds ?? [])
+        .map((x) => String(x || '').trim())
+        .filter((x) => /^\d+$/.test(x))
+    );
 
     const extractVisible = async (): Promise<{
       items: CartProduct[];
@@ -290,14 +302,43 @@ export class CartScraper {
             const skuLabels = skuEl ? Array.from(skuEl.querySelectorAll('.label--T4deixnF')) : [];
             const skuProperties = skuLabels.map((label) => label.textContent?.trim() || '').join(' ');
 
-            const linkEl = item.querySelector('a[href*="item.taobao.com"], a[href*="detail.tmall.com"]');
-            const href = linkEl?.getAttribute('href') || '';
+            const linkEl = item.querySelector(
+              'a[href*="id="], a[href*="/i"], a[href*="item.taobao.com"], a[href*="detail.tmall.com"]'
+            );
+            const hrefRaw = linkEl?.getAttribute('href') || '';
+            const href = hrefRaw.startsWith('//') ? 'https:' + hrefRaw : hrefRaw;
 
-            const taobaoIdMatch = href.match(/[?&]id=(\d+)/);
+            const taobaoIdMatch =
+              href.match(/[?&]id=(\d+)/) ||
+              href.match(/\/i(\d+)\.htm/) ||
+              href.match(/item\/(\d+)\.htm/);
             const skuIdMatch = href.match(/[?&]skuId=(\d+)/);
 
-            const taobaoId = taobaoIdMatch ? taobaoIdMatch[1] : '';
-            const skuId = skuIdMatch ? skuIdMatch[1] : '';
+            let taobaoId = taobaoIdMatch ? taobaoIdMatch[1] : '';
+            let skuId = skuIdMatch ? skuIdMatch[1] : '';
+
+            if (!taobaoId || !skuId) {
+              const root = (item.closest?.('[data-id],[data-item-id],[data-itemid],[data-itemId],[data-taobao-id]') as HTMLElement | null) || (item as HTMLElement);
+
+              if (!taobaoId) {
+                const dataId =
+                  root.getAttribute('data-taobao-id') ||
+                  root.getAttribute('data-item-id') ||
+                  root.getAttribute('data-itemid') ||
+                  root.getAttribute('data-id') ||
+                  '';
+                if (/^\d+$/.test(dataId)) taobaoId = dataId;
+              }
+
+              if (!skuId) {
+                const dataSku =
+                  root.getAttribute('data-sku-id') ||
+                  root.getAttribute('data-skuid') ||
+                  root.getAttribute('data-sku') ||
+                  '';
+                if (/^\d+$/.test(dataSku)) skuId = dataSku;
+              }
+            }
 
             if (!taobaoId) continue;
 
@@ -350,11 +391,17 @@ export class CartScraper {
         .catch(() => 0);
     };
 
+    const startedAt = Date.now();
+    const maxDurationMs = expectedRemaining.size > 0 ? 90_000 : 60_000;
+    let maxRounds = expectedRemaining.size > 0 ? 220 : 140;
+
     let stableNoNewRounds = 0;
     let stuckRounds = 0;
     let lastTop: number | null = null;
+    let bottomWaits = 0;
 
-    for (let round = 0; round < 60; round++) {
+    for (let round = 0; round < maxRounds; round++) {
+      if (Date.now() - startedAt > maxDurationMs) break;
       const snapshot = await extractVisible();
       if (!snapshot) break;
 
@@ -365,6 +412,7 @@ export class CartScraper {
 
         if (!productsByKey.has(key)) {
           productsByKey.set(key, item);
+          if (expectedRemaining.has(item.taobaoId)) expectedRemaining.delete(item.taobaoId);
           added++;
           continue;
         }
@@ -375,6 +423,7 @@ export class CartScraper {
         if ((!existing.finalPrice || existing.finalPrice <= 0) && item.finalPrice > 0) existing.finalPrice = item.finalPrice;
         if (!existing.originalPrice && item.originalPrice) existing.originalPrice = item.originalPrice;
         if (!existing.skuProperties && item.skuProperties) existing.skuProperties = item.skuProperties;
+        if (expectedRemaining.has(existing.taobaoId)) expectedRemaining.delete(existing.taobaoId);
       }
 
       if (productsByKey.size === 0 && round === 0 && snapshot.items.length === 0) break;
@@ -383,9 +432,21 @@ export class CartScraper {
 
       const { top, height, client } = snapshot.scroll;
       const atBottom = height > 0 && client > 0 && top + client >= height - 2;
-      if (atBottom && stableNoNewRounds >= 2) break;
+      if (atBottom && stableNoNewRounds >= 2) {
+        if (expectedRemaining.size > 0 && bottomWaits < 2) {
+          bottomWaits++;
+          stableNoNewRounds = 0;
+          await page.waitForTimeout(1200).catch(() => {});
+          continue;
+        }
+        break;
+      }
 
-      const step = Math.max(520, Math.min(1400, Math.floor((client || 800) * 0.85)));
+      const step = Math.max(650, Math.min(2400, Math.floor((client || 800) * 0.95)));
+      if (round === 0 && height > 0) {
+        const estimated = Math.ceil(height / step) + 10;
+        maxRounds = Math.min(320, Math.max(maxRounds, estimated));
+      }
       const nextTop = await scrollBy(step);
 
       if (lastTop !== null && nextTop === lastTop) stuckRounds++;
