@@ -9,6 +9,7 @@ import { setHumanDelayScale } from './humanSimulator.js';
 import { notificationService } from './notification.js';
 import { randomDelay, sleep, calculatePriceDrop, encryptCookies } from '../utils/helpers.js';
 import { taskQueue, taskQueueConnection } from './taskQueue.js';
+import { setCartSkuStats } from './cartSkuStats.js';
 
 const prisma = new PrismaClient();
 
@@ -439,6 +440,14 @@ class SchedulerService {
           resumeAdd(accountId);
         }
       }
+
+      try {
+        const cartSkuLoaded = cart?.success && Array.isArray(cart?.products) ? cart.products.length : 0;
+        const cartSkuTotalRaw = (cart as any)?.uiTotalCount;
+        const cartSkuTotal =
+          typeof cartSkuTotalRaw === 'number' && Number.isFinite(cartSkuTotalRaw) ? cartSkuTotalRaw : null;
+        setCartSkuStats(accountId, { cartSkuTotal, cartSkuLoaded });
+      } catch {}
 
       const result = await cartScraper.updatePricesFromCart(accountId, account.cookies, { cartResult: cart });
 

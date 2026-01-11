@@ -6,6 +6,13 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWindowsForms>true</UseWindowsForms>
     <AssemblyName>TaobaoAgentTray</AssemblyName>
+    <ApplicationIcon>Resources\app.ico</ApplicationIcon>
   </PropertyGroup>
+  
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\tray-red.ico" />
+    <EmbeddedResource Include="Resources\tray-yellow.ico" />
+    <EmbeddedResource Include="Resources\tray-green.ico" />
+  </ItemGroup>
 </Project>
 

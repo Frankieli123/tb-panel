@@ -26,6 +26,7 @@ export interface CartScrapeResult {
   success: boolean;
   products: CartProduct[];
   total: number;
+  uiTotalCount?: number | null;
   error?: string;
 }
 
@@ -209,6 +210,7 @@ export class CartScraper {
             success: true,
             products: cartData.products,
             total: cartData.products.length,
+            uiTotalCount: cartData.uiTotalCount ?? null,
           };
         } catch (error: any) {
           lastErr = error;
@@ -241,13 +243,34 @@ export class CartScraper {
   private async extractCartData(
     page: Page,
     options?: { expectedTaobaoIds?: string[] }
-  ): Promise<{ products: CartProduct[] }> {
+  ): Promise<{ products: CartProduct[]; uiTotalCount: number | null }> {
     const productsByKey = new Map<string, CartProduct>();
     const expectedRemaining = new Set<string>(
       (options?.expectedTaobaoIds ?? [])
         .map((x) => String(x || '').trim())
         .filter((x) => /^\d+$/.test(x))
     );
+
+    const uiTotalCount = await page
+      .evaluate(() => {
+        const toCount = (raw: string | null | undefined): number | null => {
+          const digits = String(raw || '')
+            .replace(/[^\d]/g, '')
+            .trim();
+          if (!digits) return null;
+          const n = parseInt(digits, 10);
+          return Number.isFinite(n) && n > 0 ? n : null;
+        };
+
+        const header = document.querySelector('.trade-cart-header-container') as HTMLElement | null;
+        const headerText = header?.textContent || '';
+        const m = /全部商品\s*[（(]\s*(\d{1,6})\s*[）)]/.exec(headerText);
+        const n2 = m ? toCount(m[1]) : null;
+        if (n2) return n2;
+
+        return null;
+      })
+      .catch(() => null);
 
     const extractVisible = async (): Promise<{
       items: CartProduct[];
@@ -256,22 +279,30 @@ export class CartScraper {
       return page
         .evaluate(() => {
           const findScrollContainer = (): HTMLElement => {
+            const doc = (document.scrollingElement as HTMLElement) || document.documentElement;
             const firstItem = document.querySelector('.trade-cart-item-info') as HTMLElement | null;
             let el = firstItem?.parentElement as HTMLElement | null;
 
+            const isScrollable = (node: HTMLElement): boolean => {
+              if (node.scrollHeight <= node.clientHeight + 32) return false;
+              const style = window.getComputedStyle(node);
+              const overflowY = style?.overflowY || '';
+              return overflowY === 'auto' || overflowY === 'scroll';
+            };
+
             while (el && el !== document.body) {
-              if (el.scrollHeight > el.clientHeight + 32) return el;
+              if (isScrollable(el)) return el;
               el = el.parentElement;
             }
 
-            return (document.scrollingElement as HTMLElement) || document.documentElement;
+            return doc;
           };
 
           const items: any[] = [];
           const cartItems = Array.from(document.querySelectorAll('.trade-cart-item-info'));
 
           for (const item of cartItems) {
-            const titleEl = item.querySelector('a.title--dsuLK9IN');
+            const titleEl = item.querySelector('a.title--dsuLK9IN') as HTMLAnchorElement | null;
             const title = titleEl?.textContent?.trim() || '';
 
             const imageEl = item.querySelector('img.image--MC0kGGgi');
@@ -300,11 +331,20 @@ export class CartScraper {
 
             const skuEl = item.querySelector('.trade-cart-item-sku-old');
             const skuLabels = skuEl ? Array.from(skuEl.querySelectorAll('.label--T4deixnF')) : [];
-            const skuProperties = skuLabels.map((label) => label.textContent?.trim() || '').join(' ');
+            const skuProperties = skuLabels.map((label) => label.textContent?.trim() || '').join(' ').trim();
 
-            const linkEl = item.querySelector(
-              'a[href*="id="], a[href*="/i"], a[href*="item.taobao.com"], a[href*="detail.tmall.com"]'
-            );
+            const qtyEl =
+              (item.querySelector('[class*="quantityNumWrapper"]') as HTMLElement | null) ||
+              (item.querySelector('.trade-cart-item-quantity [title*="数量"]') as HTMLElement | null) ||
+              (item.querySelector('.trade-cart-item-quantity') as HTMLElement | null);
+            const qtyRaw = (qtyEl?.getAttribute('title') || qtyEl?.textContent || '').trim();
+            const qtyMatch = /(\d{1,6})/.exec(qtyRaw);
+            const quantity = Math.max(1, qtyMatch ? parseInt(qtyMatch[1], 10) : 1);
+
+            const linkEl =
+              titleEl ||
+              (item.querySelector('a[href*="item.taobao.com/item.htm"], a[href*="detail.tmall.com/item.htm"], a[href*="/i"]') as HTMLAnchorElement | null) ||
+              (item.querySelector('a[href*="item.htm?id="], a[href*="?id="]') as HTMLAnchorElement | null);
             const hrefRaw = linkEl?.getAttribute('href') || '';
             const href = hrefRaw.startsWith('//') ? 'https:' + hrefRaw : hrefRaw;
 
@@ -342,6 +382,9 @@ export class CartScraper {
 
             if (!taobaoId) continue;
 
+            const keySuffix = skuId || skuProperties || '';
+            const cartItemId = keySuffix ? `${taobaoId}_${keySuffix}` : taobaoId;
+
             items.push({
               taobaoId,
               skuId,
@@ -350,8 +393,8 @@ export class CartScraper {
               imageUrl,
               finalPrice,
               originalPrice,
-              quantity: 1,
-              cartItemId: `${taobaoId}_${skuId}`,
+              quantity,
+              cartItemId,
             });
           }
 
@@ -372,36 +415,71 @@ export class CartScraper {
       return page
         .evaluate((d) => {
           const findScrollContainer = (): HTMLElement => {
+            const doc = (document.scrollingElement as HTMLElement) || document.documentElement;
             const firstItem = document.querySelector('.trade-cart-item-info') as HTMLElement | null;
             let el = firstItem?.parentElement as HTMLElement | null;
 
+            const isScrollable = (node: HTMLElement): boolean => {
+              if (node.scrollHeight <= node.clientHeight + 32) return false;
+              const style = window.getComputedStyle(node);
+              const overflowY = style?.overflowY || '';
+              return overflowY === 'auto' || overflowY === 'scroll';
+            };
+
             while (el && el !== document.body) {
-              if (el.scrollHeight > el.clientHeight + 32) return el;
+              if (isScrollable(el)) return el;
               el = el.parentElement;
             }
 
-            return (document.scrollingElement as HTMLElement) || document.documentElement;
+            return doc;
           };
 
           const container = findScrollContainer();
+          const doc = (document.scrollingElement as HTMLElement) || document.documentElement;
+          if (container === doc) {
+            window.scrollBy(0, d);
+            return doc.scrollTop || (window.scrollY || 0);
+          }
+
           const before = container.scrollTop || 0;
           container.scrollTop = before + d;
+          try {
+            container.dispatchEvent(new Event('scroll', { bubbles: true }));
+          } catch {}
           return container.scrollTop || 0;
         }, delta)
         .catch(() => 0);
     };
 
-    const startedAt = Date.now();
-    const maxDurationMs = expectedRemaining.size > 0 ? 90_000 : 60_000;
-    let maxRounds = expectedRemaining.size > 0 ? 220 : 140;
+    const hasExpected = expectedRemaining.size > 0;
+    const hasUiTotal = typeof uiTotalCount === 'number' && uiTotalCount > 0;
+    let maxRounds = hasExpected || hasUiTotal ? 320 : 160;
+    const bottomWaitLimit = hasExpected || hasUiTotal ? 10 : 0;
 
     let stableNoNewRounds = 0;
     let stuckRounds = 0;
     let lastTop: number | null = null;
     let bottomWaits = 0;
 
+    const detectCartEndMarker = async (): Promise<{ hit: boolean; reason: string | null }> => {
+      return page
+        .evaluate(() => {
+          const keywords = ['猜你喜欢', '为你推荐', '你可能还喜欢'];
+          const endKeywords = ['没有更多', '已经到底', '到底了'];
+
+          const bodyText = document.body?.innerText || '';
+          const hitKeyword = keywords.find((k) => bodyText.includes(k)) || null;
+
+          const infiniteText =
+            (document.querySelector('.trade-infinite-container') as HTMLElement | null)?.innerText?.trim() || '';
+          const hitEnd = endKeywords.find((k) => infiniteText.includes(k)) || null;
+
+          return { hit: Boolean(hitKeyword || hitEnd), reason: hitKeyword || hitEnd };
+        })
+        .catch(() => ({ hit: false, reason: null }));
+    };
+
     for (let round = 0; round < maxRounds; round++) {
-      if (Date.now() - startedAt > maxDurationMs) break;
       const snapshot = await extractVisible();
       if (!snapshot) break;
 
@@ -423,23 +501,45 @@ export class CartScraper {
         if ((!existing.finalPrice || existing.finalPrice <= 0) && item.finalPrice > 0) existing.finalPrice = item.finalPrice;
         if (!existing.originalPrice && item.originalPrice) existing.originalPrice = item.originalPrice;
         if (!existing.skuProperties && item.skuProperties) existing.skuProperties = item.skuProperties;
+        if (typeof item.quantity === 'number' && item.quantity > 0) existing.quantity = item.quantity;
         if (expectedRemaining.has(existing.taobaoId)) expectedRemaining.delete(existing.taobaoId);
       }
 
       if (productsByKey.size === 0 && round === 0 && snapshot.items.length === 0) break;
 
+      if (added > 0) bottomWaits = 0;
       stableNoNewRounds = added === 0 ? stableNoNewRounds + 1 : 0;
+
+      const loadedQty =
+        uiTotalCount && uiTotalCount > 0
+          ? Array.from(productsByKey.values()).reduce((sum, p) => sum + (typeof p.quantity === 'number' ? p.quantity : 1), 0)
+          : 0;
+      const needsFullLoad = Boolean(uiTotalCount && uiTotalCount > 0 && loadedQty < uiTotalCount);
+      if (!needsFullLoad && uiTotalCount && uiTotalCount > 0 && stableNoNewRounds >= 1 && loadedQty >= uiTotalCount) {
+        break;
+      }
 
       const { top, height, client } = snapshot.scroll;
       const atBottom = height > 0 && client > 0 && top + client >= height - 2;
-      if (atBottom && stableNoNewRounds >= 2) {
-        if (expectedRemaining.size > 0 && bottomWaits < 2) {
+      if (atBottom) {
+        if ((expectedRemaining.size > 0 || needsFullLoad) && bottomWaits < bottomWaitLimit) {
           bottomWaits++;
           stableNoNewRounds = 0;
-          await page.waitForTimeout(1200).catch(() => {});
+          await page.waitForTimeout(1200 + bottomWaits * 500).catch(() => {});
+          await scrollBy(-Math.max(260, Math.floor(client * 0.25)));
+          await page.waitForTimeout(randomDelay(240, 420)).catch(() => {});
           continue;
         }
-        break;
+        if ((expectedRemaining.size > 0 || needsFullLoad) && bottomWaits >= bottomWaitLimit && stableNoNewRounds >= 1) {
+          const end = await detectCartEndMarker();
+          if (uiTotalCount && uiTotalCount > 0 && loadedQty < uiTotalCount) {
+            console.warn(
+              `[CartScraper] Cart scroll ended (${end.reason || 'no-progress'}) loadedQty=${loadedQty} < uiTotalCount=${uiTotalCount}; stop scrolling`
+            );
+          }
+          break;
+        }
+        if (stableNoNewRounds >= 2 && (!uiTotalCount || loadedQty >= uiTotalCount)) break;
       }
 
       const step = Math.max(650, Math.min(2400, Math.floor((client || 800) * 0.95)));
@@ -453,12 +553,31 @@ export class CartScraper {
       else stuckRounds = 0;
       lastTop = nextTop;
 
-      if (stuckRounds >= 2 && stableNoNewRounds >= 1) break;
+      if (stuckRounds >= 2 && stableNoNewRounds >= 1) {
+        if ((expectedRemaining.size > 0 || needsFullLoad) && bottomWaits < bottomWaitLimit) {
+          bottomWaits++;
+          stableNoNewRounds = 0;
+          await page.waitForTimeout(1200 + bottomWaits * 500).catch(() => {});
+          await scrollBy(-Math.max(260, Math.floor(step * 0.25)));
+          await page.waitForTimeout(randomDelay(240, 420)).catch(() => {});
+          continue;
+        }
+        if ((expectedRemaining.size > 0 || needsFullLoad) && bottomWaits >= bottomWaitLimit) {
+          const end = await detectCartEndMarker();
+          if (uiTotalCount && uiTotalCount > 0 && loadedQty < uiTotalCount) {
+            console.warn(
+              `[CartScraper] Cart scroll stuck (${end.reason || 'no-progress'}) loadedQty=${loadedQty} < uiTotalCount=${uiTotalCount}; stop scrolling`
+            );
+          }
+          break;
+        }
+        if (!uiTotalCount || loadedQty >= uiTotalCount) break;
+      }
 
-      await page.waitForTimeout(randomDelay(240, 520)).catch(() => {});
+      await page.waitForTimeout(hasExpected ? randomDelay(380, 780) : randomDelay(240, 520)).catch(() => {});
     }
 
-    return { products: Array.from(productsByKey.values()) };
+    return { products: Array.from(productsByKey.values()), uiTotalCount };
   }
 
   async updatePricesFromCart(
@@ -511,9 +630,11 @@ export class CartScraper {
     // 3. 建立购物车商品索引 (taobaoId -> CartProduct[])
     const cartByTaobaoId = new Map<string, CartProduct[]>();
     for (const cartProduct of cartResult.products) {
-      const list = cartByTaobaoId.get(cartProduct.taobaoId) ?? [];
+      const taobaoId = String(cartProduct.taobaoId || '').trim();
+      if (!taobaoId) continue;
+      const list = cartByTaobaoId.get(taobaoId) ?? [];
       list.push(cartProduct);
-      cartByTaobaoId.set(cartProduct.taobaoId, list);
+      cartByTaobaoId.set(taobaoId, list);
     }
 
     let updated = 0;
@@ -528,12 +649,14 @@ export class CartScraper {
             ? null
             : parseFloat(product.currentPrice.toString());
 
-        const cartItems = cartByTaobaoId.get(product.taobaoId) ?? [];
+        const productTaobaoId = String(product.taobaoId || '').trim();
+        const cartItems = cartByTaobaoId.get(productTaobaoId) ?? [];
 
         if (cartItems.length === 0) {
           // 购物车中没有该商品，标记为缺失
           missing++;
-          console.log(`[CartScraper] Missing in cart: ${product.title} (${product.taobaoId})`);
+          const title = String(product.title || '').trim() || '<untitled>';
+          console.log(`[CartScraper] Missing in cart: ${title} (${productTaobaoId || String(product.taobaoId || '').trim()})`);
 
           await prisma.product.update({
             where: { id: product.id },

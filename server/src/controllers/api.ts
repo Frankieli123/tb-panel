@@ -6,6 +6,7 @@ import { taskQueue } from '../services/taskQueue.js';
 import { notificationService } from '../services/notification.js';
 import { agentHub } from '../services/agentHub.js';
 import { agentAuthService } from '../services/agentAuth.js';
+import { getCartSkuStats } from '../services/cartSkuStats.js';
 import { config } from '../config/index.js';
 import createAuthRouter from './auth.js';
 import { getCookieValue } from '../auth/session.js';
@@ -615,12 +616,19 @@ router.get('/accounts', async (req: Request, res: Response) => {
     });
 
     // 合并两种商品计数
-    const accountsWithTotalCount = accounts.map(acc => ({
-      ...acc,
-      _count: {
-        products: acc._count.assignedProducts + acc._count.ownedProducts
-      }
-    }));
+    const accountsWithTotalCount = accounts.map((acc) => {
+      const cart = getCartSkuStats(acc.id);
+
+      return {
+        ...acc,
+        _count: {
+          products: acc._count.assignedProducts + acc._count.ownedProducts,
+        },
+        cartSkuTotal: cart?.cartSkuTotal ?? null,
+        cartSkuLoaded: cart?.cartSkuLoaded ?? null,
+        cartSkuUpdatedAt: cart ? new Date(cart.updatedAt) : null,
+      };
+    });
 
     res.json({ success: true, data: accountsWithTotalCount });
   } catch (error) {

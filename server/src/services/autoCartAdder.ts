@@ -93,52 +93,340 @@ export class AutoCartAdder {
   }
 
   private async collectCartSkuPropertiesForTaobaoId(taobaoId: string): Promise<Set<string>> {
+    const targetId = String(taobaoId || '').trim();
+    if (!/^\d+$/.test(targetId)) return new Set<string>();
+
+    await this.page.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' as any })).catch(() => {});
+    await this.humanSimulator.sleep(randomDelay(350, 650));
+
     const seen = new Set<string>();
-    let lastSize = 0;
-    let stableRounds = 0;
+    let stableAfterFound = 0;
+    let stableNoNewRounds = 0;
+    let stuckRounds = 0;
+    let lastTop: number | null = null;
+    let seenTarget = false;
+    let bottomWaits = 0;
+    let endReached = false;
+    let endReachedReason: string | null = null;
+    let lastLoadedQty = 0;
+    let lastScrollHeight = 0;
 
-    for (let round = 0; round < 8; round++) {
-      const rawList = await this.page
+    const startedAt = Date.now();
+    let maxDurationMs = 45_000;
+    let maxRounds = 240;
+    let bottomWaitLimit = 4;
+
+    let uiTotalCount: number | null = null;
+    const applyUiTotalCount = (raw: unknown) => {
+      const n = typeof raw === 'number' ? raw : Number(raw);
+      if (!Number.isFinite(n) || n <= 0) return;
+      const next = Math.max(1, Math.floor(n));
+      if (uiTotalCount !== null && uiTotalCount >= next) return;
+
+      uiTotalCount = next;
+      maxRounds = Math.max(maxRounds, 320);
+      bottomWaitLimit = Math.max(bottomWaitLimit, 10);
+      maxDurationMs =
+        uiTotalCount >= 300
+          ? Math.max(maxDurationMs, 240_000)
+          : uiTotalCount >= 150
+            ? Math.max(maxDurationMs, 180_000)
+            : Math.max(maxDurationMs, 120_000);
+    };
+
+    const uiTotalInitial = await this.page
+      .evaluate(() => {
+        const header = document.querySelector('.trade-cart-header-container') as HTMLElement | null;
+        const headerText = header?.textContent || '';
+        const m = /全部商品\s*[（(]\s*(\d{1,6})\s*[）)]/.exec(headerText);
+        if (!m) return null;
+        const n = parseInt(m[1], 10);
+        return Number.isFinite(n) && n > 0 ? n : null;
+      })
+      .catch(() => null);
+    applyUiTotalCount(uiTotalInitial);
+
+    const extract = async (): Promise<{
+      rawList: string[];
+      found: boolean;
+      uiTotalCount: number | null;
+      loadedQty: number;
+      scroll: { top: number; height: number; client: number };
+    } | null> => {
+      return this.page
         .evaluate((id) => {
-          const items = Array.from(document.querySelectorAll('.trade-cart-item-info'));
-          const out: string[] = [];
+          const findScrollContainer = (): HTMLElement => {
+            const doc = (document.scrollingElement as HTMLElement) || document.documentElement;
+            const firstItem = document.querySelector('.trade-cart-item-info') as HTMLElement | null;
+            let el = firstItem?.parentElement as HTMLElement | null;
 
-          for (const item of items) {
-            const linkEl = item.querySelector('a[href*="item.taobao.com"], a[href*="detail.tmall.com"]');
-            const href = linkEl?.getAttribute('href') || '';
-            const taobaoIdMatch = href.match(/[?&]id=(\d+)/);
-            const tid = taobaoIdMatch ? taobaoIdMatch[1] : '';
+            const isScrollable = (node: HTMLElement): boolean => {
+              if (node.scrollHeight <= node.clientHeight + 32) return false;
+              const style = window.getComputedStyle(node);
+              const overflowY = style?.overflowY || '';
+              return overflowY === 'auto' || overflowY === 'scroll';
+            };
+
+            while (el && el !== document.body) {
+              if (isScrollable(el)) return el;
+              el = el.parentElement;
+            }
+
+            return doc;
+          };
+
+          const out: string[] = [];
+          let found = false;
+          let loadedQty = 0;
+
+          const cartItems = Array.from(document.querySelectorAll('.trade-cart-item-info'));
+          for (const item of cartItems) {
+            const qtyEl =
+              (item.querySelector('[class*="quantityNumWrapper"]') as HTMLElement | null) ||
+              (item.querySelector('.trade-cart-item-quantity [title*="数量"]') as HTMLElement | null) ||
+              (item.querySelector('.trade-cart-item-quantity') as HTMLElement | null);
+            const qtyRaw = (qtyEl?.getAttribute('title') || qtyEl?.textContent || '').trim();
+            const qtyMatch = /(\d{1,6})/.exec(qtyRaw);
+            const quantity = Math.max(1, qtyMatch ? parseInt(qtyMatch[1], 10) : 1);
+            loadedQty += quantity;
+
+            const titleEl = item.querySelector('a.title--dsuLK9IN') as HTMLAnchorElement | null;
+            const linkEl =
+              titleEl ||
+              (item.querySelector(
+                'a[href*=\"item.taobao.com/item.htm\"], a[href*=\"detail.tmall.com/item.htm\"], a[href*=\"/i\"]'
+              ) as HTMLAnchorElement | null) ||
+              (item.querySelector('a[href*=\"item.htm?id=\"], a[href*=\"?id=\"]') as HTMLAnchorElement | null);
+
+            const hrefRaw = linkEl?.getAttribute('href') || '';
+            const href = hrefRaw.startsWith('//') ? 'https:' + hrefRaw : hrefRaw;
+            const m = href.match(/[?&]id=(\d+)/) || href.match(/\/i(\d+)\.htm/) || href.match(/item\/(\d+)\.htm/);
+
+            let tid = m ? m[1] : '';
+            if (!tid) {
+              const root =
+                (item.closest?.('[data-id],[data-item-id],[data-itemid],[data-itemId],[data-taobao-id]') as HTMLElement | null) ||
+                (item as HTMLElement);
+              const dataId =
+                root.getAttribute('data-taobao-id') ||
+                root.getAttribute('data-item-id') ||
+                root.getAttribute('data-itemid') ||
+                root.getAttribute('data-id') ||
+                '';
+              if (/^\d+$/.test(dataId)) tid = dataId;
+            }
+
             if (!tid || String(tid) !== String(id)) continue;
+
+            found = true;
 
             const skuEl = item.querySelector('.trade-cart-item-sku-old');
             const skuLabels = skuEl ? Array.from(skuEl.querySelectorAll('.label--T4deixnF')) : [];
-            const skuProperties = skuLabels.map((label) => label.textContent?.trim() || '').join(' ');
+            const skuProperties = skuLabels
+              .map((label) => label.textContent?.trim() || '')
+              .join(' ')
+              .trim();
             if (skuProperties) out.push(skuProperties);
           }
 
-          return out;
-        }, taobaoId)
-        .catch(() => [] as string[]);
+          const header = document.querySelector('.trade-cart-header-container') as HTMLElement | null;
+          const headerText = header?.textContent || '';
+          const m = /全部商品\s*[（(]\s*(\d{1,6})\s*[）)]/.exec(headerText);
+          const uiTotalCountRaw = m ? parseInt(m[1], 10) : NaN;
+          const uiTotalCount = Number.isFinite(uiTotalCountRaw) && uiTotalCountRaw > 0 ? uiTotalCountRaw : null;
 
-      for (const raw of rawList) {
+          const container = findScrollContainer();
+          return {
+            rawList: out,
+            found,
+            uiTotalCount,
+            loadedQty,
+            scroll: {
+              top: container.scrollTop || 0,
+              height: container.scrollHeight || 0,
+              client: container.clientHeight || window.innerHeight || 0,
+            },
+          };
+        }, targetId)
+        .catch(() => null);
+    };
+
+    const scrollBy = async (delta: number): Promise<number> => {
+      return this.page
+        .evaluate((d) => {
+          const findScrollContainer = (): HTMLElement => {
+            const doc = (document.scrollingElement as HTMLElement) || document.documentElement;
+            const firstItem = document.querySelector('.trade-cart-item-info') as HTMLElement | null;
+            let el = firstItem?.parentElement as HTMLElement | null;
+
+            const isScrollable = (node: HTMLElement): boolean => {
+              if (node.scrollHeight <= node.clientHeight + 32) return false;
+              const style = window.getComputedStyle(node);
+              const overflowY = style?.overflowY || '';
+              return overflowY === 'auto' || overflowY === 'scroll';
+            };
+
+            while (el && el !== document.body) {
+              if (isScrollable(el)) return el;
+              el = el.parentElement;
+            }
+
+            return doc;
+          };
+
+          const container = findScrollContainer();
+          const doc = (document.scrollingElement as HTMLElement) || document.documentElement;
+          if (container === doc) {
+            window.scrollBy(0, d);
+            return doc.scrollTop || (window.scrollY || 0);
+          }
+
+          const before = container.scrollTop || 0;
+          container.scrollTop = before + d;
+          try {
+            container.dispatchEvent(new Event('scroll', { bubbles: true }));
+          } catch {}
+          return container.scrollTop || 0;
+        }, delta)
+        .catch(() => 0);
+    };
+
+    const cappedBottomWaitMs = () => Math.min(8000, 1200 + bottomWaits * 500);
+
+    const detectCartEndMarker = async (): Promise<{ hit: boolean; reason: string | null }> => {
+      return this.page
+        .evaluate(() => {
+          const keywords = ['猜你喜欢', '为你推荐', '你可能还喜欢'];
+          const endKeywords = ['没有更多', '已经到底', '到底了'];
+
+          const bodyText = document.body?.innerText || '';
+          const hitKeyword = keywords.find((k) => bodyText.includes(k)) || null;
+
+          const infiniteText =
+            (document.querySelector('.trade-infinite-container') as HTMLElement | null)?.innerText?.trim() || '';
+          const hitEnd = endKeywords.find((k) => infiniteText.includes(k)) || null;
+
+          return { hit: Boolean(hitKeyword || hitEnd), reason: hitKeyword || hitEnd };
+        })
+        .catch(() => ({ hit: false, reason: null }));
+    };
+
+    for (let round = 0; ; round++) {
+      if (uiTotalCount === null) {
+        if (round >= maxRounds) break;
+        if (Date.now() - startedAt > maxDurationMs) break;
+      }
+
+      const snapshot = await extract();
+      if (!snapshot) break;
+
+      applyUiTotalCount(snapshot.uiTotalCount);
+      const loadedQty = Math.max(0, Math.floor(Number(snapshot.loadedQty) || 0));
+      const scrollHeight = Math.max(0, Math.floor(Number(snapshot.scroll.height) || 0));
+      if (loadedQty > lastLoadedQty || scrollHeight > lastScrollHeight) {
+        bottomWaits = 0;
+        lastLoadedQty = loadedQty;
+        lastScrollHeight = scrollHeight;
+      }
+
+      const needsFullLoad = uiTotalCount !== null && loadedQty < uiTotalCount && !endReached;
+      const fullyLoaded = uiTotalCount === null || loadedQty >= uiTotalCount || endReached;
+
+      let added = 0;
+      for (const raw of snapshot.rawList) {
         const norm = normalizeSkuProperties(raw);
-        if (norm) seen.add(norm);
+        if (!norm || seen.has(norm)) continue;
+        seen.add(norm);
+        added++;
       }
 
-      if (seen.size === lastSize) {
-        stableRounds++;
-      } else {
-        stableRounds = 0;
-        lastSize = seen.size;
+      if (snapshot.found) seenTarget = true;
+
+      stableNoNewRounds = added === 0 ? stableNoNewRounds + 1 : 0;
+      if (seenTarget) {
+        stableAfterFound = added === 0 ? stableAfterFound + 1 : 0;
+        if (stableAfterFound >= 2 && fullyLoaded) break;
+      } else if (fullyLoaded && uiTotalCount !== null) {
+        break;
       }
 
-      if (stableRounds >= 2) break;
+      const { top, client } = snapshot.scroll;
+      const atBottom = scrollHeight > 0 && client > 0 && top + client >= scrollHeight - 2;
+      if (atBottom && stableNoNewRounds >= 2) {
+        if (needsFullLoad) {
+          if (bottomWaits >= bottomWaitLimit) {
+            const end = await detectCartEndMarker();
+            endReached = end.hit;
+            endReachedReason = end.reason;
+            console.warn(
+              `[AutoCart] Cart precheck reached bottom (${end.reason || 'unknown'}) loadedQty=${loadedQty} < uiTotalCount=${uiTotalCount}; stop scrolling`
+            );
+            break;
+          }
 
-      // 轻量滚动让更多购物车条目进入 DOM（更像人工翻看）
-      await this.humanSimulator.randomScroll({ distance: randomRange(320, 760) }).catch(() => {});
-      await this.humanSimulator.sleep(randomDelay(650, 1200));
+          bottomWaits++;
+          stableNoNewRounds = 0;
+          await this.page.waitForTimeout(cappedBottomWaitMs()).catch(() => {});
+          await scrollBy(-Math.max(260, Math.floor(client * 0.25)));
+          await this.page.waitForTimeout(randomDelay(240, 420)).catch(() => {});
+          continue;
+        }
+        if (!seenTarget) break;
+        if (bottomWaits < bottomWaitLimit) {
+          bottomWaits++;
+          stableNoNewRounds = 0;
+          await this.page.waitForTimeout(cappedBottomWaitMs()).catch(() => {});
+          await scrollBy(-Math.max(260, Math.floor(client * 0.25)));
+          await this.page.waitForTimeout(randomDelay(240, 420)).catch(() => {});
+          continue;
+        }
+        break;
+      }
+
+      const step = Math.max(650, Math.min(2400, Math.floor((client || 800) * 0.95)));
+      const nextTop = await scrollBy(step);
+
+      if (lastTop !== null && nextTop === lastTop) stuckRounds++;
+      else stuckRounds = 0;
+      lastTop = nextTop;
+
+      if (stuckRounds >= 2 && stableNoNewRounds >= 1) {
+        if (needsFullLoad) {
+          if (bottomWaits >= bottomWaitLimit) {
+            const end = await detectCartEndMarker();
+            endReached = end.hit;
+            endReachedReason = end.reason;
+            console.warn(
+              `[AutoCart] Cart precheck stuck (${end.reason || 'unknown'}) loadedQty=${loadedQty} < uiTotalCount=${uiTotalCount}; stop scrolling`
+            );
+            break;
+          }
+
+          bottomWaits++;
+          stableNoNewRounds = 0;
+          await this.page.waitForTimeout(cappedBottomWaitMs()).catch(() => {});
+          await scrollBy(-Math.max(260, Math.floor(step * 0.25)));
+          await this.page.waitForTimeout(randomDelay(240, 420)).catch(() => {});
+          continue;
+        }
+        if (seenTarget && bottomWaits < bottomWaitLimit) {
+          bottomWaits++;
+          stableNoNewRounds = 0;
+          await this.page.waitForTimeout(cappedBottomWaitMs()).catch(() => {});
+          await scrollBy(-Math.max(260, Math.floor(step * 0.25)));
+          await this.page.waitForTimeout(randomDelay(240, 420)).catch(() => {});
+          continue;
+        }
+        break;
+      }
+
+      await this.humanSimulator.sleep(randomDelay(380, 780));
       await this.closeFeatureTips().catch(() => {});
       await this.waitForOverlaysCleared().catch(() => {});
+    }
+
+    if (endReached && endReachedReason) {
+      console.log(`[AutoCart] Cart precheck end marker detected: ${endReachedReason}`);
     }
 
     return seen;

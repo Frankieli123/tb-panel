@@ -136,6 +136,13 @@
         />
         <RegistryValue
           Root="HKLM"
+          Key="Software\Microsoft\Windows\CurrentVersion\Run"
+          Name="TaobaoAgentTray"
+          Type="string"
+          Value="&quot;[INSTALLFOLDER]TaobaoAgentTray.exe&quot;"
+        />
+        <RegistryValue
+          Root="HKLM"
           Key="Software\$(var.Manufacturer)\TaobaoAgent"
           Name="startup"
           Type="integer"
@@ -149,6 +156,13 @@
   <Fragment>
     <DirectoryRef Id="CommonDesktopFolder">
       <Component Id="DesktopShortcuts" Guid="{CE6A1B7B-7F3E-4F8A-9E9D-0F8EFCA9275B}">
+        <Shortcut
+          Id="DesktopTrayShortcut"
+          Name="$(var.ProductName) - 托盘 (TaobaoAgentTray)"
+          Target="[INSTALLFOLDER]TaobaoAgentTray.exe"
+          WorkingDirectory="INSTALLFOLDER"
+          Advertise="no"
+        />
         <Shortcut
           Id="DesktopStatusShortcut"
           Name="$(var.ProductName) - 状态页"

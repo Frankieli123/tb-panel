@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
-import { Plus, Cookie, Trash2, AlertTriangle, Play, Pause, QrCode, X, Loader2, Monitor } from 'lucide-react';
+import { Plus, Cookie, Trash2, AlertTriangle, Play, Pause, QrCode, X, Loader2, Monitor, ShoppingCart } from 'lucide-react';
 import { api } from '../services/api';
 import { getLoginWsUrl } from '../services/api';
 import type { AgentConnection, TaobaoAccount } from '../types';
@@ -334,12 +334,30 @@ export default function Accounts() {
                       {getStatusBadge(account)}
                       {account._count && (
                         <span className="text-xs text-gray-400">
-                          {account._count.products} 个商品
-                        </span>
-                      )}
-                    </div>
-                  </div>
+                      {account._count.products} 个商品
+                    </span>
+                  )}
                 </div>
+
+                <div className="flex items-center gap-4 text-xs text-gray-500 mt-2">
+                  <div className="flex items-center gap-1.5" title="购物车SKU统计">
+                    <ShoppingCart className="w-3.5 h-3.5" />
+                    <span>
+                      {account.cartSkuLoaded !== null && account.cartSkuLoaded !== undefined
+                        ? account.cartSkuLoaded
+                        : '-'}{' '}
+                      / {account.cartSkuTotal !== null && account.cartSkuTotal !== undefined
+                        ? account.cartSkuTotal
+                        : '-'}
+                    </span>
+                  </div>
+
+                  {account.cartSkuUpdatedAt && (
+                    <span className="text-gray-400">{formatTime(account.cartSkuUpdatedAt)}</span>
+                  )}
+                </div>
+              </div>
+            </div>
                 <button
                   onClick={() => handleToggleAccount(account.id)}
                   className={`p-2 rounded-lg transition-colors ${

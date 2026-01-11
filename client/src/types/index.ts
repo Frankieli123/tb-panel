@@ -113,6 +113,9 @@ export interface TaobaoAccount {
   lastError: string | null;
   errorCount: number;
   createdAt: string;
+  cartSkuTotal?: number | null;
+  cartSkuLoaded?: number | null;
+  cartSkuUpdatedAt?: string | null;
   _count?: { products: number };
 }
 

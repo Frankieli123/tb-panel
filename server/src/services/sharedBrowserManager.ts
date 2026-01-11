@@ -68,7 +68,7 @@ class SharedBrowserManager {
         if (!pageValid) {
           console.log(`[SharedBrowser] Session invalid for account=${accountId}, recreating`);
           await this.disposeSession(accountId);
-        } else if (sig && existing.cookieSig && sig !== existing.cookieSig) {
+        } else if (sig && sig !== existing.cookieSig) {
           console.log(`[SharedBrowser] Cookies changed for account=${accountId}, recreating`);
           await this.disposeSession(accountId);
         } else {

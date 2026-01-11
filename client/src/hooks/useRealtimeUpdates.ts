@@ -93,6 +93,7 @@ export function useRealtimeUpdates(options: UseRealtimeUpdatesOptions) {
         clearTimeout(reconnectTimeoutRef.current);
       }
       if (wsRef.current) {
+        wsRef.current.onclose = null;
         wsRef.current.close();
       }
     };

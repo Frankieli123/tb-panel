@@ -1,8 +1,7 @@
 using System.Diagnostics;
 using System.Drawing;
-using System.Drawing.Drawing2D;
 using System.Net.Http;
-using System.Runtime.InteropServices;
+using System.Reflection;
 using System.Text.Json;
 using System.Threading;
 using System.Windows.Forms;
@@ -42,9 +41,9 @@ internal sealed class TrayAppContext : ApplicationContext
 
   public TrayAppContext()
   {
-    iconRed = CreateDotIcon(Color.FromArgb(239, 68, 68));
-    iconYellow = CreateDotIcon(Color.FromArgb(245, 158, 11));
-    iconGreen = CreateDotIcon(Color.FromArgb(34, 197, 94));
+    iconRed = LoadEmbeddedIcon("TaobaoAgentTray.Resources.tray-red.ico");
+    iconYellow = LoadEmbeddedIcon("TaobaoAgentTray.Resources.tray-yellow.ico");
+    iconGreen = LoadEmbeddedIcon("TaobaoAgentTray.Resources.tray-green.ico");
 
     var menu = new ContextMenuStrip();
     menu.Items.Add("打开状态页", null, (_, _) => OpenStatusPage());
@@ -299,29 +298,16 @@ internal sealed class TrayAppContext : ApplicationContext
     catch { }
   }
 
-  private static Icon CreateDotIcon(Color color)
+  private static Icon LoadEmbeddedIcon(string resourceName)
   {
-    using var bmp = new Bitmap(16, 16);
-    using var g = Graphics.FromImage(bmp);
-    g.Clear(Color.Transparent);
-    g.SmoothingMode = SmoothingMode.AntiAlias;
-    using var brush = new SolidBrush(color);
-    g.FillEllipse(brush, 1, 1, 14, 14);
-
-    var hIcon = bmp.GetHicon();
-    try
+    var assembly = Assembly.GetExecutingAssembly();
+    using var stream = assembly.GetManifestResourceStream(resourceName);
+    if (stream != null)
     {
-      using var icon = Icon.FromHandle(hIcon);
-      return (Icon)icon.Clone();
+      return new Icon(stream);
     }
-    finally
-    {
-      DestroyIcon(hIcon);
-    }
+    return SystemIcons.Application;
   }
-
-  [DllImport("user32.dll", SetLastError = true)]
-  private static extern bool DestroyIcon(IntPtr hIcon);
 
   private sealed record StatusSnapshot(int Port, bool Connected, bool HasToken, string AgentId, string AdminUrl);
 }

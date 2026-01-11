@@ -35,6 +35,7 @@ export default function Logs() {
       ? new URL(import.meta.env.VITE_API_URL).host 
       : window.location.host;
     const wsUrl = `${protocol}//${host}/ws/logs`;
+    let reconnectTimeout: number | null = null;
 
     const connect = () => {
       const ws = new WebSocket(wsUrl);
@@ -71,7 +72,7 @@ export default function Logs() {
       ws.onclose = () => {
         setIsConnected(false);
         console.log('[Logs] WebSocket disconnected, reconnecting...');
-        setTimeout(connect, 3000);
+        reconnectTimeout = window.setTimeout(connect, 3000);
       };
 
       ws.onerror = () => {
@@ -82,7 +83,11 @@ export default function Logs() {
     connect();
 
     return () => {
+      if (reconnectTimeout !== null) {
+        clearTimeout(reconnectTimeout);
+      }
       if (wsRef.current) {
+        wsRef.current.onclose = null;
         wsRef.current.close();
       }
     };
