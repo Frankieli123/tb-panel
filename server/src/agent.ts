@@ -218,12 +218,12 @@ async function acquireAgentLock(addLog: (msg: string) => void): Promise<AgentLoc
           await fs.unlink(lockPath);
         } catch {}
       };
-      addLog(`Recovered stale lock from pid=${otherPid}`);
+      addLog(`已回收过期锁 pid=${otherPid}`);
       return { release };
     }
   }
 
-  addLog(`Another agent instance is running (pid=${otherPid ?? 'unknown'})`);
+  addLog(`检测到另一个 Agent 实例正在运行 (pid=${otherPid ?? 'unknown'})`);
   return null;
 }
 
@@ -276,7 +276,7 @@ async function getOrCreateAgentId(): Promise<string> {
 
   const generated = randomUUID();
   await saveStoredAgentStore({ agentId: generated });
-  console.log(`[Agent] Generated agentId=${generated} and saved to ${path.join(getAgentStoreDir(), 'agent.json')}`);
+  console.log(`[Agent] 已生成 agentId=${generated} 并保存到 ${path.join(getAgentStoreDir(), 'agent.json')}`);
   return generated;
 }
 
@@ -434,8 +434,8 @@ async function startStatusServer(options: {
   }
 
   const url = `http://127.0.0.1:${chosenPort}/`;
-  addLog(`Status UI ready: ${url}`);
-  console.log(`[Agent] Status UI: ${url}`);
+  addLog(`状态页面已就绪: ${url}`);
+  console.log(`[Agent] 状态页面: ${url}`);
   return { port: chosenPort, url };
 }
 
@@ -460,7 +460,7 @@ async function main(): Promise<void> {
     // Best effort: open the already-running UI for non-technical users.
     const existing = await findExistingStatusUiUrl();
     if (existing) {
-      addLog(`Opening existing status UI: ${existing}`);
+      addLog(`正在打开已存在的状态页面: ${existing}`);
       await openUrlBestEffort(existing);
     }
     return;
@@ -508,17 +508,17 @@ async function main(): Promise<void> {
     try {
       const chromePath = await chromeLauncher.ensureChromeAvailable();
       if (chromePath) {
-        addLog(`Chrome ready: ${chromePath}`);
+        addLog(`Chrome 已就绪: ${chromePath}`);
         return;
       }
       if (/^(1|true)$/i.test(String(process.env.CHROME_AUTO_INSTALL ?? ''))) {
-        addLog('Chrome not found: auto-install is enabled but no executable resolved.');
+        addLog('未找到 Chrome：已启用自动安装，但未解析到可执行文件。');
         return;
       }
-      addLog('Chrome not found: set CHROME_AUTO_INSTALL=1 to enable auto-install.');
+      addLog('未找到 Chrome：设置 CHROME_AUTO_INSTALL=1 可启用自动安装。');
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      addLog(`Chrome preinstall failed: ${msg}`);
+      addLog(`Chrome 预检查失败: ${msg}`);
     }
   })();
 
@@ -562,7 +562,7 @@ async function main(): Promise<void> {
       url.searchParams.set('agentId', agentId);
     }
 
-    addLog(`Connecting to ${url.toString()}`);
+    addLog(`正在连接 ${url.toString()}`);
     const wsConn = new WebSocket(url.toString(), {
       headers: {
         'x-agent-id': agentId,
@@ -607,8 +607,8 @@ async function main(): Promise<void> {
     wsConn.on('open', () => {
       status.connected = true;
       status.lastError = null;
-      addLog('Connected');
-      console.log(`[Agent] Connected agentId=${agentId} url=${url.toString()}`);
+      addLog('已连接');
+      console.log(`[Agent] 已连接 agentId=${agentId} url=${url.toString()}`);
 
       markInbound();
       idleHeartbeat = setInterval(() => {
@@ -623,7 +623,7 @@ async function main(): Promise<void> {
         if (wsConn.readyState !== WebSocket.OPEN) return;
         const ageMs = Date.now() - lastInboundAt;
         if (ageMs <= staleAfterMs) return;
-        addLog(`Stale WS (no inbound for ${Math.round(ageMs / 1000)}s). Reconnecting...`);
+        addLog(`WS 长时间无入站(${Math.round(ageMs / 1000)}s)，正在重连...`);
         try {
           wsConn.terminate();
         } catch {
@@ -935,12 +935,12 @@ async function main(): Promise<void> {
       const why = String(reason || '');
       const errMsg = why || `WS closed (${code})`;
       status.lastError = errMsg;
-      addLog(`Disconnected: code=${code} reason=${why}`);
+      addLog(`已断开: code=${code} reason=${why}`);
 
       // Another instance (same agentId) took over this connection.
       // Avoid reconnect storms by stopping here.
       if (code === 1012) {
-        addLog('This agent was replaced by a new connection. Stop reconnecting.');
+        addLog('当前 Agent 已被新连接替换，停止重连。');
         return;
       }
 
@@ -953,8 +953,8 @@ async function main(): Promise<void> {
     wsConn.on('error', (err) => {
       const msg = err?.message ? String(err.message) : String(err);
       status.lastError = msg;
-      addLog(`WS error: ${msg}`);
-      console.warn(`[Agent] WS error agentId=${agentId}:`, err);
+      addLog(`WS 错误: ${msg}`);
+      console.warn(`[Agent] WS 错误 agentId=${agentId}:`, err);
     });
   };
 
@@ -968,8 +968,8 @@ async function main(): Promise<void> {
     status.lastError = null;
 
     await saveStoredAgentStore({ agentId, agentToken: token, createdAt: stored?.createdAt });
-    addLog(`Paired successfully (saved token)`);
-    console.log(`[Agent] Paired successfully and saved token to ${path.join(getAgentStoreDir(), 'agent.json')}`);
+    addLog(`配对成功（已保存 token）`);
+    console.log(`[Agent] 配对成功，token 已保存到 ${path.join(getAgentStoreDir(), 'agent.json')}`);
 
     if (!pairOnly) {
       connectWs();
@@ -984,18 +984,18 @@ async function main(): Promise<void> {
     if (!token) {
       throw new Error('Pair-only mode requires AGENT_TOKEN/API_KEY or --pair <CODE>.');
     }
-    console.log('[Agent] Pair-only mode complete. Exiting.');
+    console.log('[Agent] 仅配对模式完成，退出。');
     return;
   }
 
   if (uiMode) {
-    addLog('UI mode enabled');
+    addLog('已启用 UI 模式');
     const resolvedPort = Number.isFinite(statusPort) && statusPort > 0 ? statusPort : 17880;
     const ui = await startStatusServer({ port: resolvedPort, logs: statusLogs, getStatus, pair: doPair });
     status.statusUrl = ui.url;
 
     if (!token) {
-      addLog('Not paired yet. Waiting for pair code...');
+      addLog('尚未配对，等待配对码...');
       void ensureUiOpenedOnce(ui.url);
     } else {
       connectWs();
@@ -1012,6 +1012,6 @@ async function main(): Promise<void> {
 
 main().catch((err) => {
   const uiMode = isTruthy(process.env.AGENT_UI || process.env.AGENT_STATUS_UI);
-  console.error('[Agent] Fatal:', err);
+  console.error('[Agent] 致命错误:', err);
   if (!uiMode) process.exit(1);
 });

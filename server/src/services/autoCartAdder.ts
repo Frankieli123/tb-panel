@@ -65,7 +65,7 @@ export class AutoCartAdder {
 
   async closeBrowser(): Promise<void> {
     // 不关闭共享浏览器，由 sharedBrowserManager 统一管理
-    console.log('[AutoCart] Browser session kept open for reuse');
+    console.log('[AutoCart] 浏览器会话保持开启用于复用');
   }
 
   private async ensureBrowser(accountId: string, cookies?: string): Promise<void> {
@@ -78,7 +78,7 @@ export class AutoCartAdder {
     this.skuParser = new SkuParser(this.page);
     this.currentAccountId = accountId;
     
-    console.log('[AutoCart] Using shared browser session');
+    console.log('[AutoCart] 使用共享浏览器会话');
   }
 
   private async navigateToCartPage(): Promise<void> {
@@ -111,39 +111,47 @@ export class AutoCartAdder {
     let lastLoadedQty = 0;
     let lastScrollHeight = 0;
 
-    const startedAt = Date.now();
-    let maxDurationMs = 45_000;
-    let maxRounds = 240;
+    let maxRounds = 800;
     let bottomWaitLimit = 4;
 
     let uiTotalCount: number | null = null;
     const applyUiTotalCount = (raw: unknown) => {
       const n = typeof raw === 'number' ? raw : Number(raw);
-      if (!Number.isFinite(n) || n <= 0) return;
-      const next = Math.max(1, Math.floor(n));
+      if (!Number.isFinite(n) || n < 0) return;
+      const next = Math.max(0, Math.floor(n));
       if (uiTotalCount !== null && uiTotalCount >= next) return;
 
       uiTotalCount = next;
       maxRounds = Math.max(maxRounds, 320);
       bottomWaitLimit = Math.max(bottomWaitLimit, 10);
-      maxDurationMs =
-        uiTotalCount >= 300
-          ? Math.max(maxDurationMs, 240_000)
-          : uiTotalCount >= 150
-            ? Math.max(maxDurationMs, 180_000)
-            : Math.max(maxDurationMs, 120_000);
     };
 
-    const uiTotalInitial = await this.page
+    let uiTotalInitial = await this.page
       .evaluate(() => {
         const header = document.querySelector('.trade-cart-header-container') as HTMLElement | null;
         const headerText = header?.textContent || '';
         const m = /全部商品\s*[（(]\s*(\d{1,6})\s*[）)]/.exec(headerText);
         if (!m) return null;
         const n = parseInt(m[1], 10);
-        return Number.isFinite(n) && n > 0 ? n : null;
+        return Number.isFinite(n) && n >= 0 ? n : null;
       })
       .catch(() => null);
+    if (uiTotalInitial === null) {
+      uiTotalInitial = await this.page
+        .evaluate(() => {
+          const header = document.querySelector('.trade-cart-header-container') as HTMLElement | null;
+          const headerText = (header?.innerText || header?.textContent || '').trim();
+          if (!headerText) return null;
+
+          const re = new RegExp('\u5168\u90e8\u5546\u54c1\\s*[\\(\uff08]\\s*(\\d{1,6})\\s*[\\)\uff09]');
+          const m = re.exec(headerText);
+          if (!m) return null;
+
+          const n = parseInt(m[1], 10);
+          return Number.isFinite(n) && n >= 0 ? n : null;
+        })
+        .catch(() => null);
+    }
     applyUiTotalCount(uiTotalInitial);
 
     const extract = async (): Promise<{
@@ -151,6 +159,8 @@ export class AutoCartAdder {
       found: boolean;
       uiTotalCount: number | null;
       loadedQty: number;
+      isEmptyCart: boolean;
+      emptyReason: string | null;
       scroll: { top: number; height: number; client: number };
     } | null> => {
       return this.page
@@ -229,11 +239,38 @@ export class AutoCartAdder {
             if (skuProperties) out.push(skuProperties);
           }
 
+          let isEmptyCart = false;
+          let emptyReason: string | null = null;
+          if (cartItems.length === 0) {
+            const bodyText = document.body?.innerText || '';
+            const directHit =
+              [
+                '购物车空空如也',
+                '购物车竟然是空的',
+                '购物车还是空的',
+                '你的购物车还是空的',
+                '快去挑选宝贝吧',
+                '去逛逛',
+                '随便逛逛',
+              ].find((k) => bodyText.includes(k)) || null;
+
+            const indirectHit = bodyText.includes('购物车') && (bodyText.includes('去逛逛') || bodyText.includes('随便逛逛'));
+            isEmptyCart = Boolean(directHit || indirectHit);
+            emptyReason = directHit || (indirectHit ? '购物车/去逛逛' : null);
+          }
+
           const header = document.querySelector('.trade-cart-header-container') as HTMLElement | null;
           const headerText = header?.textContent || '';
           const m = /全部商品\s*[（(]\s*(\d{1,6})\s*[）)]/.exec(headerText);
           const uiTotalCountRaw = m ? parseInt(m[1], 10) : NaN;
-          const uiTotalCount = Number.isFinite(uiTotalCountRaw) && uiTotalCountRaw > 0 ? uiTotalCountRaw : null;
+          let uiTotalCount = Number.isFinite(uiTotalCountRaw) && uiTotalCountRaw >= 0 ? uiTotalCountRaw : null;
+          if (uiTotalCount === null) {
+            const m2 = new RegExp(
+              '\u5168\u90e8\u5546\u54c1\\s*[\\(\uff08]\\s*(\\d{1,6})\\s*[\\)\uff09]'
+            ).exec(headerText);
+            const n2 = m2 ? parseInt(m2[1], 10) : NaN;
+            if (Number.isFinite(n2) && n2 >= 0) uiTotalCount = n2;
+          }
 
           const container = findScrollContainer();
           return {
@@ -241,6 +278,8 @@ export class AutoCartAdder {
             found,
             uiTotalCount,
             loadedQty,
+            isEmptyCart,
+            emptyReason,
             scroll: {
               top: container.scrollTop || 0,
               height: container.scrollHeight || 0,
@@ -306,15 +345,30 @@ export class AutoCartAdder {
             (document.querySelector('.trade-infinite-container') as HTMLElement | null)?.innerText?.trim() || '';
           const hitEnd = endKeywords.find((k) => infiniteText.includes(k)) || null;
 
-          return { hit: Boolean(hitKeyword || hitEnd), reason: hitKeyword || hitEnd };
+          const fallbackReason =
+            hitKeyword ||
+            hitEnd ||
+            ['\u731c\u4f60\u559c\u6b22', '\u4e3a\u4f60\u63a8\u8350', '\u4f60\u53ef\u80fd\u8fd8\u559c\u6b22'].find((k) =>
+              bodyText.includes(k)
+            ) ||
+            ['\u6ca1\u6709\u66f4\u591a', '\u5df2\u7ecf\u5230\u5e95', '\u5df2\u7ecf\u5230\u5e95\u4e86', '\u5230\u5e95\u4e86', '\u5230\u5934\u4e86'].find(
+              (k) => infiniteText.includes(k)
+            ) ||
+            null;
+
+          return { hit: Boolean(fallbackReason), reason: fallbackReason };
         })
         .catch(() => ({ hit: false, reason: null }));
     };
 
     for (let round = 0; ; round++) {
-      if (uiTotalCount === null) {
-        if (round >= maxRounds) break;
-        if (Date.now() - startedAt > maxDurationMs) break;
+      if (round >= maxRounds) {
+        if (uiTotalCount !== null && lastLoadedQty < uiTotalCount) {
+          console.warn(
+            `[AutoCart] 购物车预检查达到最大轮次 loadedQty=${lastLoadedQty} < uiTotalCount=${uiTotalCount}；停止滚动`
+          );
+        }
+        break;
       }
 
       const snapshot = await extract();
@@ -323,6 +377,11 @@ export class AutoCartAdder {
       applyUiTotalCount(snapshot.uiTotalCount);
       const loadedQty = Math.max(0, Math.floor(Number(snapshot.loadedQty) || 0));
       const scrollHeight = Math.max(0, Math.floor(Number(snapshot.scroll.height) || 0));
+      if (snapshot.isEmptyCart) {
+        applyUiTotalCount(0);
+        console.log(`[AutoCart] 购物车看起来为空（${snapshot.emptyReason || 'unknown'}）`);
+        break;
+      }
       if (loadedQty > lastLoadedQty || scrollHeight > lastScrollHeight) {
         bottomWaits = 0;
         lastLoadedQty = loadedQty;
@@ -356,12 +415,14 @@ export class AutoCartAdder {
         if (needsFullLoad) {
           if (bottomWaits >= bottomWaitLimit) {
             const end = await detectCartEndMarker();
-            endReached = end.hit;
-            endReachedReason = end.reason;
-            console.warn(
-              `[AutoCart] Cart precheck reached bottom (${end.reason || 'unknown'}) loadedQty=${loadedQty} < uiTotalCount=${uiTotalCount}; stop scrolling`
-            );
-            break;
+            if (end.hit) {
+              endReached = true;
+              endReachedReason = end.reason;
+              console.warn(
+                `[AutoCart] 购物车预检查到达底部标记（${end.reason || 'unknown'}）loadedQty=${loadedQty} < uiTotalCount=${uiTotalCount}；停止滚动`
+              );
+              break;
+            }
           }
 
           bottomWaits++;
@@ -394,12 +455,14 @@ export class AutoCartAdder {
         if (needsFullLoad) {
           if (bottomWaits >= bottomWaitLimit) {
             const end = await detectCartEndMarker();
-            endReached = end.hit;
-            endReachedReason = end.reason;
-            console.warn(
-              `[AutoCart] Cart precheck stuck (${end.reason || 'unknown'}) loadedQty=${loadedQty} < uiTotalCount=${uiTotalCount}; stop scrolling`
-            );
-            break;
+            if (end.hit) {
+              endReached = true;
+              endReachedReason = end.reason;
+              console.warn(
+                `[AutoCart] 购物车预检查到达底部标记（${end.reason || 'unknown'}）loadedQty=${loadedQty} < uiTotalCount=${uiTotalCount}；停止滚动`
+              );
+              break;
+            }
           }
 
           bottomWaits++;
@@ -426,7 +489,7 @@ export class AutoCartAdder {
     }
 
     if (endReached && endReachedReason) {
-      console.log(`[AutoCart] Cart precheck end marker detected: ${endReachedReason}`);
+      console.log(`[AutoCart] 购物车预检查检测到结束标记: ${endReachedReason}`);
     }
 
     return seen;
@@ -440,7 +503,7 @@ export class AutoCartAdder {
 
     // 在新标签页打开商品详情页，保持购物车页面不关闭
     const url = `https://item.taobao.com/item.htm?id=${taobaoId}`;
-    console.log(`[AutoCart] Opening product page in new tab: ${url}`);
+    console.log(`[AutoCart] 新标签页打开商品页: ${url}`);
     
     const productPage = await this.context.newPage();
     this.page = productPage;
@@ -605,8 +668,8 @@ export class AutoCartAdder {
     return this.runExclusive(async () => {
       markAddStart(accountId);
       const startTime = Date.now();
-      console.log(`[AutoCart] Start taobaoId=${taobaoId} accountId=${accountId}`);
-      console.log(`[AutoCart] Mode: ${options?.headless === false ? 'Human-visible' : 'Headless'}`);
+      console.log(`[AutoCart] 开始 taobaoId=${taobaoId} accountId=${accountId}`);
+      console.log(`[AutoCart] 模式: ${options?.headless === false ? '可视' : '无头'}`);
 
       let lastProgress: { total: number; current: number; success: number; failed: number } = {
         total: 0,
@@ -659,7 +722,7 @@ export class AutoCartAdder {
         let existedSkuProps: Set<string>;
         if (options?.existingCartSkus?.has(taobaoId)) {
           existedSkuProps = options.existingCartSkus.get(taobaoId)!;
-          console.log(`[AutoCart] Using pre-fetched cart data: taobaoId=${taobaoId} existedSkus=${existedSkuProps.size}`);
+          console.log(`[AutoCart] 使用预取购物车数据: taobaoId=${taobaoId} existedSkus=${existedSkuProps.size}`);
           if (options?.onProgress) {
             options.onProgress(
               { total: 0, current: 0, success: 0, failed: 0 },
@@ -678,7 +741,7 @@ export class AutoCartAdder {
           lastProgress = { total: 0, current: 0, success: 0, failed: 0 };
           await this.navigateToCartPage();
           existedSkuProps = await this.collectCartSkuPropertiesForTaobaoId(taobaoId);
-          console.log(`[AutoCart] Cart precheck: taobaoId=${taobaoId} existedSkus=${existedSkuProps.size}`);
+          console.log(`[AutoCart] 购物车预检查: taobaoId=${taobaoId} existedSkus=${existedSkuProps.size}`);
           if (options?.onProgress) {
             options.onProgress(
               { total: 0, current: 0, success: 0, failed: 0 },
@@ -719,10 +782,10 @@ export class AutoCartAdder {
         }
         lastProgress = { total: 0, current: 0, success: 0, failed: 0 };
         const skuTree = await this.skuParser.parseSkuTree(taobaoId);
-        console.log(`[AutoCart] Found ${skuTree.combinations.length} SKU combinations`);
+        console.log(`[AutoCart] 找到 ${skuTree.combinations.length} 个 SKU 组合`);
 
         const availableSkus = skuTree.combinations.filter((sku) => sku.stock > 0);
-        console.log(`[AutoCart] Available SKUs: ${availableSkus.length}`);
+        console.log(`[AutoCart] 可用 SKU 数量: ${availableSkus.length}`);
 
         const existedNorm = new Set(Array.from(existedSkuProps.values()).map((x) => normalizeSkuProperties(x)));
         const skippedCount = availableSkus.filter(sku => {
@@ -756,14 +819,14 @@ export class AutoCartAdder {
           await pauseIfRequested('【抢占】暂停加购，优先抓价中…');
 
           const sku = shuffled[i];
-          console.log(`[AutoCart] Processing SKU ${i + 1}/${shuffled.length}: ${sku.properties}`);
+          console.log(`[AutoCart] 处理 SKU ${i + 1}/${shuffled.length}: ${sku.properties}`);
 
           try {
             const norm = normalizeSkuProperties(sku.properties);
             let result: SkuAddResult;
 
             if (norm && existedNorm.has(norm)) {
-              console.log(`[AutoCart] SKU already in cart, skip: ${sku.properties}`);
+              console.log(`[AutoCart] SKU 已在购物车中，跳过: ${sku.properties}`);
               result = {
                 skuId: sku.skuId,
                 skuProperties: sku.properties,
@@ -798,12 +861,12 @@ export class AutoCartAdder {
               // SKU 间隔：保持随机但适度加快；偶尔更长停顿更“像人”
               let delay = randomDelay(skuDelayMinMs, skuDelayMaxMs);
               if (Math.random() < 0.08) delay += randomDelay(2000, 5000);
-              console.log(`[AutoCart] Waiting ${delay}ms before next SKU...`);
+              console.log(`[AutoCart] 等待 ${delay}ms 后继续下一个 SKU...`);
               await sleepInterruptible(delay);
               await pauseIfRequested('【抢占】暂停加购，优先抓价中…');
             }
           } catch (error: any) {
-            console.error(`[AutoCart] Failed SKU: ${sku.skuId}`, error);
+            console.error(`[AutoCart] SKU 失败: ${sku.skuId}`, error);
             await this.maybeSaveDebugArtifacts('sku_failed', {
               taobaoId,
               skuId: sku.skuId,
@@ -835,7 +898,7 @@ export class AutoCartAdder {
         const successCount = results.filter((r) => r.success).length;
         const duration = Date.now() - startTime;
 
-        console.log(`[AutoCart] Complete: ${successCount}/${shuffled.length} success, duration=${duration}ms`);
+        console.log(`[AutoCart] 完成: ${successCount}/${shuffled.length} 成功，耗时=${duration}ms`);
 
         // 阶段5：关闭商品详情页，切回购物车页面刷新获取价格
         if (options?.onProgress) {
@@ -860,16 +923,16 @@ export class AutoCartAdder {
         this.skuParser = new SkuParser(this.page);
         
         // 刷新购物车页面获取最新价格
-        console.log('[AutoCart] Refreshing cart page to get latest prices...');
+        console.log('[AutoCart] 刷新购物车页以获取最新价格...');
         await this.page.reload({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
         await this.humanSimulator.sleep(randomDelay(1000, 2000));
         await this.closeFeatureTips().catch(() => {});
         await this.waitForOverlaysCleared().catch(() => {});
 
         // 直接在当前页面抓取购物车数据
-        console.log('[AutoCart] Extracting cart data from current page...');
+        console.log('[AutoCart] 从当前页面提取购物车数据...');
         const cartProducts = await this.extractCartDataFromCurrentPage(taobaoId);
-        console.log(`[AutoCart] Extracted ${cartProducts.length} products for taobaoId=${taobaoId}`);
+        console.log(`[AutoCart] 已提取 ${cartProducts.length} 个商品 taobaoId=${taobaoId}`);
 
         return {
           taobaoId,
@@ -884,7 +947,7 @@ export class AutoCartAdder {
         markAddEnd(accountId);
         // 不关闭页面和 context，保持购物车页面打开供用户查看
         // 注意：浏览器实例会一直运行，直到用户手动关闭或下次任务复用
-        console.log('[AutoCart] Task complete, keeping cart page open for user');
+        console.log('[AutoCart] 任务完成，保持购物车页打开供用户查看');
       }
     });
   }
@@ -898,7 +961,7 @@ export class AutoCartAdder {
         return await this.addSingleSkuAttempt(sku, taobaoId, attempt);
       } catch (error: any) {
         console.warn(
-          `[AutoCart] addSingleSku attempt ${attempt} failed skuId=${sku.skuId}: ${error?.message ?? String(error)}`
+          `[AutoCart] 单 SKU 加购尝试 ${attempt} 失败 skuId=${sku.skuId}: ${error?.message ?? String(error)}`
         );
 
         await this.maybeSaveDebugArtifacts('add_single_attempt_failed', {
@@ -929,7 +992,7 @@ export class AutoCartAdder {
   }
 
   private async addSingleSkuAttempt(sku: SkuCombination, taobaoId: string, attempt: number): Promise<SkuAddResult> {
-    console.log(`[AutoCart] Adding SKU (attempt ${attempt}): ${sku.properties}`);
+    console.log(`[AutoCart] 正在加购 SKU（第 ${attempt} 次尝试）: ${sku.properties}`);
 
     await this.assertNotAuthPage('开始加购');
 
@@ -937,7 +1000,7 @@ export class AutoCartAdder {
       await this.page.evaluate(() => window.scrollTo({ top: 0, behavior: 'smooth' }));
       await this.humanSimulator.sleep(randomDelay(250, 600));
     } catch (e) {
-      console.warn('[AutoCart] Failed to scroll to top:', e);
+      console.warn('[AutoCart] 滚动到顶部失败:', e);
     }
 
     await this.closeAddCartModal();
@@ -947,11 +1010,11 @@ export class AutoCartAdder {
     for (let i = 0; i < sku.selections.length; i++) {
       const selection = sku.selections[i] as SkuSelection;
       console.log(
-        `[AutoCart] Selecting layer ${i + 1}/${sku.selections.length}: propId=${selection.propId}, valueId=${selection.valueId}`
+        `[AutoCart] 选择规格层 ${i + 1}/${sku.selections.length}: propId=${selection.propId}, valueId=${selection.valueId}`
       );
 
       await this.selectSkuPropertyAsHuman(selection);
-      console.log(`[AutoCart] Layer ${i + 1} selected successfully`);
+      console.log(`[AutoCart] 第 ${i + 1} 层选择成功`);
 
       await this.humanSimulator.sleep(randomDelay(250, 600));
       if (i < sku.selections.length - 1) {
@@ -960,13 +1023,13 @@ export class AutoCartAdder {
     }
 
     if (Math.random() < 0.15) {
-      console.log('[AutoCart] Random scroll...');
+      console.log('[AutoCart] 随机滚动...');
       await this.humanSimulator.randomScroll({ distance: randomRange(200, 500) });
     }
 
-    console.log('[AutoCart] Occasional wander check...');
+    console.log('[AutoCart] 偶发游走检查...');
     await this.humanSimulator.occasionalWander();
-    console.log('[AutoCart] Looking for add-cart button...');
+    console.log('[AutoCart] 查找加购按钮...');
 
     const addCartBtnSelectors = [
       // 优先：基于购物车图标/文本的选择器（避免 first-child 误点“立即购买”）
@@ -986,7 +1049,7 @@ export class AutoCartAdder {
       const visible = await candidate.isVisible().catch(() => false);
       if (visible) {
         addCartBtn = candidate;
-        console.log(`[AutoCart] Found add-cart button with selector: ${selector}`);
+        console.log(`[AutoCart] 找到加购按钮 selector=${selector}`);
         break;
       }
     }
@@ -1033,7 +1096,7 @@ export class AutoCartAdder {
 
     const cartItemId = await this.extractCartItemIdFromRequest().catch(() => null);
 
-    console.log(`[AutoCart] SKU added successfully: ${sku.skuId}`);
+    console.log(`[AutoCart] SKU 加购成功: ${sku.skuId}`);
 
     return {
       skuId: sku.skuId,
@@ -1235,7 +1298,7 @@ export class AutoCartAdder {
 
       if (attempt === 4) {
         console.warn(
-          `[AutoCart] SKU selection may not be applied: ${selection.propName}=${selection.valueName} (valueId=${selection.valueId})`
+          `[AutoCart] 规格选择可能未生效: ${selection.propName}=${selection.valueName} (valueId=${selection.valueId})`
         );
         await this.maybeSaveDebugArtifacts('sku_select_not_applied', {
           valueId: selection.valueId,
@@ -1463,7 +1526,7 @@ export class AutoCartAdder {
 
   private async closeAddCartModal(): Promise<void> {
     try {
-      console.log('[AutoCart] Closing add-to-cart modal...');
+      console.log('[AutoCart] 关闭加购弹窗...');
 
       // 快速判断：页面没有任何遮罩/弹层/提示时，避免无意义的 ESC 等操作（会拖慢每个SKU的节奏）
       const maybeHasModal = await this.page
@@ -1518,7 +1581,7 @@ export class AutoCartAdder {
           if (miniPopup) {
             const isVisible = await miniPopup.isVisible().catch(() => false);
             if (isVisible) {
-              console.log(`[AutoCart] Found mini popup: ${selector}`);
+              console.log(`[AutoCart] 检测到小弹窗: ${selector}`);
 
               // 查找小弹窗内的关闭按钮
               const closeBtn = await miniPopup.$('button, [class*="close"], a[class*="close"], i[class*="close"]').catch(() => null);
@@ -1530,25 +1593,25 @@ export class AutoCartAdder {
                     await closeBtn.scrollIntoViewIfNeeded({ timeout: 2000 });
                     await this.humanSimulator.sleep(randomDelay(200, 400));
                   } catch (scrollError) {
-                    console.log('[AutoCart] Could not scroll to mini popup close button');
+                    console.log('[AutoCart] 无法滚动到小弹窗关闭按钮');
                   }
 
-                  console.log('[AutoCart] Clicking mini popup close button');
+                  console.log('[AutoCart] 点击小弹窗关闭按钮');
                   await closeBtn.click({ timeout: 3000 }).catch(() => {});
                   await this.humanSimulator.sleep(randomDelay(250, 600));
-                  console.log('[AutoCart] Mini popup closed successfully');
+                  console.log('[AutoCart] 小弹窗已关闭');
                   return;
                 }
               }
 
               // 等待弹窗自动消失（不再点击外部区域，避免误点击其他商品）
-              console.log('[AutoCart] Waiting for mini popup auto-dismiss...');
+              console.log('[AutoCart] 等待小弹窗自动消失...');
               await this.humanSimulator.sleep(randomDelay(1500, 2500));
 
               // 检查是否已经消失
               const stillVisible = await miniPopup.isVisible().catch(() => false);
               if (!stillVisible) {
-                console.log('[AutoCart] Mini popup auto-dismissed');
+                console.log('[AutoCart] 小弹窗已自动消失');
                 return;
               }
             }
@@ -1599,13 +1662,13 @@ export class AutoCartAdder {
                 await closeBtn.scrollIntoViewIfNeeded({ timeout: 2000 });
                 await this.humanSimulator.sleep(randomDelay(200, 400));
               } catch (scrollError) {
-                console.log('[AutoCart] Could not scroll to close button');
+                console.log('[AutoCart] 无法滚动到关闭按钮');
               }
 
-              console.log(`[AutoCart] Found close button: ${selector}`);
+              console.log(`[AutoCart] 找到关闭按钮: ${selector}`);
               await closeBtn.click({ timeout: 3000 }).catch(() => {});
               await this.humanSimulator.sleep(randomDelay(250, 600));
-              console.log('[AutoCart] Modal closed successfully');
+              console.log('[AutoCart] 弹窗已关闭');
               return;
             }
           }
@@ -1619,27 +1682,27 @@ export class AutoCartAdder {
       if (mask) {
         const maskVisible = await mask.isVisible().catch(() => false);
         if (maskVisible) {
-          console.log('[AutoCart] Clicking mask to close modal...');
+          console.log('[AutoCart] 点击遮罩关闭弹窗...');
           await mask.click({ timeout: 2000 }).catch(() => {});
           await this.humanSimulator.sleep(randomDelay(200, 450));
 
           // 检查是否成功关闭
           const stillVisible = await mask.isVisible().catch(() => false);
           if (!stillVisible) {
-            console.log('[AutoCart] Modal closed by mask click');
+            console.log('[AutoCart] 通过点击遮罩关闭弹窗');
             return;
           }
         }
       }
 
       // 策略4：按 ESC 键
-      console.log('[AutoCart] Trying ESC key to close modal...');
+      console.log('[AutoCart] 尝试按 ESC 关闭弹窗...');
       await this.page.keyboard.press('Escape').catch(() => {});
       await this.humanSimulator.sleep(randomDelay(200, 350));
 
-      console.log('[AutoCart] Attempted to close modal');
+      console.log('[AutoCart] 已尝试关闭弹窗');
     } catch (error) {
-      console.warn('[AutoCart] Failed to close modal:', error);
+      console.warn('[AutoCart] 关闭弹窗失败:', error);
       // 不抛出错误，继续执行
     }
   }
@@ -1678,20 +1741,20 @@ export class AutoCartAdder {
       const quickVisible = await quickCloseLocator.isVisible().catch(() => false);
 
       // 详细日志：记录检测结果
-      console.log(`[AutoCart] Feature tip detection: maskVisible=${maskVisible}, bigImageTipVisible=${bigImageTipVisible}, quickVisible=${quickVisible}`);
+      console.log(`[AutoCart] 功能提示检测: maskVisible=${maskVisible}, bigImageTipVisible=${bigImageTipVisible}, quickVisible=${quickVisible}`);
 
       // 没有任何迹象时直接返回；每 15s 允许做一次深度扫描兜底（防止偶发样式变体漏检）
       if (!maskVisible && !quickVisible && !bigImageTipVisible && now - this.lastTipDeepScanAt < 15_000) {
-        console.log('[AutoCart] No feature tip detected, skipping...');
+        console.log('[AutoCart] 未检测到功能提示，跳过...');
         return;
       }
 
       this.lastTipDeepScanAt = now;
-      console.log('[AutoCart] Checking for feature tip popups...');
+      console.log('[AutoCart] 检查功能提示弹窗...');
 
       // 优先处理"新增大图查看功能"弹窗
       if (bigImageTipVisible) {
-        console.log('[AutoCart] Detected "新增大图查看功能" popup, attempting to close...');
+        console.log('[AutoCart] 检测到“新增大图查看功能”弹窗，尝试关闭...');
         // 精确匹配淘宝的"知道了"按钮 - 它是一个 <div class="tipBtn--xxx">知道了</div>
         const tipCloseSelectors = [
           // 精确匹配淘宝的类名模式
@@ -1710,26 +1773,26 @@ export class AutoCartAdder {
         for (const selector of tipCloseSelectors) {
           const closeBtn = this.page.locator(selector).first();
           const visible = await closeBtn.isVisible().catch(() => false);
-          console.log(`[AutoCart] Trying selector "${selector}": visible=${visible}`);
+          console.log(`[AutoCart] 尝试 selector="${selector}": visible=${visible}`);
           if (visible) {
             try {
               const box = await closeBtn.boundingBox().catch(() => null);
-              console.log(`[AutoCart] Button bounding box:`, box);
+              console.log(`[AutoCart] 按钮区域:`, box);
               await closeBtn.scrollIntoViewIfNeeded().catch(() => {});
               await this.humanSimulator.sleep(randomDelay(100, 200));
               await closeBtn.click({ timeout: 2000, force: true });
-              console.log('[AutoCart] Closed "新增大图查看功能" popup successfully');
+              console.log('[AutoCart] 已关闭“新增大图查看功能”弹窗');
               await this.humanSimulator.sleep(randomDelay(200, 400));
               await this.waitForOverlaysCleared(2000);
               closed = true;
               break;
             } catch (e) {
-              console.warn('[AutoCart] Failed to close via', selector, e);
+              console.warn('[AutoCart] 通过 selector 关闭失败:', selector, e);
             }
           }
         }
         if (!closed) {
-          console.log('[AutoCart] Could not close popup with selectors, trying page.evaluate...');
+          console.log('[AutoCart] selector 无法关闭弹窗，尝试 page.evaluate...');
           const clicked = await this.page.evaluate(() => {
             // 优先查找 tipBtn 类名的元素
             const tipBtn = document.querySelector('div[class*="tipBtn"]') as HTMLElement;
@@ -1752,10 +1815,10 @@ export class AutoCartAdder {
             return false;
           }).catch(() => false);
           if (clicked) {
-            console.log('[AutoCart] Closed popup via page.evaluate');
+            console.log('[AutoCart] 已通过 page.evaluate 关闭弹窗');
             await this.humanSimulator.sleep(randomDelay(200, 400));
           } else {
-            console.log('[AutoCart] Failed to find "知道了" button via page.evaluate');
+            console.log('[AutoCart] page.evaluate 未找到“知道了”按钮');
           }
         }
       }
@@ -1793,7 +1856,7 @@ export class AutoCartAdder {
             if (!humanClickSuccess) {
               await el.click({ timeout: 1200 }).catch(() => {});
             }
-            console.log(`[AutoCart] Closed feature tip via ${label} (index ${idx})`);
+            console.log(`[AutoCart] 已关闭功能提示: ${label} (index ${idx})`);
             return true;
           }
           return false;
@@ -1859,7 +1922,7 @@ export class AutoCartAdder {
           for (const mask of masks) {
             const isVisible = await mask.isVisible().catch(() => false);
             if (isVisible) {
-              console.log('[AutoCart] Attempting to close mask layer...');
+              console.log('[AutoCart] 尝试关闭遮罩层...');
               await mask.click({ timeout: 1000 }).catch(() => {});
               await this.humanSimulator.sleep(250);
               break;
@@ -1867,7 +1930,7 @@ export class AutoCartAdder {
           }
 
           // 最后兜底：只有在确实有遮罩/弹层迹象时才按 ESC，避免无意义地反复按键
-          console.log('[AutoCart] Attempting to close tips with ESC key...');
+          console.log('[AutoCart] 尝试用 ESC 关闭提示...');
           const t = Date.now();
           if (t - this.lastTipEscapeAt > 900) {
             this.lastTipEscapeAt = t;
@@ -1877,9 +1940,9 @@ export class AutoCartAdder {
         }
       }
 
-      console.log('[AutoCart] Feature tips check complete');
+      console.log('[AutoCart] 功能提示检查完成');
     } catch (error) {
-      console.warn('[AutoCart] Failed to close feature tips:', error);
+      console.warn('[AutoCart] 关闭功能提示失败:', error);
       // 不抛出错误，继续执行
     }
   }
@@ -1977,7 +2040,7 @@ export class AutoCartAdder {
 
       return products;
     } catch (error: any) {
-      console.error('[AutoCart] Failed to extract cart data:', error?.message);
+      console.error('[AutoCart] 提取购物车数据失败:', error?.message);
       return [];
     }
   }

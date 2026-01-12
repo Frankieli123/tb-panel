@@ -113,7 +113,7 @@ export class HumanSimulator {
 
       return true;
     } catch (error) {
-      console.error(`[HumanSimulator] Click failed: ${selector}`, error);
+      console.error(`[HumanSimulator] 点击失败: ${selector}`, error);
       return false;
     }
   }

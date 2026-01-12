@@ -188,7 +188,7 @@ class LoginManager {
             await this.cancelLoginSession(String(data.accountId || ''));
           }
         } catch (error) {
-          console.error('[LoginManager] Message error:', error);
+          console.error('[LoginManager] 消息处理错误:', error);
           ws.send(JSON.stringify({ type: 'error', message: String(error) }));
         }
       };
@@ -210,14 +210,14 @@ class LoginManager {
         }
 
         user = { id: session.user.id, role: session.user.role };
-        console.log('[LoginManager] WebSocket connected');
+        console.log('[LoginManager] 已连接(WebSocket)');
         ready = true;
         for (const msg of pendingMessages.splice(0, pendingMessages.length)) {
           await handleMessage(msg);
         }
 
         ws.on('close', () => {
-          console.log('[LoginManager] WebSocket disconnected');
+          console.log('[LoginManager] 已断开(WebSocket)');
           for (const [accountId, s] of this.sessions) {
             if (s.ws === ws) {
               this.cancelLoginSession(accountId);
@@ -225,12 +225,12 @@ class LoginManager {
           }
         });
       })().catch((err) => {
-        console.error('[LoginManager] WS auth error:', err);
+        console.error('[LoginManager] 鉴权失败(WS):', err);
         ws.close(1011, 'Internal error');
       });
     });
 
-    console.log('[LoginManager] WebSocket server initialized');
+    console.log('[LoginManager] 服务已启动(WebSocket)');
   }
 
   /**
@@ -272,7 +272,7 @@ class LoginManager {
       return;
     }
 
-    console.log(`[LoginManager] Starting login session for account: ${account.name} accountId=${accountId}`);
+    console.log(`[LoginManager] 开始登录会话 account=${account.name} accountId=${accountId}`);
 
     try {
       // 不使用 remote-debugging-port：部分 Windows/服务器环境可能因端口保留/权限导致 Chrome 启动异常，
@@ -352,7 +352,7 @@ class LoginManager {
       const started = await this.startLoginViaAgent({ accountId, account, ws, user });
       if (started) return;
 
-      console.error('[LoginManager] Start session error:', error);
+      console.error('[LoginManager] 启动登录会话失败:', error);
       const raw = error instanceof Error ? error.message : String(error);
       const hint =
         raw.includes('Executable') && raw.includes('doesn') && raw.includes('exist')
@@ -437,7 +437,7 @@ class LoginManager {
       }
 
     } catch (error) {
-      console.error('[LoginManager] Capture error:', error);
+      console.error('[LoginManager] 截图/登录检测失败:', error);
     } finally {
       session.isCapturing = false;
     }
@@ -556,7 +556,7 @@ class LoginManager {
     const session = this.sessions.get(accountId);
     if (!session) return;
 
-    console.log(`[LoginManager] Canceling session for account: ${accountId}`);
+    console.log(`[LoginManager] 取消登录会话 accountId=${accountId}`);
 
     if (session.mode === 'local') {
       if (session.intervalId) {

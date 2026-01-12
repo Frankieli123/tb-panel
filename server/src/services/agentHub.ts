@@ -76,7 +76,7 @@ export class AgentHub {
 
     this.wss.on('connection', (ws, req) => {
       void this.handleConnection(ws, req).catch((err) => {
-        console.warn('[AgentHub] Failed to handle connection:', err);
+        console.warn('[AgentHub] 处理连接失败:', err);
         try {
           ws.close(1011, 'Internal error');
         } catch {}
@@ -112,7 +112,7 @@ export class AgentHub {
       }
     }, pingIntervalMs).unref?.();
 
-    console.log('[AgentHub] WebSocket server initialized path=/ws/agent');
+    console.log('[AgentHub] 服务已启动(WebSocket) path=/ws/agent');
   }
 
   private async handleConnection(ws: WebSocket, req: IncomingMessage): Promise<void> {
@@ -160,7 +160,7 @@ export class AgentHub {
       info: { agentId },
     };
     this.agents.set(agentId, conn);
-    console.log(`[AgentHub] Agent connected agentId=${agentId} userId=${userId ?? 'shared'}`);
+    console.log(`[AgentHub] 已连接 agentId=${agentId} userId=${userId ?? 'shared'}`);
 
       ws.on('pong', () => {
         conn.lastSeenAt = Date.now();
@@ -247,11 +247,11 @@ export class AgentHub {
           this.pending.delete(requestId);
         }
 
-        console.log(`[AgentHub] Agent disconnected agentId=${agentId}`);
+        console.log(`[AgentHub] 已断开 agentId=${agentId}`);
       });
 
       ws.on('error', (err) => {
-        console.warn(`[AgentHub] Agent ws error agentId=${agentId}:`, err);
+        console.warn(`[AgentHub] WS 错误 agentId=${agentId}:`, err);
       });
   }
 

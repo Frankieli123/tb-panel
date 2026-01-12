@@ -90,8 +90,8 @@ app.get('/health', (req, res) => {
 
 // 启动服务器
 const server = app.listen(config.port, config.host, async () => {
-  console.log(`[Server] Running on http://${config.host}:${config.port}`);
-  console.log(`[Server] Environment: ${config.env}`);
+  console.log(`[Server] 服务已启动: http://${config.host}:${config.port}`);
+  console.log(`[Server] 环境: ${config.env}`);
 
   // 初始化 WebSocket 服务（用于扫码登录）
   loginManager.initWebSocket(server);
@@ -100,7 +100,7 @@ const server = app.listen(config.port, config.host, async () => {
   logService.initWebSocket(server);
 
   // 购物车/加购相关功能会按需拉起 Chrome（避免启动即占用资源）
-  console.log('[Server] Chrome for cart mode will be launched on-demand');
+  console.log('[Server] 购物车模式 Chrome 将按需启动');
 
   // 自动启动调度器
   if (config.env !== 'test') {
@@ -125,38 +125,38 @@ server.on('upgrade', (req: any, socket: any, head: any) => {
 server.on('error', (error: any) => {
   if (error?.code === 'EACCES') {
     console.error(
-      `[Server] Permission denied listening on ${config.host}:${config.port}. ` +
-        `On Windows this is often caused by excluded port ranges. Try setting a different PORT (e.g. 3100/4000).`
+      `[Server] 监听端口无权限: ${config.host}:${config.port}。` +
+        `Windows 下这通常是端口排除范围导致的，尝试换一个 PORT（例如 3100/4000）。`
     );
     return;
   }
   if (error?.code === 'EADDRINUSE') {
     console.error(
-      `[Server] Port already in use: ${config.host}:${config.port}. ` +
-        `Try a different PORT or stop the process currently using it.`
+      `[Server] 端口已被占用: ${config.host}:${config.port}。` +
+        `请更换 PORT 或停止占用该端口的进程。`
     );
     return;
   }
-  console.error('[Server] Server error:', error);
+  console.error('[Server] 服务异常:', error);
 });
 
 // 优雅关闭
 process.on('SIGTERM', async () => {
-  console.log('[Server] SIGTERM received, shutting down...');
+  console.log('[Server] 收到 SIGTERM，正在退出...');
   await schedulerService.stop();
   await chromeLauncher.kill(); // 关闭 Chrome 实例
   server.close(() => {
-    console.log('[Server] Closed');
+    console.log('[Server] 已关闭');
     process.exit(0);
   });
 });
 
 process.on('SIGINT', async () => {
-  console.log('[Server] SIGINT received, shutting down...');
+  console.log('[Server] 收到 SIGINT，正在退出...');
   await schedulerService.stop();
   await chromeLauncher.kill(); // 关闭 Chrome 实例
   server.close(() => {
-    console.log('[Server] Closed');
+    console.log('[Server] 已关闭');
     process.exit(0);
   });
 });

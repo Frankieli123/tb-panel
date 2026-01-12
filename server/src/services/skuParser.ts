@@ -37,19 +37,19 @@ export class SkuParser {
   constructor(private page: Page) {}
 
   async parseSkuTree(taobaoId: string): Promise<SkuTree> {
-    console.log(`[SkuParser] Start parsing taobaoId=${taobaoId}`);
+    console.log(`[SkuParser] 开始解析 taobaoId=${taobaoId}`);
 
     const skuData = await this.extractSkuData();
 
     if (!skuData || !skuData.properties || skuData.properties.length === 0) {
-      console.log(`[SkuParser] No SKU properties found, single SKU product`);
+      console.log(`[SkuParser] 未找到 SKU 属性，视为单 SKU 商品`);
       return this.createSingleSkuTree(taobaoId);
     }
 
     const properties = this.parseProperties(skuData.properties);
     const combinations = this.generateCombinations(properties, skuData.skus);
 
-    console.log(`[SkuParser] Found ${combinations.length} SKU combinations`);
+    console.log(`[SkuParser] 找到 ${combinations.length} 个 SKU 组合`);
 
     return {
       properties,
@@ -154,7 +154,7 @@ export class SkuParser {
     });
 
     if (domSkuData && domSkuData.properties && domSkuData.properties.length > 0) {
-      console.log(`[SkuParser] Extracted ${domSkuData.properties.length} properties from DOM`);
+      console.log(`[SkuParser] 从 DOM 提取到 ${domSkuData.properties.length} 个规格维度`);
       return domSkuData;
     }
 

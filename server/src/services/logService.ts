@@ -33,14 +33,14 @@ class LogService {
 
     this.wss.on('connection', (ws) => {
       this.clients.add(ws);
-      console.log(`[LogService] Client connected, total=${this.clients.size}`);
+      console.log(`[LogService] 客户端已连接，当前总数=${this.clients.size}`);
 
       // 发送最近的日志历史
       ws.send(JSON.stringify({ type: 'history', logs: this.logs.slice(-100) }));
 
       ws.on('close', () => {
         this.clients.delete(ws);
-        console.log(`[LogService] Client disconnected, total=${this.clients.size}`);
+        console.log(`[LogService] 客户端已断开，当前总数=${this.clients.size}`);
       });
 
       ws.on('error', () => {
@@ -51,7 +51,7 @@ class LogService {
     // 劫持 console 方法
     this.interceptConsole();
 
-    console.log('[LogService] WebSocket server initialized path=/ws/logs');
+    console.log('[LogService] 服务已启动(WebSocket) path=/ws/logs');
   }
 
   handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): boolean {

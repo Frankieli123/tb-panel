@@ -265,11 +265,11 @@ export class ChromeLauncher {
     this.installingChrome = (async () => {
       await mkdir(dir, { recursive: true });
 
-      console.log('[ChromeLauncher] Chrome not found. Auto-installing Chrome for Testing...');
+      console.log('[ChromeLauncher] 未找到 Chrome，正在自动安装 Chrome for Testing...');
 
       const { version, urls } = await this.resolveChromeForTestingDownloadUrls();
-      console.log(`[ChromeLauncher] Resolved Chrome for Testing version: ${version}`);
-      console.log(`[ChromeLauncher] Download candidates: ${urls.join(' | ')}`);
+      console.log(`[ChromeLauncher] 已解析 Chrome for Testing 版本: ${version}`);
+      console.log(`[ChromeLauncher] 下载候选: ${urls.join(' | ')}`);
 
       const zipPath = path.join(dir, 'chrome-win64.zip');
       const tmpZipPath = `${zipPath}.tmp`;
@@ -280,7 +280,7 @@ export class ChromeLauncher {
       await rm(extractedDir, { recursive: true, force: true }).catch(() => {});
 
       const used = await this.downloadToFileWithFallback(urls, tmpZipPath);
-      console.log(`[ChromeLauncher] Downloaded from: ${used}`);
+      console.log(`[ChromeLauncher] 已从以下地址下载: ${used}`);
       await this.expandZipWithPowerShell(tmpZipPath, dir);
       await rm(tmpZipPath, { force: true }).catch(() => {});
 
@@ -288,11 +288,11 @@ export class ChromeLauncher {
         throw new Error(`Chrome for Testing install failed: ${exePath} not found`);
       }
 
-      console.log(`[ChromeLauncher] Chrome for Testing installed at: ${exePath}`);
+      console.log(`[ChromeLauncher] Chrome for Testing 已安装到: ${exePath}`);
       return exePath;
     })()
       .catch((err) => {
-        console.warn('[ChromeLauncher] Auto-install failed:', err);
+        console.warn('[ChromeLauncher] 自动安装失败:', err);
         return null;
       })
       .finally(() => {
@@ -318,10 +318,10 @@ export class ChromeLauncher {
       try {
         // 尝试获取 contexts 来验证连接是否有效
         this.browser.contexts();
-        console.log('[ChromeLauncher] Browser already running, reusing connection');
+        console.log('[ChromeLauncher] 浏览器已在运行，复用连接');
         return this.browser;
       } catch (e) {
-        console.log('[ChromeLauncher] Existing browser connection invalid, restarting...');
+        console.log('[ChromeLauncher] 现有浏览器连接无效，正在重启...');
         this.browser = null;
         // 杀掉旧进程
         if (this.chromeProcess) {
@@ -336,7 +336,7 @@ export class ChromeLauncher {
     // 尝试连接到已有的 Chrome 实例（可能是之前启动但引用丢失的）
     try {
       this.browser = await chromium.connectOverCDP(`http://127.0.0.1:${this.debugPort}`);
-      console.log('[ChromeLauncher] Connected to existing Chrome instance');
+      console.log('[ChromeLauncher] 已连接到现有 Chrome 实例');
       return this.browser;
     } catch {
       // 没有现有实例，继续启动新的
@@ -356,8 +356,8 @@ export class ChromeLauncher {
       throw new Error('Chrome/Chromium not found. Please install Google Chrome or Chromium.');
     }
 
-    console.log(`[ChromeLauncher] Found Chrome at: ${chromePath}`);
-    console.log(`[ChromeLauncher] Using profile: ${this.userDataDir}`);
+    console.log(`[ChromeLauncher] 找到 Chrome: ${chromePath}`);
+    console.log(`[ChromeLauncher] 使用用户数据目录: ${this.userDataDir}`);
 
     // 启动 Chrome 进程
     this.chromeProcess = spawn(chromePath, [
@@ -377,11 +377,11 @@ export class ChromeLauncher {
     });
 
     this.chromeProcess.on('error', (err) => {
-      console.error('[ChromeLauncher] Chrome process error:', err);
+      console.error('[ChromeLauncher] Chrome 进程错误:', err);
     });
 
     this.chromeProcess.on('exit', (code) => {
-      console.log(`[ChromeLauncher] Chrome process exited with code ${code}`);
+      console.log(`[ChromeLauncher] Chrome 进程退出 code=${code}`);
       this.chromeProcess = null;
       this.browser = null;
     });
@@ -392,7 +392,7 @@ export class ChromeLauncher {
       try {
         this.browser = await chromium.connectOverCDP(`http://127.0.0.1:${this.debugPort}`);
         connected = true;
-        console.log('[ChromeLauncher] Connected to Chrome via CDP');
+        console.log('[ChromeLauncher] 已通过 CDP 连接到 Chrome');
         break;
       } catch {
         await this.sleep(300);
@@ -432,13 +432,13 @@ export class ChromeLauncher {
    * 关闭 Chrome 实例
    */
   async kill(): Promise<void> {
-    console.log('[ChromeLauncher] Shutting down Chrome...');
+    console.log('[ChromeLauncher] 正在关闭 Chrome...');
 
     if (this.browser) {
       try {
         await this.browser.close();
       } catch (error) {
-        console.warn('[ChromeLauncher] Error closing browser:', error);
+        console.warn('[ChromeLauncher] 关闭浏览器失败:', error);
       }
       this.browser = null;
     }
@@ -452,12 +452,12 @@ export class ChromeLauncher {
           this.chromeProcess.kill('SIGKILL');
         }
       } catch (error) {
-        console.warn('[ChromeLauncher] Error killing Chrome process:', error);
+        console.warn('[ChromeLauncher] 结束 Chrome 进程失败:', error);
       }
       this.chromeProcess = null;
     }
 
-    console.log('[ChromeLauncher] Chrome shutdown complete');
+    console.log('[ChromeLauncher] Chrome 已关闭');
   }
 
   /**

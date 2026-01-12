@@ -61,7 +61,7 @@ export class CartScraper {
   }> {
     // 使用共享浏览器管理器
     const session = await sharedBrowserManager.getOrCreateSession(accountId, cookies);
-    console.log(`[CartScraper] Using shared browser session for account=${accountId}`);
+    console.log(`[CartScraper] 使用共享浏览器会话 accountId=${accountId}`);
     return session;
   }
 
@@ -144,7 +144,7 @@ export class CartScraper {
         });
       }
     } catch (error) {
-      console.error('[CartScraper] Notification error:', error);
+      console.error('[CartScraper] 通知发送失败:', error);
     }
   }
 
@@ -167,6 +167,31 @@ export class CartScraper {
     }
   }
 
+  private isAuthOrChallengeUrl(url: string): boolean {
+    return /login\.taobao\.com|login\.tmall\.com|passport\.taobao\.com|sec\.taobao\.com|captcha|verify|risk/i.test(url);
+  }
+
+  private async assertNotAuthPage(page: Page, stage: string): Promise<void> {
+    const url = page.url();
+    if (this.isAuthOrChallengeUrl(url)) {
+      throw new Error(`需要登录/验证（${stage}）：${url}`);
+    }
+
+    const title = await page.title().catch(() => '');
+    if (/(\u767b\u5f55|Login|\u5b89\u5168\u9a8c\u8bc1|\u9a8c\u8bc1\u7801)/.test(title) && /taobao|tmall|alibaba/i.test(url)) {
+      throw new Error(`需要登录/验证（${stage}）：${url}`);
+    }
+
+    const bodyText = await page.locator('body').innerText({ timeout: 1500 }).catch(() => '');
+    if (
+      /(\u626b\u7801\u767b\u5f55|\u5bc6\u7801\u767b\u5f55|\u77ed\u4fe1\u767b\u5f55|\u5b89\u5168\u9a8c\u8bc1|\u9a8c\u8bc1\u7801|\u6ed1\u5757|\u8bf7\u5148\u767b\u5f55)/.test(
+        bodyText
+      )
+    ) {
+      throw new Error(`需要登录/验证（${stage}）：${url}`);
+    }
+  }
+
   private async refreshCartPage(session: { page: Page; human: HumanSimulator }): Promise<void> {
     const url = session.page.url();
     const isCart = /cart\.taobao\.com\/cart\.htm/i.test(url);
@@ -182,6 +207,7 @@ export class CartScraper {
     }
 
     await session.page.waitForTimeout(randomDelay(1200, 2400));
+    await this.assertNotAuthPage(session.page, 'cart');
     await this.makeCartPageMoreHuman(session.page, session.human);
     await session.page.waitForTimeout(randomDelay(600, 1200));
   }
@@ -191,7 +217,7 @@ export class CartScraper {
     cookies?: string,
     options?: { expectedTaobaoIds?: string[] }
   ): Promise<CartScrapeResult> {
-    console.log(`[CartScraper] Start scraping cart for account=${accountId}`);
+    console.log(`[CartScraper] 开始抓取购物车 accountId=${accountId}`);
 
     return this.runExclusive(async () => {
       let lastErr: any = null;
@@ -204,7 +230,7 @@ export class CartScraper {
           await this.refreshCartPage(session);
 
           const cartData = await this.extractCartData(session.page, options);
-          console.log(`[CartScraper] Found ${cartData.products.length} products in cart`);
+          console.log(`[CartScraper] 购物车已抓取 ${cartData.products.length} 条`);
 
           return {
             success: true,
@@ -214,7 +240,7 @@ export class CartScraper {
           };
         } catch (error: any) {
           lastErr = error;
-          console.error(`[CartScraper] Error (attempt ${attempt}/${maxAttempts}):`, error);
+          console.error(`[CartScraper] 抓取失败（第 ${attempt}/${maxAttempts} 次）:`, error);
 
           const fatal = this.isFatalSessionError(error);
           if (fatal) {
@@ -259,14 +285,20 @@ export class CartScraper {
             .trim();
           if (!digits) return null;
           const n = parseInt(digits, 10);
-          return Number.isFinite(n) && n > 0 ? n : null;
+          return Number.isFinite(n) && n >= 0 ? n : null;
         };
 
         const header = document.querySelector('.trade-cart-header-container') as HTMLElement | null;
         const headerText = header?.textContent || '';
         const m = /全部商品\s*[（(]\s*(\d{1,6})\s*[）)]/.exec(headerText);
         const n2 = m ? toCount(m[1]) : null;
-        if (n2) return n2;
+        if (n2 !== null) return n2;
+
+        const m2 = new RegExp(
+          '\u5168\u90e8\u5546\u54c1\\s*[\\(\uff08]\\s*(\\d{1,6})\\s*[\\)\uff09]'
+        ).exec(headerText);
+        const n3 = m2 ? toCount(m2[1]) : null;
+        if (n3 !== null) return n3;
 
         return null;
       })
@@ -452,9 +484,9 @@ export class CartScraper {
     };
 
     const hasExpected = expectedRemaining.size > 0;
-    const hasUiTotal = typeof uiTotalCount === 'number' && uiTotalCount > 0;
+    const hasUiTotal = typeof uiTotalCount === 'number';
     let maxRounds = hasExpected || hasUiTotal ? 320 : 160;
-    const bottomWaitLimit = hasExpected || hasUiTotal ? 10 : 0;
+    const bottomWaitLimit = hasExpected || hasUiTotal ? 20 : 0;
 
     let stableNoNewRounds = 0;
     let stuckRounds = 0;
@@ -474,7 +506,18 @@ export class CartScraper {
             (document.querySelector('.trade-infinite-container') as HTMLElement | null)?.innerText?.trim() || '';
           const hitEnd = endKeywords.find((k) => infiniteText.includes(k)) || null;
 
-          return { hit: Boolean(hitKeyword || hitEnd), reason: hitKeyword || hitEnd };
+          const fallbackReason =
+            hitKeyword ||
+            hitEnd ||
+            ['\u731c\u4f60\u559c\u6b22', '\u4e3a\u4f60\u63a8\u8350', '\u4f60\u53ef\u80fd\u8fd8\u559c\u6b22'].find((k) =>
+              bodyText.includes(k)
+            ) ||
+            ['\u6ca1\u6709\u66f4\u591a', '\u5df2\u7ecf\u5230\u5e95', '\u5df2\u7ecf\u5230\u5e95\u4e86', '\u5230\u5e95\u4e86', '\u5230\u5934\u4e86'].find(
+              (k) => infiniteText.includes(k)
+            ) ||
+            null;
+
+          return { hit: Boolean(fallbackReason), reason: fallbackReason };
         })
         .catch(() => ({ hit: false, reason: null }));
     };
@@ -510,14 +553,12 @@ export class CartScraper {
       if (added > 0) bottomWaits = 0;
       stableNoNewRounds = added === 0 ? stableNoNewRounds + 1 : 0;
 
-      const loadedQty =
-        uiTotalCount && uiTotalCount > 0
-          ? Array.from(productsByKey.values()).reduce((sum, p) => sum + (typeof p.quantity === 'number' ? p.quantity : 1), 0)
-          : 0;
-      const needsFullLoad = Boolean(uiTotalCount && uiTotalCount > 0 && loadedQty < uiTotalCount);
-      if (!needsFullLoad && uiTotalCount && uiTotalCount > 0 && stableNoNewRounds >= 1 && loadedQty >= uiTotalCount) {
-        break;
-      }
+      const loadedQty = Array.from(productsByKey.values()).reduce(
+        (sum, p) => sum + (typeof p.quantity === 'number' ? p.quantity : 1),
+        0
+      );
+      const needsFullLoad = typeof uiTotalCount === 'number' && loadedQty < uiTotalCount;
+      if (typeof uiTotalCount === 'number' && stableNoNewRounds >= 1 && loadedQty >= uiTotalCount) break;
 
       const { top, height, client } = snapshot.scroll;
       const atBottom = height > 0 && client > 0 && top + client >= height - 2;
@@ -525,27 +566,27 @@ export class CartScraper {
         if ((expectedRemaining.size > 0 || needsFullLoad) && bottomWaits < bottomWaitLimit) {
           bottomWaits++;
           stableNoNewRounds = 0;
-          await page.waitForTimeout(1200 + bottomWaits * 500).catch(() => {});
+          await page.waitForTimeout(Math.min(8000, 1200 + bottomWaits * 500)).catch(() => {});
           await scrollBy(-Math.max(260, Math.floor(client * 0.25)));
           await page.waitForTimeout(randomDelay(240, 420)).catch(() => {});
           continue;
         }
         if ((expectedRemaining.size > 0 || needsFullLoad) && bottomWaits >= bottomWaitLimit && stableNoNewRounds >= 1) {
           const end = await detectCartEndMarker();
-          if (uiTotalCount && uiTotalCount > 0 && loadedQty < uiTotalCount) {
+          if (typeof uiTotalCount === 'number' && loadedQty < uiTotalCount) {
             console.warn(
-              `[CartScraper] Cart scroll ended (${end.reason || 'no-progress'}) loadedQty=${loadedQty} < uiTotalCount=${uiTotalCount}; stop scrolling`
+              `[CartScraper] 购物车滚动结束（${end.reason || 'no-progress'}）loadedQty=${loadedQty} < uiTotalCount=${uiTotalCount}；停止滚动`
             );
           }
           break;
         }
-        if (stableNoNewRounds >= 2 && (!uiTotalCount || loadedQty >= uiTotalCount)) break;
+        if (stableNoNewRounds >= 2 && (uiTotalCount === null || loadedQty >= uiTotalCount)) break;
       }
 
       const step = Math.max(650, Math.min(2400, Math.floor((client || 800) * 0.95)));
-      if (round === 0 && height > 0) {
+      if (height > 0) {
         const estimated = Math.ceil(height / step) + 10;
-        maxRounds = Math.min(320, Math.max(maxRounds, estimated));
+        maxRounds = Math.min(4000, Math.max(maxRounds, estimated));
       }
       const nextTop = await scrollBy(step);
 
@@ -557,21 +598,21 @@ export class CartScraper {
         if ((expectedRemaining.size > 0 || needsFullLoad) && bottomWaits < bottomWaitLimit) {
           bottomWaits++;
           stableNoNewRounds = 0;
-          await page.waitForTimeout(1200 + bottomWaits * 500).catch(() => {});
+          await page.waitForTimeout(Math.min(8000, 1200 + bottomWaits * 500)).catch(() => {});
           await scrollBy(-Math.max(260, Math.floor(step * 0.25)));
           await page.waitForTimeout(randomDelay(240, 420)).catch(() => {});
           continue;
         }
         if ((expectedRemaining.size > 0 || needsFullLoad) && bottomWaits >= bottomWaitLimit) {
           const end = await detectCartEndMarker();
-          if (uiTotalCount && uiTotalCount > 0 && loadedQty < uiTotalCount) {
+          if (typeof uiTotalCount === 'number' && loadedQty < uiTotalCount) {
             console.warn(
-              `[CartScraper] Cart scroll stuck (${end.reason || 'no-progress'}) loadedQty=${loadedQty} < uiTotalCount=${uiTotalCount}; stop scrolling`
+              `[CartScraper] 购物车滚动卡住（${end.reason || 'no-progress'}）loadedQty=${loadedQty} < uiTotalCount=${uiTotalCount}；停止滚动`
             );
           }
           break;
         }
-        if (!uiTotalCount || loadedQty >= uiTotalCount) break;
+        if (uiTotalCount === null || loadedQty >= uiTotalCount) break;
       }
 
       await page.waitForTimeout(hasExpected ? randomDelay(380, 780) : randomDelay(240, 520)).catch(() => {});
@@ -589,7 +630,7 @@ export class CartScraper {
     failed: number;
     missing: number;
   }> {
-    console.log(`[CartScraper] Updating prices from cart for account=${accountId}`);
+    console.log(`[CartScraper] 从购物车更新价格 accountId=${accountId}`);
 
     const accountUserId =
       (await prisma.taobaoAccount.findUnique({
@@ -611,21 +652,21 @@ export class CartScraper {
     });
 
     if (monitoredProducts.length === 0) {
-      console.log(`[CartScraper] No monitored products for account=${accountId}`);
+      console.log(`[CartScraper] 无监控商品 accountId=${accountId}`);
       return { updated: 0, failed: 0, missing: 0 };
     }
 
-    console.log(`[CartScraper] Found ${monitoredProducts.length} monitored products`);
+    console.log(`[CartScraper] 找到 ${monitoredProducts.length} 个监控商品`);
 
     // 2. 从购物车抓取所有商品（或使用外部 Agent 已抓取的数据）
     const cartResult = options?.cartResult ?? (await this.scrapeCart(accountId, cookies));
 
     if (!cartResult.success) {
-      console.error(`[CartScraper] Failed to scrape cart: ${cartResult.error}`);
+      console.error(`[CartScraper] 抓取购物车失败: ${cartResult.error}`);
       return { updated: 0, failed: monitoredProducts.length, missing: 0 };
     }
 
-    console.log(`[CartScraper] Found ${cartResult.products.length} products in cart`);
+    console.log(`[CartScraper] 购物车中共有 ${cartResult.products.length} 条`);
 
     // 3. 建立购物车商品索引 (taobaoId -> CartProduct[])
     const cartByTaobaoId = new Map<string, CartProduct[]>();
@@ -656,7 +697,7 @@ export class CartScraper {
           // 购物车中没有该商品，标记为缺失
           missing++;
           const title = String(product.title || '').trim() || '<untitled>';
-          console.log(`[CartScraper] Missing in cart: ${title} (${productTaobaoId || String(product.taobaoId || '').trim()})`);
+          console.log(`[CartScraper] 购物车未找到: ${title} (${productTaobaoId || String(product.taobaoId || '').trim()})`);
 
           await prisma.product.update({
             where: { id: product.id },
@@ -763,14 +804,14 @@ export class CartScraper {
         updated++;
 
         const priceInfo = minOrig ? `￥${minPrice} (原价￥${minOrig})` : `￥${minPrice}`;
-        console.log(`[CartScraper] Updated: ${product.title} - ${priceInfo} variants=${variants.length}`);
+        console.log(`[CartScraper] 已更新: ${product.title} - ${priceInfo} variants=${variants.length}`);
       } catch (error) {
-        console.error(`[CartScraper] Failed to update product ${product.id}:`, error);
+        console.error(`[CartScraper] 更新商品失败 productId=${product.id}:`, error);
         failed++;
       }
     }
 
-    console.log(`[CartScraper] Update complete: updated=${updated}, missing=${missing}, failed=${failed}`);
+    console.log(`[CartScraper] 更新完成: updated=${updated}, missing=${missing}, failed=${failed}`);
     return { updated, failed, missing };
   }
 

@@ -94,7 +94,7 @@ export class TaobaoScraper {
       ],
     });
 
-    console.log('[Scraper] Browser initialized');
+    console.log('[Scraper] 浏览器已初始化');
   }
 
   async getContext(accountId: string, cookies?: string): Promise<BrowserContext> {
@@ -132,7 +132,7 @@ export class TaobaoScraper {
         const cookieList = JSON.parse(decryptCookies(cookies));
         await context.addCookies(cookieList);
       } catch (e) {
-        console.error(`[Scraper] Failed to inject cookies for account ${accountId}:`, e);
+        console.error(`[Scraper] 注入 Cookie 失败 accountId=${accountId}:`, e);
       }
     }
 
@@ -233,7 +233,7 @@ export class TaobaoScraper {
         .map(([k, v]) => `${k}=${v}`)
         .join(' ');
       console.log(
-        `[Scraper] [${mode}] Timings account=${accountId} taobaoId=${taobaoId} status=${status} totalMs=${totalMs} ${parts}`
+        `[Scraper] [${mode}] 耗时 account=${accountId} taobaoId=${taobaoId} status=${status} totalMs=${totalMs} ${parts}`
       );
     };
     try {
@@ -247,7 +247,7 @@ export class TaobaoScraper {
         .catch(() => {});
 
       console.log(
-        `[Scraper] [${mode}] Start account=${accountId} taobaoId=${taobaoId} url=${url}`
+        `[Scraper] [${mode}] 开始 account=${accountId} taobaoId=${taobaoId} url=${url}`
       );
 
       const navStartAt = Date.now();
@@ -259,7 +259,7 @@ export class TaobaoScraper {
       timings.navMs = navMs;
 
       console.log(
-        `[Scraper] [${mode}] Navigated status=${response?.status() ?? 'n/a'} responseUrl=${response?.url() ?? 'n/a'} finalUrl=${page.url()} navMs=${navMs}`
+        `[Scraper] [${mode}] 导航完成 status=${response?.status() ?? 'n/a'} responseUrl=${response?.url() ?? 'n/a'} finalUrl=${page.url()} navMs=${navMs}`
       );
 
       const sleepStartAt = Date.now();
@@ -274,7 +274,7 @@ export class TaobaoScraper {
         const artifacts = await this.saveDebugArtifacts(page, accountId, taobaoId, `${mode}_need_login`);
         timings.saveArtifactsMs = Date.now() - artifactsStartAt;
         console.warn(
-          `[Scraper] [${mode}] NeedLogin account=${accountId} taobaoId=${taobaoId} finalUrl=${page.url()} ms=${Date.now() - startedAt} artifacts=${artifacts?.prefix ?? 'n/a'}`
+          `[Scraper] [${mode}] 需要登录 account=${accountId} taobaoId=${taobaoId} finalUrl=${page.url()} ms=${Date.now() - startedAt} artifacts=${artifacts?.prefix ?? 'n/a'}`
         );
         logTimings('needLogin');
         return { success: false, needLogin: true, error: 'Need login' };
@@ -288,7 +288,7 @@ export class TaobaoScraper {
         const artifacts = await this.saveDebugArtifacts(page, accountId, taobaoId, `${mode}_captcha`);
         timings.saveArtifactsMs = Date.now() - artifactsStartAt;
         console.warn(
-          `[Scraper] [${mode}] CaptchaDetected account=${accountId} taobaoId=${taobaoId} finalUrl=${page.url()} ms=${Date.now() - startedAt} artifacts=${artifacts?.prefix ?? 'n/a'}`
+          `[Scraper] [${mode}] 检测到验证码 account=${accountId} taobaoId=${taobaoId} finalUrl=${page.url()} ms=${Date.now() - startedAt} artifacts=${artifacts?.prefix ?? 'n/a'}`
         );
         logTimings('captcha');
         return { success: false, needCaptcha: true, error: 'Captcha detected' };
@@ -302,7 +302,7 @@ export class TaobaoScraper {
         const artifacts = await this.saveDebugArtifacts(page, accountId, taobaoId, `${mode}_access_denied`);
         timings.saveArtifactsMs = Date.now() - artifactsStartAt;
         console.warn(
-          `[Scraper] [${mode}] AccessDenied account=${accountId} taobaoId=${taobaoId} finalUrl=${page.url()} ms=${Date.now() - startedAt} artifacts=${artifacts?.prefix ?? 'n/a'}`
+          `[Scraper] [${mode}] 访问被拒绝 account=${accountId} taobaoId=${taobaoId} finalUrl=${page.url()} ms=${Date.now() - startedAt} artifacts=${artifacts?.prefix ?? 'n/a'}`
         );
         logTimings('accessDenied');
         return { success: false, needCaptcha: true, error: 'Access denied' };
@@ -325,7 +325,7 @@ export class TaobaoScraper {
         const artifacts = await this.saveDebugArtifacts(page, accountId, taobaoId, `${mode}_no_price`);
         timings.saveArtifactsMs = Date.now() - artifactsStartAt;
         console.warn(
-          `[Scraper] [${mode}] NoPriceExtracted account=${accountId} taobaoId=${taobaoId} finalUrl=${page.url()} ms=${Date.now() - startedAt} artifacts=${artifacts?.prefix ?? 'n/a'}`
+          `[Scraper] [${mode}] 未解析到价格 account=${accountId} taobaoId=${taobaoId} finalUrl=${page.url()} ms=${Date.now() - startedAt} artifacts=${artifacts?.prefix ?? 'n/a'}`
         );
         logTimings('noPrice');
         return { success: false, error: 'Price not found' };
@@ -365,19 +365,19 @@ export class TaobaoScraper {
         const artifacts = await this.saveDebugArtifacts(page, accountId, taobaoId, `${mode}_no_sku`);
         timings.saveSkuArtifactsMs = Date.now() - artifactsStartAt;
         console.warn(
-          `[Scraper] [${mode}] NoSkuExtracted account=${accountId} taobaoId=${taobaoId} finalUrl=${page.url()} ms=${Date.now() - startedAt} artifacts=${artifacts?.prefix ?? 'n/a'} skuDiag=${skuDiag ? JSON.stringify(skuDiag) : 'n/a'}`
+          `[Scraper] [${mode}] 未解析到规格 account=${accountId} taobaoId=${taobaoId} finalUrl=${page.url()} ms=${Date.now() - startedAt} artifacts=${artifacts?.prefix ?? 'n/a'} skuDiag=${skuDiag ? JSON.stringify(skuDiag) : 'n/a'}`
         );
       }
 
       console.log(
-        `[Scraper] [${mode}] Success account=${accountId} taobaoId=${taobaoId} finalUrl=${page.url()} ms=${Date.now() - startedAt} finalPrice=${data.finalPrice ?? 'null'} originalPrice=${data.originalPrice ?? 'null'}`
+        `[Scraper] [${mode}] 成功 account=${accountId} taobaoId=${taobaoId} finalUrl=${page.url()} ms=${Date.now() - startedAt} finalPrice=${data.finalPrice ?? 'null'} originalPrice=${data.originalPrice ?? 'null'}`
       );
       logTimings('success');
       return { success: true, data };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       console.error(
-        `[Scraper] [${mode}] Error account=${accountId} taobaoId=${taobaoId} url=${url} ms=${Date.now() - startedAt} message=${errorMessage}`
+        `[Scraper] [${mode}] 错误 account=${accountId} taobaoId=${taobaoId} url=${url} ms=${Date.now() - startedAt} message=${errorMessage}`
       );
       if (page) {
         const artifactsStartAt = Date.now();
@@ -386,7 +386,7 @@ export class TaobaoScraper {
         );
         timings.saveArtifactsMs = Date.now() - artifactsStartAt;
         console.error(
-          `[Scraper] [${mode}] ErrorArtifacts account=${accountId} taobaoId=${taobaoId} artifacts=${artifacts?.prefix ?? 'n/a'}`
+          `[Scraper] [${mode}] 错误现场 account=${accountId} taobaoId=${taobaoId} artifacts=${artifacts?.prefix ?? 'n/a'}`
         );
       }
       logTimings('error');
@@ -700,7 +700,7 @@ export class TaobaoScraper {
       variants = await this.extractSkuVariants(page);
     } catch (error) {
       const msg = error instanceof Error ? `${error.message}${error.stack ? `\n${error.stack}` : ''}` : String(error);
-      console.warn(`[Scraper] [sku] ExtractError url=${page.url()} message=${msg}`);
+      console.warn(`[Scraper] [sku] 解析错误 url=${page.url()} message=${msg}`);
       variants = [];
     }
     if (variants.length > 0) {
@@ -1374,7 +1374,7 @@ export class TaobaoScraper {
       await this.browser.close();
       this.browser = null;
     }
-    console.log('[Scraper] Browser closed');
+    console.log('[Scraper] 浏览器已关闭');
   }
 
   /**

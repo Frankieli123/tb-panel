@@ -16,11 +16,11 @@ class FrontendPushService {
 
     this.wss.on('connection', (ws) => {
       this.clients.add(ws);
-      console.log(`[FrontendPush] Client connected, total=${this.clients.size}`);
+      console.log(`[FrontendPush] 客户端已连接，当前总数=${this.clients.size}`);
 
       ws.on('close', () => {
         this.clients.delete(ws);
-        console.log(`[FrontendPush] Client disconnected, total=${this.clients.size}`);
+        console.log(`[FrontendPush] 客户端已断开，当前总数=${this.clients.size}`);
       });
 
       ws.on('error', () => {
@@ -31,7 +31,7 @@ class FrontendPushService {
       ws.send(JSON.stringify({ type: 'connected', timestamp: Date.now() }));
     });
 
-    console.log('[FrontendPush] WebSocket server initialized path=/ws/updates');
+    console.log('[FrontendPush] 服务已启动(WebSocket) path=/ws/updates');
   }
 
   handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): boolean {

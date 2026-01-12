@@ -89,7 +89,7 @@ class SchedulerService {
   async start(): Promise<void> {
     if (this.isRunning) return;
 
-    console.log('[Scheduler] Starting...');
+    console.log('[Scheduler] 启动中...');
     // 仅购物车模式：不初始化详情页抓取链路
 
     // 初始化账号状态
@@ -108,11 +108,11 @@ class SchedulerService {
     );
 
     this.worker.on('completed', (job) => {
-      console.log(`[Scheduler] Job ${job.id} completed`);
+      console.log(`[Scheduler] 任务已完成 jobId=${job.id}`);
     });
 
     this.worker.on('failed', (job, err) => {
-      console.error(`[Scheduler] Job ${job?.id} failed:`, err.message);
+      console.error(`[Scheduler] 任务失败 jobId=${job?.id}:`, err.message);
     });
 
     // 主调度循环
@@ -120,7 +120,7 @@ class SchedulerService {
     this.mainLoopInterval = setInterval(() => this.scheduleTasks(), 10000); // 每10秒检查一次
     await this.scheduleTasks(); // 立即执行一次
 
-    console.log('[Scheduler] Started');
+    console.log('[Scheduler] 已启动');
   }
 
   async stop(): Promise<void> {
@@ -136,7 +136,7 @@ class SchedulerService {
       this.worker = null;
     }
 
-    console.log('[Scheduler] Stopped');
+    console.log('[Scheduler] 已停止');
   }
 
   private async initAccountStates(): Promise<void> {
@@ -153,7 +153,7 @@ class SchedulerService {
       });
     }
 
-    console.log(`[Scheduler] Initialized ${accounts.length} accounts`);
+    console.log(`[Scheduler] 已初始化 ${accounts.length} 个账号`);
   }
 
   /**
@@ -231,17 +231,17 @@ class SchedulerService {
             }
           );
 
-          console.log(`[Scheduler] Scheduled cart scrape for account ${account.id} (${cartProductsCount} products)`);
+          console.log(`[Scheduler] 已安排购物车抓价 accountId=${account.id} products=${cartProductsCount}`);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           // 静默跳过已存在的任务（避免日志污染）
           if (!message.toLowerCase().includes('already exists')) {
-            console.error(`[Scheduler] Error scheduling cart scrape for ${account.id}:`, error);
+            console.error(`[Scheduler] 安排购物车抓价失败 accountId=${account.id}:`, error);
           }
         }
       }
     } catch (error) {
-      console.error('[Scheduler] Error in scheduleCartScraping:', error);
+      console.error('[Scheduler] 购物车抓价调度出错:', error);
     }
   }
 
@@ -260,14 +260,14 @@ class SchedulerService {
       if (quietNow) {
         if (!this.isQuietPaused) {
           console.log(
-            `[Scheduler] Quiet hours active (${String(scraperConfig?.quietHoursStart || '')}-${String(scraperConfig?.quietHoursEnd || '')}), skipping scheduling`
+            `[Scheduler] 静默时间生效（${String(scraperConfig?.quietHoursStart || '')}-${String(scraperConfig?.quietHoursEnd || '')}），跳过调度`
           );
         }
         this.isQuietPaused = true;
         return;
       }
       if (this.isQuietPaused) {
-        console.log('[Scheduler] Quiet hours ended, resuming scheduling');
+        console.log('[Scheduler] 静默时间结束，恢复调度');
       }
       this.isQuietPaused = false;
       const defaultIntervalMs = (scraperConfig?.pollingInterval ?? 60) * 60 * 1000;
@@ -283,7 +283,7 @@ class SchedulerService {
       // ========== 1. 购物车模式批量抓取 ==========
       await this.scheduleCartScraping(accounts, defaultIntervalMs, nowMs);
     } catch (error) {
-      console.error('[Scheduler] Error in scheduleTasks:', error);
+      console.error('[Scheduler] 调度循环出错(scheduleTasks):', error);
     }
   }
 
@@ -301,7 +301,7 @@ class SchedulerService {
       return this.processCartBatchAddJob(job);
     }
 
-    console.log(`[Scheduler] Unsupported job: ${job.name} id=${job.id}`);
+    console.log(`[Scheduler] 不支持的任务 name=${job.name} jobId=${job.id}`);
     return { success: false, error: 'Unsupported job' };
   }
 
@@ -310,13 +310,13 @@ class SchedulerService {
    */
   private async processCartScrapeJob(job: Job): Promise<{ success: boolean; updated: number; failed: number; missing: number }> {
     const { accountId, productCount } = job.data;
-    console.log(`[Scheduler] Cart scrape start accountId=${accountId} products=${productCount}`);
+    console.log(`[Scheduler] 购物车抓价开始 accountId=${accountId} products=${productCount}`);
 
     try {
       const scraperConfig = await (prisma as any).scraperConfig.findFirst();
       const force = Boolean((job.data as any)?.force);
       if (!force && this.isWithinQuietHours(new Date(), scraperConfig)) {
-        console.log(`[Scheduler] Quiet hours active, skip cart scrape accountId=${accountId}`);
+        console.log(`[Scheduler] 静默时间生效，跳过购物车抓价 accountId=${accountId}`);
         return { success: true, updated: 0, failed: 0, missing: 0 };
       }
       const humanDelayScale =
@@ -401,7 +401,7 @@ class SchedulerService {
         await agentHub
           .call<any>(agentIdToUse, 'pauseAddForScrape', { accountId, timeoutMs: pauseTimeoutMs }, { timeoutMs: pauseTimeoutMs + 5000 })
           .catch((err) => {
-            console.warn(`[Scheduler] Failed to pause add before cart scrape accountId=${accountId} agentId=${agentIdToUse}:`, err);
+            console.warn(`[Scheduler] 购物车抓价前暂停加购失败 accountId=${accountId} agentId=${agentIdToUse}:`, err);
           });
       } else {
         await requestPauseForAddWithTimeout(accountId, pauseTimeoutMs).catch(() => {});
@@ -451,7 +451,9 @@ class SchedulerService {
 
       const result = await cartScraper.updatePricesFromCart(accountId, account.cookies, { cartResult: cart });
 
-      console.log(`[Scheduler] Cart scrape complete accountId=${accountId} updated=${result.updated} missing=${result.missing} failed=${result.failed}`);
+      console.log(
+        `[Scheduler] 购物车抓价完成 accountId=${accountId} updated=${result.updated} missing=${result.missing} failed=${result.failed}`
+      );
 
       return {
         success: true,
@@ -460,7 +462,7 @@ class SchedulerService {
         missing: result.missing
       };
     } catch (error) {
-      console.error(`[Scheduler] Cart scrape failed accountId=${accountId}:`, error);
+      console.error(`[Scheduler] 购物车抓价失败 accountId=${accountId}:`, error);
       throw error;
     }
   }
@@ -513,6 +515,20 @@ class SchedulerService {
 
     const agentIdToUse =
       account.agentId || (preferredAgentId && agentHub.isConnected(preferredAgentId) ? preferredAgentId : null);
+
+    const alreadyMonitored = await prisma.product
+      .findFirst({
+        where: account.userId
+          ? { monitorMode: 'CART', taobaoId, ownerAccount: { is: { userId: account.userId } } }
+          : { ownerAccountId: accountId, monitorMode: 'CART', taobaoId },
+        select: { id: true },
+      })
+      .catch(() => null as any);
+    if (alreadyMonitored?.id) {
+      await job.updateProgress({ total: 0, current: 0, success: 0, failed: 0 });
+      await job.log('该商品已在监控，已忽略（不重复加购）');
+      return { success: true, taobaoId, productId: String(alreadyMonitored.id) };
+    }
 
     let lastProgressUpdateAt = 0;
     const onProgress = (progress: any, log?: string) => {
@@ -787,7 +803,34 @@ class SchedulerService {
     await job.updateProgress(status);
     await job.log(`开始批量加购: ${items.length} 个商品 delayScale=${humanDelayScale}`);
 
+    const batchTaobaoIds = items
+      .map((it) => String(it?.taobaoId || '').trim())
+      .filter(Boolean);
+    const monitoredRows = await prisma.product
+      .findMany({
+        where: {
+          monitorMode: 'CART',
+          taobaoId: { in: batchTaobaoIds },
+          ...(account.userId
+            ? { ownerAccount: { is: { userId: account.userId } } }
+            : { ownerAccountId: accountId }),
+        },
+        select: { id: true, taobaoId: true, skuId: true },
+      })
+      .catch(() => [] as any[]);
+    const alreadyMonitoredByTaobaoId = new Map<string, string>();
+    for (const row of monitoredRows as any[]) {
+      const id = String(row?.id || '').trim();
+      const tid = String(row?.taobaoId || '').trim();
+      const skuId = String(row?.skuId || '').trim();
+      if (!id || !tid) continue;
+      if (!alreadyMonitoredByTaobaoId.has(tid) || skuId === CART_BASE_SKU_ID) {
+        alreadyMonitoredByTaobaoId.set(tid, id);
+      }
+    }
+
     let existingCartSkus: Map<string, Set<string>> = new Map();
+    let performedAgentAdd = 0;
     let lastBatchUpdateAt = 0;
 
     const flushBatchProgress = (force = false) => {
@@ -801,7 +844,23 @@ class SchedulerService {
       const item = items[i];
       const itemStatus = status.items[i];
 
-      if (i > 0 && cartAddProductDelayMaxMs > 0) {
+      const itemTaobaoId = String(item?.taobaoId || '').trim();
+      status.progress.currentIndex = i;
+
+      const existingProductId = itemTaobaoId ? alreadyMonitoredByTaobaoId.get(itemTaobaoId) ?? null : null;
+      if (existingProductId) {
+        itemStatus.status = 'completed';
+        itemStatus.productId = existingProductId;
+        itemStatus.progress = { total: 0, current: 0, success: 0, failed: 0 };
+
+        status.progress.completedItems++;
+        status.progress.successItems++;
+        await job.log(`[${item.index}] 已在监控，已忽略`);
+        flushBatchProgress(true);
+        continue;
+      }
+
+      if (performedAgentAdd > 0 && cartAddProductDelayMaxMs > 0) {
         const scaledMin = Math.max(0, Math.floor(cartAddProductDelayMinMs * humanDelayScale));
         const scaledMax = Math.max(scaledMin, Math.floor(cartAddProductDelayMaxMs * humanDelayScale));
         const delay = randomDelay(scaledMin, scaledMax);
@@ -811,7 +870,6 @@ class SchedulerService {
         }
       }
 
-      status.progress.currentIndex = i;
       itemStatus.status = 'running';
       await job.log(`[${item.index}] 开始处理 taobaoId=${item.taobaoId}`);
       flushBatchProgress(true);
@@ -845,6 +903,7 @@ class SchedulerService {
               existingCartSkus,
               skuDelayMs: { min: cartAddSkuDelayMinMs, max: cartAddSkuDelayMaxMs },
             });
+        performedAgentAdd++;
 
         itemStatus.progress = {
           total: result.totalSkus,
@@ -1005,7 +1064,7 @@ class SchedulerService {
         status.progress.failedItems++;
         flushBatchProgress(true);
         await job.log(`[${item.index}] 错误: ${itemStatus.error}`);
-        console.error(`[BatchCartAPI] Item ${String(item.taobaoId)} failed:`, error?.stack || error);
+        console.error(`[BatchCartAPI] 商品 ${String(item.taobaoId)} 失败:`, error?.stack || error);
       }
     }
 
@@ -1014,7 +1073,7 @@ class SchedulerService {
     status.status = hasFailures && hasSuccess ? 'partial' : hasFailures ? 'failed' : 'completed';
 
     await job.updateProgress(status);
-    await job.log(`批量加购完成: ${status.progress.successItems}/${status.progress.totalItems} success`);
+    await job.log(`批量加购完成: ${status.progress.successItems}/${status.progress.totalItems} 成功`);
     return status;
   }
 
@@ -1032,11 +1091,11 @@ class SchedulerService {
         .map(([k, v]) => `${k}=${v}`)
         .join(' ');
       console.log(
-        `[Scheduler] Job ${job.id} timings status=${status} accountId=${accountId} taobaoId=${taobaoId} totalMs=${totalMs} ${parts}`
+        `[Scheduler] 任务耗时 jobId=${job.id} status=${status} accountId=${accountId} taobaoId=${taobaoId} totalMs=${totalMs} ${parts}`
       );
     };
     console.log(
-      `[Scheduler] Job ${job.id} start accountId=${accountId} productId=${productId} taobaoId=${taobaoId}`
+      `[Scheduler] 任务开始 jobId=${job.id} accountId=${accountId} productId=${productId} taobaoId=${taobaoId}`
     );
 
     const state = this.accountStates.get(accountId);
@@ -1083,12 +1142,12 @@ class SchedulerService {
       timings.scrapeMs = Date.now() - scrapeStartAt;
 
       console.log(
-        `[Scheduler] Job ${job.id} scrapeResult success=${result.success} needLogin=${!!result.needLogin} needCaptcha=${!!result.needCaptcha} error=${result.error ?? 'n/a'} ms=${Date.now() - startedAt}`
+        `[Scheduler] 抓取结果 jobId=${job.id} success=${result.success} needLogin=${!!result.needLogin} needCaptcha=${!!result.needCaptcha} error=${result.error ?? 'n/a'} ms=${Date.now() - startedAt}`
       );
 
       const variantsCount = result.success ? (result.data?.variants?.length ?? 0) : 0;
       console.log(
-        `[Scheduler] Job ${job.id} scrapeVariants accountId=${accountId} taobaoId=${taobaoId} productId=${productId} variantsCount=${variantsCount}`
+        `[Scheduler] 规格抓取 jobId=${job.id} accountId=${accountId} taobaoId=${taobaoId} productId=${productId} variantsCount=${variantsCount}`
       );
 
       // 处理结果
@@ -1124,7 +1183,7 @@ class SchedulerService {
           });
 
           console.log(
-            `[Scheduler] Job ${job.id} snapshotSaved productId=${productId} snapshotId=${snapshot.id} variantsSaved=${result.data.variants ? (result.data.variants.length ?? 0) : 0}`
+            `[Scheduler] 快照已保存 jobId=${job.id} productId=${productId} snapshotId=${snapshot.id} variantsSaved=${result.data.variants ? (result.data.variants.length ?? 0) : 0}`
           );
 
           // 更新商品信息
@@ -1259,7 +1318,7 @@ class SchedulerService {
       }
 
       console.log(
-        `[Scheduler] Job ${job.id} end accountId=${accountId} taobaoId=${taobaoId} ms=${Date.now() - startedAt}`
+        `[Scheduler] 任务结束 jobId=${job.id} accountId=${accountId} taobaoId=${taobaoId} ms=${Date.now() - startedAt}`
       );
     }
   }
@@ -1323,7 +1382,7 @@ class SchedulerService {
       }
 
     } catch (error) {
-      console.error('[Scheduler] Notification error:', error);
+      console.error('[Scheduler] 通知发送失败:', error);
     }
   }
 

@@ -1,4 +1,5 @@
 import { Page, BrowserContext } from 'playwright';
+import { createHash } from 'crypto';
 import { chromeLauncher } from './chromeLauncher.js';
 import { HumanSimulator } from './humanSimulator.js';
 import { decryptCookies } from '../utils/helpers.js';
@@ -31,7 +32,8 @@ class SharedBrowserManager {
   private cookieSignature(input?: string): string {
     if (!input) return '';
     const s = String(input);
-    return `${s.length}:${s.slice(0, 64)}`;
+    const hash = createHash('sha256').update(s).digest('hex').slice(0, 16);
+    return `${s.length}:${hash}`;
   }
 
   private parseCookies(input?: string): any[] | null {
@@ -66,20 +68,20 @@ class SharedBrowserManager {
         }
 
         if (!pageValid) {
-          console.log(`[SharedBrowser] Session invalid for account=${accountId}, recreating`);
+          console.log(`[SharedBrowser] 会话已失效 accountId=${accountId}，重建中`);
           await this.disposeSession(accountId);
         } else if (sig && sig !== existing.cookieSig) {
-          console.log(`[SharedBrowser] Cookies changed for account=${accountId}, recreating`);
+          console.log(`[SharedBrowser] Cookie 已变化 accountId=${accountId}，重建中`);
           await this.disposeSession(accountId);
         } else {
           existing.lastUsedAt = Date.now();
-          console.log(`[SharedBrowser] Reusing session for account=${accountId}`);
+          console.log(`[SharedBrowser] 复用会话 accountId=${accountId}`);
           return existing;
         }
       }
 
       // 创建新会话
-      console.log(`[SharedBrowser] Creating new session for account=${accountId}`);
+      console.log(`[SharedBrowser] 创建新会话 accountId=${accountId}`);
       const realChrome = await chromeLauncher.launch();
 
       const context = await realChrome.newContext({
@@ -95,7 +97,7 @@ class SharedBrowserManager {
       const cookieArray = this.parseCookies(cookies);
       if (cookieArray && cookieArray.length > 0) {
         await context.addCookies(cookieArray).catch((e: any) => {
-          console.warn('[SharedBrowser] Failed to inject cookies:', e);
+          console.warn('[SharedBrowser] 注入 Cookie 失败:', e);
         });
       }
 
@@ -128,7 +130,7 @@ class SharedBrowserManager {
       await session.context.close().catch(() => {});
     } catch {}
 
-    console.log(`[SharedBrowser] Session closed for account=${accountId}`);
+    console.log(`[SharedBrowser] 会话已关闭 accountId=${accountId}`);
   }
 
   hasSession(accountId: string): boolean {

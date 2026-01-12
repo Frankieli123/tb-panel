@@ -91,7 +91,7 @@ class NotificationService {
     const toUser = (map['wecom.toUser'] || config.wecom.toUser || '@all').trim() || '@all';
 
     if (!corpId || !corpSecret || !Number.isFinite(agentId) || agentId <= 0) {
-      console.warn('[Notification] WeCom App not fully configured');
+      console.warn('[Notification] 企业微信应用未完整配置');
       return null;
     }
 
@@ -101,7 +101,7 @@ class NotificationService {
   private async getEmailTransport(): Promise<{ transporter: nodemailer.Transporter; from: string } | null> {
     const settings = await this.loadSmtpSettings();
     if (!settings) {
-      console.warn('[Notification] Email transporter not configured');
+      console.warn('[Notification] 邮件发送器未配置');
       return null;
     }
 
@@ -259,7 +259,7 @@ class NotificationService {
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       await this.logNotification(product.id, 'wecom', 'WeCom App', 'Send failed', false, errorMsg);
-      console.error('[Notification] WeCom App error:', errorMsg);
+      console.error('[Notification] 企业微信应用错误:', errorMsg);
     }
   }
 
@@ -354,12 +354,12 @@ ${changeLabel}：${formatPrice(Math.abs(change.amount))} (${Math.abs(change.perc
       });
 
       await this.logNotification(productId, 'email', subject, text, true);
-      console.log(`[Notification] Email sent to ${to}`);
+      console.log(`[Notification] 邮件已发送至 ${to}`);
 
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       await this.logNotification(productId, 'email', subject, text, false, errorMsg);
-      console.error('[Notification] Email error:', errorMsg);
+      console.error('[Notification] 邮件发送错误:', errorMsg);
     }
   }
 
@@ -404,12 +404,12 @@ ${changeLabel}：${formatPrice(Math.abs(change.amount))} (${Math.abs(change.perc
       }
 
       await this.logNotification(productId, 'wechat', title, content, true);
-      console.log('[Notification] WeChat notification sent');
+      console.log('[Notification] 微信通知已发送');
 
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       await this.logNotification(productId, 'wechat', title, content, false, errorMsg);
-      console.error('[Notification] WeChat error:', errorMsg);
+      console.error('[Notification] 微信发送错误:', errorMsg);
     }
   }
 
@@ -436,11 +436,11 @@ ${changeLabel}：${formatPrice(Math.abs(change.amount))} (${Math.abs(change.perc
       }
 
       await this.logNotification(productId, 'dingtalk', title, content, true);
-      console.log('[Notification] DingTalk notification sent');
+      console.log('[Notification] 钉钉通知已发送');
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       await this.logNotification(productId, 'dingtalk', title, content, false, errorMsg);
-      console.error('[Notification] DingTalk error:', errorMsg);
+      console.error('[Notification] 钉钉发送错误:', errorMsg);
     }
   }
 
@@ -467,11 +467,11 @@ ${changeLabel}：${formatPrice(Math.abs(change.amount))} (${Math.abs(change.perc
       }
 
       await this.logNotification(productId, 'feishu', title, content, true);
-      console.log('[Notification] Feishu notification sent');
+      console.log('[Notification] 飞书通知已发送');
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       await this.logNotification(productId, 'feishu', title, content, false, errorMsg);
-      console.error('[Notification] Feishu error:', errorMsg);
+      console.error('[Notification] 飞书发送错误:', errorMsg);
     }
   }
 
@@ -555,7 +555,7 @@ ${changeLabel}：${formatPrice(Math.abs(change.amount))} (${Math.abs(change.perc
         };
       });
     } catch (error) {
-      console.warn('[Notification] WeCom variant summary failed:', error);
+      console.warn('[Notification] 企业微信规格摘要生成失败:', error);
       return [];
     }
   }
@@ -606,7 +606,7 @@ ${changeLabel}：${formatPrice(Math.abs(change.amount))} (${Math.abs(change.perc
     }
 
     await this.logNotification(productId, 'wecom', logTitle, logContent, true);
-    console.log('[Notification] WeCom App message sent');
+    console.log('[Notification] 企业微信应用消息已发送');
   }
 
   private async logNotification(
@@ -629,7 +629,7 @@ ${changeLabel}：${formatPrice(Math.abs(change.amount))} (${Math.abs(change.perc
         },
       });
     } catch (e) {
-      console.error('[Notification] Failed to log notification:', e);
+      console.error('[Notification] 记录通知日志失败:', e);
     }
   }
 

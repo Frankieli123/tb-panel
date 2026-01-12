@@ -424,7 +424,7 @@ router.get('/products/:id/variants/latest', async (req: Request, res: Response) 
       .filter((v: any) => !!v.variantKey);
 
     console.log(
-      `[API] variantsLatest productId=${req.params.id} snapshotId=${(latest as any)?.id ?? 'n/a'} rawVariants=${latestVariants.length} normalized=${normalized.length}`
+      `[API] 最新规格 productId=${req.params.id} snapshotId=${(latest as any)?.id ?? 'n/a'} 原始=${latestVariants.length} 规范化=${normalized.length}`
     );
 
     res.json({ success: true, data: normalized });
@@ -476,7 +476,7 @@ router.get('/products/:id/variants/:variantKey/history', async (req: Request, re
       .filter(Boolean);
 
     console.log(
-      `[API] variantHistory productId=${req.params.id} variantKey=${variantKey} days=${daysNum} snapshots=${snapshots.length} points=${points.length}`
+      `[API] 规格历史 productId=${req.params.id} variantKey=${variantKey} days=${daysNum} snapshots=${snapshots.length} points=${points.length}`
     );
 
     res.json({ success: true, data: points });
