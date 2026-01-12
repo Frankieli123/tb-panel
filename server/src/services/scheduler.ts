@@ -9,12 +9,14 @@ import { setHumanDelayScale } from './humanSimulator.js';
 import { notificationService } from './notification.js';
 import { randomDelay, sleep, calculatePriceDrop, encryptCookies } from '../utils/helpers.js';
 import { taskQueue, taskQueueConnection } from './taskQueue.js';
-import { setCartSkuStats } from './cartSkuStats.js';
+import { getCartSkuStats, setCartSkuStats } from './cartSkuStats.js';
 
 const prisma = new PrismaClient();
 
 const CART_BASE_SKU_ID = '__BASE__';
 const CART_ADD_JOB_NAMES = new Set(['cart-add', 'cart-batch-add']);
+const CART_SKU_SOFT_LIMIT = 280;
+const CART_SKU_HARD_LIMIT = 300;
 
 type CartAddQueueStats = {
   total: number;
@@ -132,6 +134,67 @@ class SchedulerService {
     const pauseMs = Math.min(baseMs * Math.pow(2, this.riskStreak - 1), maxMs);
     this.riskPauseUntilMs = nowMs + pauseMs;
     return pauseMs;
+  }
+
+  private async resolveAgentIdForAccount(account: { agentId: string | null; userId: string | null }): Promise<string | null> {
+    const boundAgentId = account.agentId ? String(account.agentId).trim() : '';
+    const userId = account.userId ? String(account.userId).trim() : null;
+
+    if (boundAgentId && agentHub.isConnected(boundAgentId) && agentHub.isOwnedBy(boundAgentId, userId)) {
+      return boundAgentId;
+    }
+
+    if (userId) {
+      const preferredAgentId =
+        (await (prisma as any).systemUser
+          .findUnique({
+            where: { id: userId },
+            select: { preferredAgentId: true },
+          })
+          .catch(() => null as any))?.preferredAgentId ?? null;
+
+      const preferred = preferredAgentId ? String(preferredAgentId).trim() : '';
+      if (preferred && agentHub.isConnected(preferred) && agentHub.isOwnedBy(preferred, userId)) {
+        return preferred;
+      }
+    }
+
+    const fallback =
+      agentHub.listConnectedAgents().find((a) => agentHub.isOwnedBy(a.agentId, userId))?.agentId ?? null;
+    return fallback ? String(fallback).trim() : null;
+  }
+
+  private pickAccountIdFromPool(accountIds: string[], preferredAccountId: string | null): string {
+    const ids = Array.from(new Set(accountIds.map((x) => String(x || '').trim()).filter(Boolean)));
+    if (ids.length === 0) {
+      throw new Error('No active account available');
+    }
+
+    const candidates = ids
+      .map((id) => {
+        const stats = getCartSkuStats(id);
+        const total = stats?.cartSkuTotal ?? null;
+        return { id, total };
+      })
+      .filter((c) => c.total === null || c.total < CART_SKU_HARD_LIMIT);
+
+    const preferred = preferredAccountId ? String(preferredAccountId).trim() : '';
+    if (preferred) {
+      const p = candidates.find((c) => c.id === preferred);
+      if (p && (p.total === null || p.total < CART_SKU_SOFT_LIMIT)) {
+        return preferred;
+      }
+    }
+
+    const known = candidates
+      .filter((c) => typeof c.total === 'number' && c.total < CART_SKU_SOFT_LIMIT)
+      .sort((a, b) => (a.total as number) - (b.total as number));
+    if (known.length > 0) return known[0].id;
+
+    const unknown = candidates.find((c) => c.total === null);
+    if (unknown) return unknown.id;
+
+    throw new Error(`No account available: cart SKU limit reached (>=${CART_SKU_SOFT_LIMIT})`);
   }
 
   async start(): Promise<void> {
@@ -260,6 +323,14 @@ class SchedulerService {
         const jobId = `cart_scrape_${account.id}`;
 
         try {
+          const existingJob = await taskQueue.getJob(jobId).catch(() => null);
+          if (existingJob) {
+            const state = await existingJob.getState().catch(() => null);
+            if (state && state !== 'completed' && state !== 'failed') {
+              continue;
+            }
+          }
+
           await taskQueue.add(
             'cart-scrape',
             {
@@ -382,14 +453,7 @@ class SchedulerService {
         throw new Error('Account not found');
       }
 
-      const preferredAgentId = !account.agentId && account.userId
-        ? (await (prisma as any).systemUser.findUnique({
-            where: { id: account.userId },
-            select: { preferredAgentId: true },
-          }))?.preferredAgentId ?? null
-        : null;
-
-      const agentIdToUse = account.agentId || preferredAgentId;
+      const agentIdToUse = await this.resolveAgentIdForAccount(account);
 
       const expectedTaobaoIds = await (async (): Promise<string[]> => {
         const rowsBase = await prisma.product.findMany({
@@ -517,12 +581,30 @@ class SchedulerService {
 
   private async processCartAddJob(job: Job): Promise<{ success: boolean; taobaoId: string; productId: string }> {
     const jobIdText = toJobIdText(job.id);
-    const accountId = String((job.data as any)?.accountId || '').trim();
+    const ownerUserIdRaw = (job.data as any)?.ownerUserId;
+    const ownerUserId = typeof ownerUserIdRaw === 'string' ? ownerUserIdRaw.trim() : null;
+    const useAccountPool = Boolean((job.data as any)?.useAccountPool);
+    const requestedAccountIdRaw = (job.data as any)?.accountId;
+    const requestedAccountId = typeof requestedAccountIdRaw === 'string' ? requestedAccountIdRaw.trim() : '';
     const taobaoId = String((job.data as any)?.taobaoId || '').trim();
     const url = String((job.data as any)?.url || '').trim();
 
-    if (!accountId || !taobaoId || !url) {
+    if (!taobaoId || !url || (!useAccountPool && !requestedAccountId)) {
       throw new Error('Invalid cart-add job payload');
+    }
+
+    let accountId = requestedAccountId;
+    if (useAccountPool) {
+      const poolAccounts = await prisma.taobaoAccount.findMany({
+        where: { isActive: true, ...(ownerUserId ? { userId: ownerUserId } : {}) },
+        select: { id: true },
+        orderBy: { createdAt: 'asc' },
+      });
+
+      accountId = this.pickAccountIdFromPool(
+        poolAccounts.map((a) => a.id),
+        requestedAccountId || null
+      );
     }
 
     const scraperConfig = await (prisma as any).scraperConfig.findFirst().catch(() => null as any);
@@ -544,39 +626,44 @@ class SchedulerService {
 
     const account = await prisma.taobaoAccount.findUnique({
       where: { id: accountId },
-      select: { id: true, cookies: true, agentId: true, userId: true, isActive: true },
+      select: { id: true, name: true, cookies: true, agentId: true, userId: true, isActive: true },
     });
 
     if (!account || !account.isActive) {
       throw new Error('Account not found or inactive');
     }
 
-    if (account.agentId && !agentHub.isConnected(account.agentId)) {
-      throw new Error(`Agent offline: ${account.agentId}`);
-    }
+    const agentIdToUse = await this.resolveAgentIdForAccount(account);
 
-    const preferredAgentId = account.userId
-      ? (await (prisma as any).systemUser.findUnique({
-          where: { id: account.userId },
-          select: { preferredAgentId: true },
-        }))?.preferredAgentId ?? null
-      : null;
+    const alreadyMonitoredBase =
+      (await prisma.product
+        .findFirst({
+          where: {
+            monitorMode: 'CART',
+            taobaoId,
+            skuId: CART_BASE_SKU_ID,
+            ...(ownerUserId ? { ownerAccount: { is: { userId: ownerUserId } } } : {}),
+          },
+          select: { id: true },
+        })
+        .catch(() => null as any)) ?? null;
 
-    const agentIdToUse =
-      account.agentId || (preferredAgentId && agentHub.isConnected(preferredAgentId) ? preferredAgentId : null);
-
-    const alreadyMonitored = await prisma.product
-      .findFirst({
-        where: account.userId
-          ? { monitorMode: 'CART', taobaoId, ownerAccount: { is: { userId: account.userId } } }
-          : { ownerAccountId: accountId, monitorMode: 'CART', taobaoId },
-        select: { id: true },
-      })
-      .catch(() => null as any);
+    const alreadyMonitored =
+      alreadyMonitoredBase ||
+      ((await prisma.product
+        .findFirst({
+          where: {
+            monitorMode: 'CART',
+            taobaoId,
+            ...(ownerUserId ? { ownerAccount: { is: { userId: ownerUserId } } } : {}),
+          },
+          select: { id: true },
+        })
+        .catch(() => null as any)) ?? null);
     if (alreadyMonitored?.id) {
       await job.updateProgress({ total: 0, current: 0, success: 0, failed: 0 });
       await job.log('该商品已在监控，已忽略（不重复加购）');
-      console.log(`[Scheduler] 加购任务已忽略（已在监控）jobId=${jobIdText} accountId=${accountId} taobaoId=${taobaoId}`);
+      console.log(`[Scheduler] 加购任务已忽略（已在监控）jobId=${jobIdText} taobaoId=${taobaoId}`);
       return { success: true, taobaoId, productId: String(alreadyMonitored.id) };
     }
 
@@ -661,6 +748,17 @@ class SchedulerService {
       `[Scheduler] 加购任务SKU完成 jobId=${jobIdText} taobaoId=${taobaoId} 成功=${result.successCount}/${result.totalSkus} 失败=${result.failedCount}`
     );
 
+    try {
+      const uiTotalCountRaw = (result as any)?.uiTotalCount;
+      const uiTotalCount =
+        typeof uiTotalCountRaw === 'number' && Number.isFinite(uiTotalCountRaw) ? uiTotalCountRaw : null;
+      if (uiTotalCount !== null) {
+        const prev = getCartSkuStats(accountId);
+        const loaded = prev?.cartSkuLoaded ?? 0;
+        setCartSkuStats(accountId, { cartSkuTotal: uiTotalCount, cartSkuLoaded: Math.min(loaded, uiTotalCount) });
+      }
+    } catch {}
+
     const existingBase = await prisma.product.findFirst({
       where: {
         taobaoId,
@@ -738,7 +836,7 @@ class SchedulerService {
         await job.log(msg);
         await prisma.product.update({
           where: { id: baseProduct.id },
-          data: { lastError: msg },
+          data: { lastCheckAt: new Date(), lastError: msg },
         });
       }
     }
@@ -812,12 +910,434 @@ class SchedulerService {
     return { success: true, taobaoId, productId: baseProduct.id };
   }
 
+  private async processCartBatchAddJobAccountPool(
+    job: Job,
+    params: {
+      batchJobIdText: string;
+      items: any[];
+      ownerUserId: string | null;
+      preferredAccountId: string | null;
+      humanDelayScale: number;
+      cartAddSkuDelayMinMs: number;
+      cartAddSkuDelayMaxMs: number;
+      cartAddProductDelayMinMs: number;
+      cartAddProductDelayMaxMs: number;
+    }
+  ): Promise<any> {
+    const {
+      batchJobIdText,
+      items,
+      ownerUserId,
+      preferredAccountId,
+      humanDelayScale,
+      cartAddSkuDelayMinMs,
+      cartAddSkuDelayMaxMs,
+      cartAddProductDelayMinMs,
+      cartAddProductDelayMaxMs,
+    } = params;
+
+    const poolAccounts = await prisma.taobaoAccount.findMany({
+      where: { isActive: true, ...(ownerUserId ? { userId: ownerUserId } : {}) },
+      select: { id: true, name: true, cookies: true, agentId: true, userId: true, isActive: true },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    if (poolAccounts.length === 0) {
+      throw new Error('No active account available');
+    }
+
+    const poolAccountIds = poolAccounts.map((a) => a.id);
+    const poolById = new Map(poolAccounts.map((a) => [a.id, a]));
+    const agentIdCache = new Map<string, string | null>();
+
+    const getAgentIdToUse = async (accountId: string): Promise<string | null> => {
+      const cached = agentIdCache.get(accountId);
+      if (cached !== undefined) return cached;
+
+      const account = poolById.get(accountId) ?? null;
+      const resolved = account ? await this.resolveAgentIdForAccount(account) : null;
+      agentIdCache.set(accountId, resolved);
+      return resolved;
+    };
+
+    const status: any = {
+      status: 'running',
+      progress: {
+        totalItems: items.length,
+        currentIndex: 0,
+        completedItems: 0,
+        successItems: 0,
+        failedItems: 0,
+      },
+      items: items.map((it) => ({
+        index: it.index,
+        url: it.url,
+        taobaoId: it.taobaoId,
+        status: 'pending',
+      })),
+      ownerUserId,
+    };
+
+    await job.updateProgress(status);
+    await job.log(`开始批量加购（账号池）${items.length} 个商品 delayScale=${humanDelayScale}`);
+    const batchQueueStats = await getCartAddQueueStats().catch(() => null as any);
+    console.log(
+      `[Scheduler] 批量加购（账号池）开始 batchJobId=${batchJobIdText} items=${items.length} accounts=${poolAccountIds.length}${
+        batchQueueStats ? ` ${formatCartAddQueueStats(batchQueueStats)}` : ''
+      }`
+    );
+
+    const batchTaobaoIds = items.map((it) => String(it?.taobaoId || '').trim()).filter(Boolean);
+    const monitoredRows = await prisma.product
+      .findMany({
+        where: {
+          monitorMode: 'CART',
+          taobaoId: { in: batchTaobaoIds },
+          ...(ownerUserId ? { ownerAccount: { is: { userId: ownerUserId } } } : {}),
+        },
+        select: { id: true, taobaoId: true, skuId: true },
+      })
+      .catch(() => [] as any[]);
+
+    const alreadyMonitoredByTaobaoId = new Map<string, string>();
+    for (const row of monitoredRows as any[]) {
+      const id = String(row?.id || '').trim();
+      const tid = String(row?.taobaoId || '').trim();
+      const skuId = String(row?.skuId || '').trim();
+      if (!id || !tid) continue;
+      if (!alreadyMonitoredByTaobaoId.has(tid) || skuId === CART_BASE_SKU_ID) {
+        alreadyMonitoredByTaobaoId.set(tid, id);
+      }
+    }
+
+    let performedAdd = 0;
+    let lastBatchUpdateAt = 0;
+
+    const flushBatchProgress = (force = false) => {
+      const now = Date.now();
+      if (!force && now - lastBatchUpdateAt < 250) return;
+      lastBatchUpdateAt = now;
+      void job.updateProgress(status).catch(() => {});
+    };
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      const itemStatus = status.items[i];
+      const itemTaobaoId = String(item?.taobaoId || '').trim();
+      status.progress.currentIndex = i;
+
+      const existingProductId = itemTaobaoId ? alreadyMonitoredByTaobaoId.get(itemTaobaoId) ?? null : null;
+      if (existingProductId) {
+        itemStatus.status = 'completed';
+        itemStatus.productId = existingProductId;
+        itemStatus.progress = { total: 0, current: 0, success: 0, failed: 0 };
+        status.progress.completedItems++;
+        status.progress.successItems++;
+        await job.log(`[${item.index}] 已在监控，已忽略`);
+        flushBatchProgress(true);
+        continue;
+      }
+
+      if (performedAdd > 0 && cartAddProductDelayMaxMs > 0) {
+        const scaledMin = Math.max(0, Math.floor(cartAddProductDelayMinMs * humanDelayScale));
+        const scaledMax = Math.max(scaledMin, Math.floor(cartAddProductDelayMaxMs * humanDelayScale));
+        const delay = randomDelay(scaledMin, scaledMax);
+        if (delay > 0) {
+          await job.log(`[${item.index}] 加购间隔等待 ${delay}ms`);
+          await sleep(delay);
+        }
+      }
+
+      const itemAccountId = this.pickAccountIdFromPool(poolAccountIds, preferredAccountId);
+      const account = poolById.get(itemAccountId) ?? null;
+      if (!account || !account.isActive) {
+        throw new Error(`Account not found or inactive: ${itemAccountId}`);
+      }
+
+      itemStatus.accountId = itemAccountId;
+      itemStatus.accountName = account.name || undefined;
+
+      const agentIdToUse = await getAgentIdToUse(itemAccountId);
+
+      itemStatus.status = 'running';
+      await job.log(`[${item.index}] 开始处理 accountId=${itemAccountId} taobaoId=${itemTaobaoId}`);
+      flushBatchProgress(true);
+
+      try {
+        setHumanDelayScale(humanDelayScale);
+        const itemIndex1 = i + 1;
+
+        let lastConsoleAt = 0;
+        let lastConsoleTotal = -1;
+        const logBatchSkuProgressToConsole = (progress: any) => {
+          const totalRaw = typeof progress?.total === 'number' ? progress.total : Number(progress?.total);
+          const currentRaw = typeof progress?.current === 'number' ? progress.current : Number(progress?.current);
+          const successRaw = typeof progress?.success === 'number' ? progress.success : Number(progress?.success);
+          const failedRaw = typeof progress?.failed === 'number' ? progress.failed : Number(progress?.failed);
+
+          const total = Number.isFinite(totalRaw) ? Math.max(0, Math.floor(totalRaw)) : 0;
+          const current = Number.isFinite(currentRaw) ? Math.max(0, Math.floor(currentRaw)) : 0;
+          const success = Number.isFinite(successRaw) ? Math.max(0, Math.floor(successRaw)) : 0;
+          const failed = Number.isFinite(failedRaw) ? Math.max(0, Math.floor(failedRaw)) : 0;
+          if (total <= 0) return;
+
+          const now = Date.now();
+          const shouldLog = total !== lastConsoleTotal || now - lastConsoleAt >= 2000 || current >= total;
+          if (!shouldLog) return;
+          lastConsoleAt = now;
+          lastConsoleTotal = total;
+          console.log(
+            `[Scheduler] 批量加购进度(batchJobId=${batchJobIdText}) 总体=${status.progress.completedItems}/${status.progress.totalItems} 当前=${itemIndex1}/${items.length} accountId=${itemAccountId} taobaoId=${itemTaobaoId} SKU=${current}/${total} 成功=${success} 失败=${failed}`
+          );
+        };
+
+        const onProgress = (progress: any, log?: string) => {
+          itemStatus.progress = progress;
+          flushBatchProgress();
+          if (log) void job.log(`[${item.index}] ${log}`).catch(() => {});
+          logBatchSkuProgressToConsole(progress);
+        };
+
+        const result = agentIdToUse
+          ? await agentHub.call<any>(
+              agentIdToUse,
+              'addAllSkusToCart',
+              {
+                accountId: itemAccountId,
+                taobaoId: item.taobaoId,
+                cookies: account.cookies,
+                delayScale: humanDelayScale,
+                skuDelayMinMs: cartAddSkuDelayMinMs,
+                skuDelayMaxMs: cartAddSkuDelayMaxMs,
+              },
+              { timeoutMs: 30 * 60 * 1000, onProgress }
+            )
+          : await autoCartAdder.addAllSkusToCart(itemAccountId, item.taobaoId, account.cookies, {
+              headless: false,
+              onProgress,
+              skuDelayMs: { min: cartAddSkuDelayMinMs, max: cartAddSkuDelayMaxMs },
+            });
+
+        performedAdd++;
+
+        try {
+          const uiTotalCountRaw = (result as any)?.uiTotalCount;
+          const uiTotalCount =
+            typeof uiTotalCountRaw === 'number' && Number.isFinite(uiTotalCountRaw) ? uiTotalCountRaw : null;
+          if (uiTotalCount !== null) {
+            const prev = getCartSkuStats(itemAccountId);
+            const loaded = prev?.cartSkuLoaded ?? 0;
+            setCartSkuStats(itemAccountId, { cartSkuTotal: uiTotalCount, cartSkuLoaded: Math.min(loaded, uiTotalCount) });
+          }
+        } catch {}
+
+        itemStatus.progress = {
+          total: result.totalSkus,
+          current: result.totalSkus,
+          success: result.successCount,
+          failed: result.failedCount,
+        };
+        flushBatchProgress(true);
+
+        await job.log(`[${item.index}] SKU处理完成: ${result.successCount}/${result.totalSkus}`);
+
+        const existingBase = await prisma.product.findFirst({
+          where: {
+            taobaoId: item.taobaoId,
+            skuId: CART_BASE_SKU_ID,
+            ownerAccountId: itemAccountId,
+          },
+          select: { id: true },
+        });
+
+        const baseProduct = existingBase
+          ? await prisma.product.update({
+              where: { id: existingBase.id },
+              data: {
+                monitorMode: 'CART',
+                ownerAccountId: itemAccountId,
+                url: item.url,
+                isActive: true,
+                lastError: null,
+              },
+            })
+          : await prisma.product.create({
+              data: {
+                taobaoId: item.taobaoId,
+                skuId: CART_BASE_SKU_ID,
+                monitorMode: 'CART',
+                ownerAccountId: itemAccountId,
+                url: item.url,
+                isActive: true,
+              },
+            });
+
+        itemStatus.productId = baseProduct.id;
+        alreadyMonitoredByTaobaoId.set(itemTaobaoId, baseProduct.id);
+
+        const successResults = (result.results || []).filter((r: any) => r && r.success);
+        const wantedNumericSkuIds = new Set(
+          successResults.map((r: any) => String(r.skuId || '').trim()).filter((id: string) => isDigits(id))
+        );
+
+        const metaBySkuId = new Map<string, any>();
+        const metaByProps = new Map<string, any>();
+        for (const r of successResults) {
+          metaBySkuId.set(String(r.skuId || '').trim(), r);
+          metaByProps.set(normalizeSkuProperties(r.skuProperties), r);
+        }
+
+        let matched: any[] = result.cartProducts || [];
+        if (matched.length === 0) {
+          await job.log(`[${item.index}] cartProducts 为空，尝试 scrapeCart...`);
+          let lastCartError: string | null = null;
+
+          for (let retry = 0; retry < 3; retry++) {
+            const cart = agentIdToUse && agentHub.isConnected(agentIdToUse)
+              ? await agentHub.call<any>(
+                  agentIdToUse,
+                  'scrapeCart',
+                  { accountId: itemAccountId, cookies: account.cookies, delayScale: humanDelayScale, expectedTaobaoIds: [item.taobaoId] },
+                  { timeoutMs: 120000 }
+                )
+              : await cartScraper.scrapeCart(itemAccountId, account.cookies, { expectedTaobaoIds: [item.taobaoId] });
+
+            if (!cart.success) {
+              lastCartError = cart.error || 'scrapeCart failed';
+            } else {
+              try {
+                const cartSkuLoaded = Array.isArray(cart.products) ? cart.products.length : 0;
+                const cartSkuTotalRaw = (cart as any)?.uiTotalCount;
+                const cartSkuTotal =
+                  typeof cartSkuTotalRaw === 'number' && Number.isFinite(cartSkuTotalRaw) ? cartSkuTotalRaw : null;
+                setCartSkuStats(itemAccountId, { cartSkuTotal, cartSkuLoaded });
+              } catch {}
+
+              let list = cart.products.filter((p: any) => String(p.taobaoId) === String(item.taobaoId));
+              if (wantedNumericSkuIds.size > 0) {
+                list = list.filter((p: any) => wantedNumericSkuIds.has(String(p.skuId)));
+              }
+              matched = list;
+              if (matched.length > 0) break;
+            }
+            await sleep(1500);
+          }
+
+          if (matched.length === 0) {
+            const missingMessage = `未能获取购物车价格/图片: ${lastCartError ?? 'unknown'}`;
+            await job.log(`[${item.index}] ${missingMessage}`);
+            await prisma.product
+              .update({
+                where: { id: baseProduct.id },
+                data: {
+                  lastCheckAt: new Date(),
+                  lastError: missingMessage,
+                },
+              })
+              .catch(() => {});
+          }
+        }
+
+        if (matched.length > 0) {
+          const variants = matched.map((c: any) => {
+            const skuId = String(c.skuId || '').trim();
+            const props = normalizeSkuProperties(c.skuProperties);
+            const meta = metaBySkuId.get(skuId) || metaByProps.get(props) || null;
+            const selections = Array.isArray(meta?.selections) ? meta.selections : [];
+            const vidPath = selections.map((s: any) => s?.vid).filter(Boolean).map((x: any) => String(x)).join(';');
+
+            return {
+              skuId: skuId || null,
+              skuProperties: meta?.skuProperties ?? c.skuProperties ?? null,
+              vidPath,
+              selections,
+              finalPrice: typeof c.finalPrice === 'number' ? c.finalPrice : null,
+              originalPrice: typeof c.originalPrice === 'number' ? c.originalPrice : null,
+              thumbnailUrl: c.imageUrl || meta?.thumbnailUrl || null,
+            };
+          });
+
+          const prices = variants.map((v: any) => v.finalPrice).filter((n: any) => typeof n === 'number' && n > 0);
+          const minPrice = prices.length > 0 ? Math.min(...prices) : 0;
+          const origs = variants.map((v: any) => v.originalPrice).filter((n: any) => typeof n === 'number' && n > 0);
+          const minOrig = origs.length > 0 ? Math.min(...origs) : null;
+          const first = matched[0];
+
+          await prisma.product.update({
+            where: { id: baseProduct.id },
+            data: {
+              title: first?.title || undefined,
+              imageUrl: first?.imageUrl || undefined,
+              currentPrice: minPrice,
+              originalPrice: minOrig ?? undefined,
+              lastCheckAt: new Date(),
+              lastError: null,
+            },
+          });
+
+          await prisma.priceSnapshot.create({
+            data: {
+              productId: baseProduct.id,
+              finalPrice: minPrice,
+              originalPrice: minOrig,
+              accountId: itemAccountId,
+              rawData: { taobaoId: item.taobaoId, source: 'cart_initial', variants } as any,
+            },
+          });
+
+          await job.log(`[${item.index}] 已写入SKU快照: ${variants.length} 个SKU`);
+
+          await prisma.product
+            .updateMany({
+              where: {
+                ownerAccountId: itemAccountId,
+                monitorMode: 'CART',
+                taobaoId: item.taobaoId,
+                NOT: { skuId: CART_BASE_SKU_ID },
+              },
+              data: { isActive: false },
+            })
+            .catch(() => {});
+        }
+
+        itemStatus.status = 'completed';
+        status.progress.completedItems++;
+        status.progress.successItems++;
+        flushBatchProgress(true);
+        await job.log(`[${item.index}] 完成`);
+      } catch (error: any) {
+        itemStatus.status = 'failed';
+        itemStatus.error = error?.message ? String(error.message) : String(error);
+        status.progress.completedItems++;
+        status.progress.failedItems++;
+        flushBatchProgress(true);
+        await job.log(`[${item.index}] 错误: ${itemStatus.error}`);
+        console.error(`[BatchCartAPI] 商品 ${String(item.taobaoId)} 失败:`, error?.stack || error);
+      }
+    }
+
+    const hasFailures = status.progress.failedItems > 0;
+    const hasSuccess = status.progress.successItems > 0;
+    status.status = hasFailures && hasSuccess ? 'partial' : hasFailures ? 'failed' : 'completed';
+
+    await job.updateProgress(status);
+    await job.log(`批量加购完成: ${status.progress.successItems}/${status.progress.totalItems} 成功`);
+    console.log(
+      `[Scheduler] 批量加购（账号池）完成 batchJobId=${batchJobIdText} 成功=${status.progress.successItems}/${status.progress.totalItems} 失败=${status.progress.failedItems}`
+    );
+    return status;
+  }
+
   private async processCartBatchAddJob(job: Job): Promise<any> {
     const batchJobIdText = toJobIdText(job.id);
-    const accountId = String((job.data as any)?.accountId || '').trim();
+    const ownerUserIdRaw = (job.data as any)?.ownerUserId;
+    const ownerUserId = typeof ownerUserIdRaw === 'string' ? ownerUserIdRaw.trim() : null;
+    const useAccountPool = Boolean((job.data as any)?.useAccountPool);
+    const requestedAccountIdRaw = (job.data as any)?.accountId;
+    const requestedAccountId = typeof requestedAccountIdRaw === 'string' ? requestedAccountIdRaw.trim() : '';
     const items = Array.isArray((job.data as any)?.items) ? ((job.data as any).items as any[]) : [];
 
-    if (!accountId || items.length === 0) {
+    if (items.length === 0 || (!useAccountPool && !requestedAccountId)) {
       throw new Error('Invalid cart-batch-add job payload');
     }
 
@@ -845,28 +1365,31 @@ class SchedulerService {
       ? Math.max(cartAddProductDelayMinMs, Math.floor(cartAddProductDelayMaxMsRaw))
       : cartAddProductDelayMinMs;
 
+    if (useAccountPool) {
+      return this.processCartBatchAddJobAccountPool(job, {
+        batchJobIdText,
+        items,
+        ownerUserId,
+        preferredAccountId: requestedAccountId || null,
+        humanDelayScale,
+        cartAddSkuDelayMinMs,
+        cartAddSkuDelayMaxMs,
+        cartAddProductDelayMinMs,
+        cartAddProductDelayMaxMs,
+      });
+    }
+
+    const accountId = requestedAccountId;
     const account = await prisma.taobaoAccount.findUnique({
       where: { id: accountId },
-      select: { id: true, cookies: true, agentId: true, userId: true, isActive: true },
+      select: { id: true, name: true, cookies: true, agentId: true, userId: true, isActive: true },
     });
 
     if (!account || !account.isActive) {
       throw new Error('Account not found or inactive');
     }
 
-    if (account.agentId && !agentHub.isConnected(account.agentId)) {
-      throw new Error(`Agent offline: ${account.agentId}`);
-    }
-
-    const preferredAgentId = account.userId
-      ? (await (prisma as any).systemUser.findUnique({
-          where: { id: account.userId },
-          select: { preferredAgentId: true },
-        }))?.preferredAgentId ?? null
-      : null;
-
-    const agentIdToUse =
-      account.agentId || (preferredAgentId && agentHub.isConnected(preferredAgentId) ? preferredAgentId : null);
+    const agentIdToUse = await this.resolveAgentIdForAccount(account);
 
     const status: any = {
       status: 'running',
@@ -903,9 +1426,7 @@ class SchedulerService {
         where: {
           monitorMode: 'CART',
           taobaoId: { in: batchTaobaoIds },
-          ...(account.userId
-            ? { ownerAccount: { is: { userId: account.userId } } }
-            : { ownerAccountId: accountId }),
+          ...(ownerUserId ? { ownerAccount: { is: { userId: ownerUserId } } } : {}),
         },
         select: { id: true, taobaoId: true, skuId: true },
       })
@@ -1029,6 +1550,17 @@ class SchedulerService {
             });
         performedAgentAdd++;
 
+        try {
+          const uiTotalCountRaw = (result as any)?.uiTotalCount;
+          const uiTotalCount =
+            typeof uiTotalCountRaw === 'number' && Number.isFinite(uiTotalCountRaw) ? uiTotalCountRaw : null;
+          if (uiTotalCount !== null) {
+            const prev = getCartSkuStats(accountId);
+            const loaded = prev?.cartSkuLoaded ?? 0;
+            setCartSkuStats(accountId, { cartSkuTotal: uiTotalCount, cartSkuLoaded: Math.min(loaded, uiTotalCount) });
+          }
+        } catch {}
+
         itemStatus.progress = {
           total: result.totalSkus,
           current: result.totalSkus,
@@ -1110,7 +1642,17 @@ class SchedulerService {
           }
 
           if (matched.length === 0) {
-            await job.log(`[${item.index}] 未能获取购物车价格/图片: ${lastCartError ?? 'unknown'}`);
+            const missingMessage = `未能获取购物车价格/图片: ${lastCartError ?? 'unknown'}`;
+            await job.log(`[${item.index}] ${missingMessage}`);
+            await prisma.product
+              .update({
+                where: { id: baseProduct.id },
+                data: {
+                  lastCheckAt: new Date(),
+                  lastError: missingMessage,
+                },
+              })
+              .catch(() => {});
           }
         }
 

@@ -1,4 +1,4 @@
-import { Page, BrowserContext, Browser } from 'playwright';
+import { Page, BrowserContext, Browser, Frame } from 'playwright';
 import { SkuParser, SkuCombination } from './skuParser.js';
 import { HumanSimulator, randomDelay, randomRange } from './humanSimulator.js';
 import { sharedBrowserManager } from './sharedBrowserManager.js';
@@ -563,19 +563,114 @@ export class AutoCartAdder {
     return /login\.taobao\.com|login\.tmall\.com|passport\.taobao\.com|sec\.taobao\.com|captcha|verify|risk/i.test(url);
   }
 
+  private async tryQuickLogin(stage: string): Promise<boolean> {
+    const beforeUrl = this.page.url();
+    if (!/login\.taobao\.com|login\.tmall\.com|passport\.taobao\.com/i.test(beforeUrl)) return false;
+    if (/captcha|verify|risk|sec\.taobao\.com/i.test(beforeUrl)) return false;
+
+    const isHavanaOneClick = /\/havanaone\/login\/login\.htm/i.test(beforeUrl);
+    console.log(`[AutoCart] 检测到登录页，尝试快速登录 stage=${stage} url=${beforeUrl}`);
+
+    const frames = this.page.frames();
+    const primaryKeywords = ['快速登录', '一键登录', '快捷登录', '免密登录'];
+    const fallbackKeywords = isHavanaOneClick ? ['确认登录', '立即登录', '登录'] : ['确认登录', '立即登录'];
+    const blacklistKeywords = ['扫码', '密码', '短信', '注册', '切换'];
+    const keywords = [...primaryKeywords, ...fallbackKeywords];
+
+    let clicked = false;
+    for (const frame of frames) {
+      const ok = await this.clickKeywordButtonInFrame(frame, keywords, blacklistKeywords).catch(() => false);
+      if (ok) {
+        clicked = true;
+        break;
+      }
+    }
+
+    if (!clicked) return false;
+
+    const timeoutMs = 20000;
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      const url = this.page.url();
+      if (!this.isAuthOrChallengeUrl(url)) {
+        console.log(`[AutoCart] 快速登录成功 stage=${stage} url=${url}`);
+        return true;
+      }
+      await this.page.waitForTimeout(500).catch(() => {});
+    }
+
+    return !this.isAuthOrChallengeUrl(this.page.url());
+  }
+
+  private async clickKeywordButtonInFrame(
+    frame: Frame,
+    keywords: string[],
+    blacklistKeywords: string[]
+  ): Promise<boolean> {
+    return frame
+      .evaluate(
+        ({ keywords, blacklistKeywords }) => {
+          const visible = (el: Element): boolean => {
+            const node = el as HTMLElement;
+            const style = window.getComputedStyle(node);
+            if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+            const rect = node.getBoundingClientRect();
+            if (rect.width < 16 || rect.height < 10) return false;
+            return true;
+          };
+
+          const textOf = (el: Element): string => {
+            const node = el as any;
+            return String(node?.innerText || node?.textContent || node?.value || '').trim();
+          };
+
+          const isBlacklisted = (text: string): boolean =>
+            blacklistKeywords.some((k) => k && text.includes(k));
+
+          const candidates = Array.from(
+            document.querySelectorAll('button, a, [role=\"button\"], input[type=\"button\"], input[type=\"submit\"]')
+          );
+
+          for (const key of keywords) {
+            if (!key) continue;
+            for (const el of candidates) {
+              if (!visible(el)) continue;
+              const text = textOf(el);
+              if (!text || isBlacklisted(text)) continue;
+              if (!text.includes(key)) continue;
+              try {
+                (el as HTMLElement).click();
+                return true;
+              } catch {}
+            }
+          }
+
+          return false;
+        },
+        { keywords, blacklistKeywords }
+      )
+      .catch(() => false);
+  }
+
   private async assertNotAuthPage(stage: string): Promise<void> {
     const url = this.page.url();
     if (this.isAuthOrChallengeUrl(url)) {
+      const bypassed = await this.tryQuickLogin(stage).catch(() => false);
+      if (bypassed) return;
       throw new Error(`需要登录/验证码（${stage}）：${url}`);
     }
 
     const title = await this.page.title().catch(() => '');
     if (/登录|Login|安全验证|验证码/.test(title) && /taobao|tmall|alibaba/i.test(url)) {
+      const bypassed = await this.tryQuickLogin(stage).catch(() => false);
+      if (bypassed) return;
       throw new Error(`需要登录/验证码（${stage}）：${url}`);
     }
 
     const bodyText = await this.page.locator('body').innerText({ timeout: 1500 }).catch(() => '');
     if (/(扫码登录|密码登录|短信登录|安全验证|验证码|滑块|请先登录)/.test(bodyText)) {
+      const bypassed = await this.tryQuickLogin(stage).catch(() => false);
+      if (bypassed) return;
       throw new Error(`需要登录/验证码（${stage}）：${url}`);
     }
   }
@@ -929,6 +1024,21 @@ export class AutoCartAdder {
         await this.closeFeatureTips().catch(() => {});
         await this.waitForOverlaysCleared().catch(() => {});
 
+        const uiTotalCount = await this.page
+          .evaluate(() => {
+            const header = document.querySelector('.trade-cart-header-container') as HTMLElement | null;
+            const text = (header?.innerText || header?.textContent || '').trim();
+            if (!text) return null;
+
+            const re = new RegExp('\u5168\u90e8\u5546\u54c1\\s*[\\(\uff08]\\s*(\\d{1,6})\\s*[\\)\uff09]');
+            const m = re.exec(text);
+            if (!m) return null;
+
+            const n = parseInt(m[1], 10);
+            return Number.isFinite(n) && n >= 0 ? n : null;
+          })
+          .catch(() => null);
+
         // 直接在当前页面抓取购物车数据
         console.log('[AutoCart] 从当前页面提取购物车数据...');
         const cartProducts = await this.extractCartDataFromCurrentPage(taobaoId);
@@ -942,6 +1052,7 @@ export class AutoCartAdder {
           results,
           duration,
           cartProducts, // 直接返回购物车数据，避免再次调用 scrapeCart
+          uiTotalCount,
         };
       } finally {
         markAddEnd(accountId);

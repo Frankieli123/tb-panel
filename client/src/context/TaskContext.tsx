@@ -94,6 +94,16 @@ export function TaskProvider({ children }: { children: ReactNode }) {
       try {
         const status = await api.getBatchAddProgress(batchJobId);
 
+        const aggregatedLogs = status.items
+          .flatMap((item, orderIndex) =>
+            item.logs.map((line) => {
+              const prefix = `[${orderIndex + 1}/${status.items.length}]`;
+              const id = item.taobaoId ? ` [${item.taobaoId}]` : '';
+              return `${prefix}${id} ${line}`;
+            })
+          )
+          .slice(-200);
+
         setTasks((prev) =>
           prev.map((t) =>
             t.jobId === batchJobId
@@ -106,6 +116,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
                     success: status.progress.successItems,
                     failed: status.progress.failedItems,
                   },
+                  logs: aggregatedLogs,
                   isBatch: true,
                   batchItems: status.items.map((item) => ({
                     taobaoId: item.taobaoId,

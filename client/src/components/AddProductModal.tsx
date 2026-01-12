@@ -16,7 +16,7 @@ export default function AddProductModal({ isOpen, onClose, onSuccess, onTaskStar
   const [error, setError] = useState('');
 
   const [accounts, setAccounts] = useState<TaobaoAccount[]>([]);
-  const [selectedAccountId, setSelectedAccountId] = useState('');
+  const [selectedAccountId, setSelectedAccountId] = useState('auto');
 
   useEffect(() => {
     if (!isOpen) return;
@@ -28,10 +28,6 @@ export default function AddProductModal({ isOpen, onClose, onSuccess, onTaskStar
       const list = await api.getAccounts();
       const activeAccounts = list.filter((a) => a.isActive);
       setAccounts(activeAccounts);
-
-      if (activeAccounts.length > 0 && !selectedAccountId) {
-        setSelectedAccountId(activeAccounts[0].id);
-      }
     } catch (err) {
       console.error('Failed to load accounts', err);
     }
@@ -44,6 +40,11 @@ export default function AddProductModal({ isOpen, onClose, onSuccess, onTaskStar
 
     if (!url.trim()) return;
 
+    if (accounts.length === 0) {
+      setError('没有可用账号，无法添加任务');
+      return;
+    }
+
     if (!selectedAccountId) {
       setError('请选择一个账号');
       return;
@@ -54,7 +55,10 @@ export default function AddProductModal({ isOpen, onClose, onSuccess, onTaskStar
 
     try {
       // 购物车模式：启动后台任务并立即关闭弹窗
-      const { jobId } = await api.addCartModeProduct(url.trim(), selectedAccountId);
+      const { jobId } =
+        selectedAccountId === 'auto'
+          ? await api.addCartModeProduct(url.trim(), undefined, true)
+          : await api.addCartModeProduct(url.trim(), selectedAccountId);
 
       // 通知 Dashboard 开始监控此任务
       if (onTaskStart) {
@@ -118,6 +122,7 @@ export default function AddProductModal({ isOpen, onClose, onSuccess, onTaskStar
               disabled={loading}
             >
               <option value="">请选择账号...</option>
+              <option value="auto">自动分配（账号池）</option>
               {accounts.map((acc) => (
                 <option key={acc.id} value={acc.id}>
                   {acc.name} ({acc.status})
@@ -144,7 +149,7 @@ export default function AddProductModal({ isOpen, onClose, onSuccess, onTaskStar
             </button>
             <button
               type="submit"
-              disabled={loading || !url.trim() || !selectedAccountId}
+              disabled={loading || !url.trim() || !selectedAccountId || accounts.length === 0}
               className="flex-1 flex justify-center items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-white bg-gray-900 hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
             >
               {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : '开始监控'}

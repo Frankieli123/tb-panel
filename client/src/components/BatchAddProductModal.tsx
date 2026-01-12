@@ -24,7 +24,7 @@ export default function BatchAddProductModal({ isOpen, onClose, onSuccess, onTas
   const [error, setError] = useState('');
 
   const [accounts, setAccounts] = useState<TaobaoAccount[]>([]);
-  const [selectedAccountId, setSelectedAccountId] = useState('');
+  const [selectedAccountId, setSelectedAccountId] = useState('auto');
 
   useEffect(() => {
     if (!isOpen) return;
@@ -38,10 +38,6 @@ export default function BatchAddProductModal({ isOpen, onClose, onSuccess, onTas
       const list = await api.getAccounts();
       const activeAccounts = list.filter((a) => a.isActive);
       setAccounts(activeAccounts);
-
-      if (activeAccounts.length > 0 && !selectedAccountId) {
-        setSelectedAccountId(activeAccounts[0].id);
-      }
     } catch (err) {
       console.error('Failed to load accounts', err);
     }
@@ -99,6 +95,11 @@ export default function BatchAddProductModal({ isOpen, onClose, onSuccess, onTas
       return;
     }
 
+    if (accounts.length === 0) {
+      setError('没有可用账号，无法添加任务');
+      return;
+    }
+
     if (!selectedAccountId) {
       setError('请选择一个账号');
       return;
@@ -108,7 +109,10 @@ export default function BatchAddProductModal({ isOpen, onClose, onSuccess, onTas
     setError('');
 
     try {
-      const { batchJobId, accepted } = await api.addBatchCartModeProducts(validUrls, selectedAccountId);
+      const { batchJobId, accepted } =
+        selectedAccountId === 'auto'
+          ? await api.addBatchCartModeProducts(validUrls, undefined, true)
+          : await api.addBatchCartModeProducts(validUrls, selectedAccountId);
 
       if (onTaskStart) {
         const title = `批量添加: ${accepted} 个商品`;
@@ -226,6 +230,7 @@ export default function BatchAddProductModal({ isOpen, onClose, onSuccess, onTas
               disabled={loading}
             >
               <option value="">请选择账号...</option>
+              <option value="auto">自动分配（账号池）</option>
               {accounts.map((acc) => (
                 <option key={acc.id} value={acc.id}>
                   {acc.name} ({acc.status})
@@ -257,7 +262,7 @@ export default function BatchAddProductModal({ isOpen, onClose, onSuccess, onTas
           <button
             type="submit"
             onClick={handleSubmit}
-            disabled={loading || stats.valid === 0 || !selectedAccountId}
+            disabled={loading || stats.valid === 0 || !selectedAccountId || accounts.length === 0}
             className="flex-1 flex justify-center items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-white bg-gray-900 hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
           >
             {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : `添加 ${stats.valid} 个商品`}

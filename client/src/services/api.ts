@@ -111,18 +111,18 @@ export const api = {
   // 商品
   getProducts: () => request<Product[]>('/products'),
 
-  addCartModeProduct: (url: string, accountId: string) =>
+  addCartModeProduct: (url: string, accountId?: string, useAccountPool?: boolean) =>
     request<{ jobId: string }>('/products/add-cart-mode', {
       method: 'POST',
       headers: csrfToken ? { 'x-csrf-token': csrfToken } : undefined,
-      body: JSON.stringify({ url, accountId }),
+      body: JSON.stringify(useAccountPool ? { url, useAccountPool: true } : { url, accountId }),
     }),
 
-  addBatchCartModeProducts: (urls: string[], accountId: string) =>
+  addBatchCartModeProducts: (urls: string[], accountId?: string, useAccountPool?: boolean) =>
     request<{ batchJobId: string; accepted: number; rejected: number }>('/products/batch-add-cart-mode', {
       method: 'POST',
       headers: csrfToken ? { 'x-csrf-token': csrfToken } : undefined,
-      body: JSON.stringify({ urls, accountId }),
+      body: JSON.stringify(useAccountPool ? { urls, useAccountPool: true } : { urls, accountId }),
     }),
 
   getBatchAddProgress: (batchJobId: string) =>

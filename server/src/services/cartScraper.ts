@@ -1,4 +1,4 @@
-import { Page } from 'playwright';
+import { Page, Frame } from 'playwright';
 import { PrismaClient } from '@prisma/client';
 import { sharedBrowserManager } from './sharedBrowserManager.js';
 import { HumanSimulator, randomDelay, randomRange } from './humanSimulator.js';
@@ -171,14 +171,107 @@ export class CartScraper {
     return /login\.taobao\.com|login\.tmall\.com|passport\.taobao\.com|sec\.taobao\.com|captcha|verify|risk/i.test(url);
   }
 
+  private async tryQuickLogin(page: Page, stage: string): Promise<boolean> {
+    const beforeUrl = page.url();
+    if (!/login\.taobao\.com|login\.tmall\.com|passport\.taobao\.com/i.test(beforeUrl)) return false;
+    if (/captcha|verify|risk|sec\.taobao\.com/i.test(beforeUrl)) return false;
+
+    const isHavanaOneClick = /\/havanaone\/login\/login\.htm/i.test(beforeUrl);
+    console.log(`[CartScraper] 检测到登录页，尝试快速登录 stage=${stage} url=${beforeUrl}`);
+
+    const frames = page.frames();
+    const primaryKeywords = ['快速登录', '一键登录', '快捷登录', '免密登录'];
+    const fallbackKeywords = isHavanaOneClick ? ['确认登录', '立即登录', '登录'] : ['确认登录', '立即登录'];
+    const blacklistKeywords = ['扫码', '密码', '短信', '注册', '切换'];
+    const keywords = [...primaryKeywords, ...fallbackKeywords];
+
+    let clicked = false;
+    for (const frame of frames) {
+      const ok = await this.clickKeywordButtonInFrame(frame, keywords, blacklistKeywords).catch(() => false);
+      if (ok) {
+        clicked = true;
+        break;
+      }
+    }
+
+    if (!clicked) return false;
+
+    const timeoutMs = 20000;
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      const url = page.url();
+      if (!this.isAuthOrChallengeUrl(url)) {
+        console.log(`[CartScraper] 快速登录成功 stage=${stage} url=${url}`);
+        return true;
+      }
+      await page.waitForTimeout(500).catch(() => {});
+    }
+
+    return !this.isAuthOrChallengeUrl(page.url());
+  }
+
+  private async clickKeywordButtonInFrame(
+    frame: Frame,
+    keywords: string[],
+    blacklistKeywords: string[]
+  ): Promise<boolean> {
+    return frame
+      .evaluate(
+        ({ keywords, blacklistKeywords }) => {
+          const visible = (el: Element): boolean => {
+            const node = el as HTMLElement;
+            const style = window.getComputedStyle(node);
+            if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+            const rect = node.getBoundingClientRect();
+            if (rect.width < 16 || rect.height < 10) return false;
+            return true;
+          };
+
+          const textOf = (el: Element): string => {
+            const node = el as any;
+            return String(node?.innerText || node?.textContent || node?.value || '').trim();
+          };
+
+          const isBlacklisted = (text: string): boolean =>
+            blacklistKeywords.some((k) => k && text.includes(k));
+
+          const candidates = Array.from(
+            document.querySelectorAll('button, a, [role=\"button\"], input[type=\"button\"], input[type=\"submit\"]')
+          );
+
+          for (const key of keywords) {
+            if (!key) continue;
+            for (const el of candidates) {
+              if (!visible(el)) continue;
+              const text = textOf(el);
+              if (!text || isBlacklisted(text)) continue;
+              if (!text.includes(key)) continue;
+              try {
+                (el as HTMLElement).click();
+                return true;
+              } catch {}
+            }
+          }
+
+          return false;
+        },
+        { keywords, blacklistKeywords }
+      )
+      .catch(() => false);
+  }
+
   private async assertNotAuthPage(page: Page, stage: string): Promise<void> {
     const url = page.url();
     if (this.isAuthOrChallengeUrl(url)) {
+      const bypassed = await this.tryQuickLogin(page, stage).catch(() => false);
+      if (bypassed) return;
       throw new Error(`需要登录/验证（${stage}）：${url}`);
     }
 
     const title = await page.title().catch(() => '');
     if (/(\u767b\u5f55|Login|\u5b89\u5168\u9a8c\u8bc1|\u9a8c\u8bc1\u7801)/.test(title) && /taobao|tmall|alibaba/i.test(url)) {
+      const bypassed = await this.tryQuickLogin(page, stage).catch(() => false);
+      if (bypassed) return;
       throw new Error(`需要登录/验证（${stage}）：${url}`);
     }
 
@@ -188,6 +281,8 @@ export class CartScraper {
         bodyText
       )
     ) {
+      const bypassed = await this.tryQuickLogin(page, stage).catch(() => false);
+      if (bypassed) return;
       throw new Error(`需要登录/验证（${stage}）：${url}`);
     }
   }
@@ -816,17 +911,6 @@ export class CartScraper {
   }
 
   private async ensureBaseProducts(accountId: string): Promise<void> {
-    const baseCount = await prisma.product.count({
-      where: {
-        ownerAccountId: accountId,
-        monitorMode: 'CART',
-        skuId: CART_BASE_SKU_ID,
-        isActive: true
-      }
-    });
-
-    if (baseCount > 0) return;
-
     const legacy = await prisma.product.findMany({
       where: {
         ownerAccountId: accountId,
@@ -838,6 +922,27 @@ export class CartScraper {
     });
 
     if (legacy.length === 0) return;
+
+    const taobaoIds = Array.from(new Set(legacy.map((p) => String(p.taobaoId || '').trim()).filter(Boolean)));
+    const baseRows = taobaoIds.length
+      ? await prisma.product.findMany({
+          where: {
+            ownerAccountId: accountId,
+            monitorMode: 'CART',
+            skuId: CART_BASE_SKU_ID,
+            taobaoId: { in: taobaoIds },
+          },
+          select: { id: true, taobaoId: true, isActive: true },
+        })
+      : [];
+
+    const baseByTaobaoId = new Map<string, { id: string; isActive: boolean }>();
+    for (const b of baseRows as any[]) {
+      const tid = String(b?.taobaoId || '').trim();
+      const id = String(b?.id || '').trim();
+      if (!tid || !id) continue;
+      baseByTaobaoId.set(tid, { id, isActive: Boolean(b?.isActive) });
+    }
 
     const groups = new Map<string, typeof legacy>();
     for (const p of legacy) {
@@ -858,15 +963,7 @@ export class CartScraper {
         .filter((n): n is number => typeof n === 'number' && Number.isFinite(n) && n > 0);
       const minOrig = origs.length > 0 ? Math.min(...origs) : null;
 
-      // Avoid depending on Prisma composite-unique "where field name" (can differ across histories).
-      const existingBase = await prisma.product.findFirst({
-        where: {
-          taobaoId,
-          skuId: CART_BASE_SKU_ID,
-          ownerAccountId: accountId,
-        },
-        select: { id: true },
-      });
+      const existingBase = baseByTaobaoId.get(taobaoId) ?? null;
 
       const base = existingBase
         ? await prisma.product.update({

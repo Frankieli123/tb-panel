@@ -156,7 +156,7 @@ export default function TaskProgressPanel({ tasks, onDismiss }: TaskProgressPane
                       </div>
 
                       <div className="flex items-center gap-2">
-                        {(task.status === 'completed' || task.status === 'failed') && (
+                        {(task.status === 'completed' || task.status === 'failed' || task.status === 'partial') && (
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
@@ -197,7 +197,7 @@ export default function TaskProgressPanel({ tasks, onDismiss }: TaskProgressPane
                     </div>
 
                     {/* 最新日志 - 批量任务只显示简洁进度，非批量任务显示日志 */}
-                    {!task.isBatch && task.logs.length > 0 && (
+                    {task.logs.length > 0 && (
                       <p className="text-xs text-gray-600 mt-2 truncate">
                         {task.logs[task.logs.length - 1]}
                       </p>
@@ -233,7 +233,7 @@ export default function TaskProgressPanel({ tasks, onDismiss }: TaskProgressPane
                           ))}
                         </div>
                       </div>
-                      {task.status === 'completed' && (
+                      {(task.status === 'completed' || task.status === 'partial') && (
                         <div className="mt-2 text-xs text-gray-500 flex items-center gap-4">
                           <span className="text-green-600 font-medium">
                             成功: {task.progress.success}

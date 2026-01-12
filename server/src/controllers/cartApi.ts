@@ -1,7 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { z } from 'zod';
-import { agentHub } from '../services/agentHub.js';
 import { taskQueue, taskQueueEvents } from '../services/taskQueue.js';
 import { extractTaobaoId } from '../utils/helpers.js';
 import { systemAuth, requireCsrf } from '../middlewares/systemAuth.js';
@@ -17,12 +16,14 @@ const CART_BASE_SKU_ID = '__BASE__';
 
 const addCartModeProductSchema = z.object({
   url: z.string().min(1),
-  accountId: z.string().uuid(),
+  accountId: z.string().uuid().optional(),
+  useAccountPool: z.boolean().optional(),
 });
 
 const batchAddCartModeSchema = z.object({
   urls: z.array(z.string().min(1)).min(1).max(100),
-  accountId: z.string().uuid(),
+  accountId: z.string().uuid().optional(),
+  useAccountPool: z.boolean().optional(),
 });
 
 type AddProgressStatus = 'pending' | 'running' | 'completed' | 'failed';
@@ -78,24 +79,30 @@ function groupItemLogs(lines: string[]): Map<number, string[]> {
 
 router.post('/products/add-cart-mode', async (req: Request, res: Response) => {
   try {
-    const { url, accountId } = addCartModeProductSchema.parse(req.body);
+    const { url, accountId, useAccountPool } = addCartModeProductSchema.parse(req.body);
+    const resolvedUseAccountPool = Boolean(useAccountPool) || !accountId;
 
     const taobaoId = extractTaobaoId(url);
     if (!taobaoId) {
       return res.status(400).json({ success: false, error: 'Invalid Taobao URL' });
     }
 
-    const account = await prisma.taobaoAccount.findFirst({
-      where: { id: accountId, isActive: true, ...buildVisibleAccountsWhere(req) },
-      select: { id: true, agentId: true },
-    });
+    if (!resolvedUseAccountPool) {
+      const account = await prisma.taobaoAccount.findFirst({
+        where: { id: accountId, isActive: true, ...buildVisibleAccountsWhere(req) },
+        select: { id: true },
+      });
 
-    if (!account) {
-      return res.status(404).json({ success: false, error: 'Account not found or inactive' });
-    }
-
-    if (account.agentId && !agentHub.isConnected(account.agentId)) {
-      return res.status(409).json({ success: false, error: `Agent offline: ${account.agentId}` });
+      if (!account) {
+        return res.status(404).json({ success: false, error: 'Account not found or inactive' });
+      }
+    } else {
+      const activeCount = await prisma.taobaoAccount.count({
+        where: { isActive: true, ...buildVisibleAccountsWhere(req) },
+      });
+      if (activeCount <= 0) {
+        return res.status(404).json({ success: false, error: 'No active account available' });
+      }
     }
 
     const jobId = `cart_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
@@ -104,7 +111,13 @@ router.post('/products/add-cart-mode', async (req: Request, res: Response) => {
 
     await taskQueue.add(
       'cart-add',
-      { accountId, taobaoId, url, ownerUserId },
+      {
+        accountId: resolvedUseAccountPool ? null : (accountId ?? null),
+        useAccountPool: resolvedUseAccountPool,
+        taobaoId,
+        url,
+        ownerUserId,
+      },
       {
         jobId,
         priority: 10,
@@ -165,19 +178,25 @@ router.get('/products/add-progress/:jobId', async (req: Request, res: Response) 
 
 router.post('/products/batch-add-cart-mode', async (req: Request, res: Response) => {
   try {
-    const { urls, accountId } = batchAddCartModeSchema.parse(req.body);
+    const { urls, accountId, useAccountPool } = batchAddCartModeSchema.parse(req.body);
+    const resolvedUseAccountPool = Boolean(useAccountPool) || !accountId;
 
-    const account = await prisma.taobaoAccount.findFirst({
-      where: { id: accountId, isActive: true, ...buildVisibleAccountsWhere(req) },
-      select: { id: true, agentId: true },
-    });
+    if (!resolvedUseAccountPool) {
+      const account = await prisma.taobaoAccount.findFirst({
+        where: { id: accountId, isActive: true, ...buildVisibleAccountsWhere(req) },
+        select: { id: true },
+      });
 
-    if (!account) {
-      return res.status(404).json({ success: false, error: 'Account not found or inactive' });
-    }
-
-    if (account.agentId && !agentHub.isConnected(account.agentId)) {
-      return res.status(409).json({ success: false, error: `Agent offline: ${account.agentId}` });
+      if (!account) {
+        return res.status(404).json({ success: false, error: 'Account not found or inactive' });
+      }
+    } else {
+      const activeCount = await prisma.taobaoAccount.count({
+        where: { isActive: true, ...buildVisibleAccountsWhere(req) },
+      });
+      if (activeCount <= 0) {
+        return res.status(404).json({ success: false, error: 'No active account available' });
+      }
     }
 
     const accepted: { index: number; url: string; taobaoId?: string }[] = [];
@@ -206,7 +225,12 @@ router.post('/products/batch-add-cart-mode', async (req: Request, res: Response)
 
     await taskQueue.add(
       'cart-batch-add',
-      { accountId, items: accepted, ownerUserId },
+      {
+        accountId: resolvedUseAccountPool ? null : (accountId ?? null),
+        useAccountPool: resolvedUseAccountPool,
+        items: accepted,
+        ownerUserId,
+      },
       {
         jobId: batchJobId,
         priority: 10,
