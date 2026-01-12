@@ -14,6 +14,54 @@ import { setCartSkuStats } from './cartSkuStats.js';
 const prisma = new PrismaClient();
 
 const CART_BASE_SKU_ID = '__BASE__';
+const CART_ADD_JOB_NAMES = new Set(['cart-add', 'cart-batch-add']);
+
+type CartAddQueueStats = {
+  total: number;
+  waiting: number;
+  prioritized: number;
+  active: number;
+  delayed: number;
+};
+
+function toJobIdText(jobId: unknown): string {
+  const text = String(jobId ?? '').trim();
+  return text || 'n/a';
+}
+
+function countCartAddJobs(jobs: Job[]): number {
+  let n = 0;
+  for (const j of jobs) {
+    if (CART_ADD_JOB_NAMES.has(j.name)) n++;
+  }
+  return n;
+}
+
+async function getCartAddQueueStats(): Promise<CartAddQueueStats> {
+  const [waitingJobs, prioritizedJobs, activeJobs, delayedJobs] = await Promise.all([
+    taskQueue.getJobs(['waiting'], 0, -1),
+    taskQueue.getJobs(['prioritized'], 0, -1),
+    taskQueue.getJobs(['active'], 0, -1),
+    taskQueue.getJobs(['delayed'], 0, -1),
+  ]);
+
+  const waiting = countCartAddJobs(waitingJobs);
+  const prioritized = countCartAddJobs(prioritizedJobs);
+  const active = countCartAddJobs(activeJobs);
+  const delayed = countCartAddJobs(delayedJobs);
+  return {
+    total: waiting + prioritized + active + delayed,
+    waiting,
+    prioritized,
+    active,
+    delayed,
+  };
+}
+
+function formatCartAddQueueStats(stats: CartAddQueueStats): string {
+  const queued = stats.waiting + stats.prioritized;
+  return `加购任务队列: 总=${stats.total} (执行中=${stats.active} 等待=${queued} 延迟=${stats.delayed})`;
+}
 
 function isDigits(input: string): boolean {
   return /^\d+$/.test(String(input || '').trim());
@@ -468,6 +516,7 @@ class SchedulerService {
   }
 
   private async processCartAddJob(job: Job): Promise<{ success: boolean; taobaoId: string; productId: string }> {
+    const jobIdText = toJobIdText(job.id);
     const accountId = String((job.data as any)?.accountId || '').trim();
     const taobaoId = String((job.data as any)?.taobaoId || '').trim();
     const url = String((job.data as any)?.url || '').trim();
@@ -527,10 +576,42 @@ class SchedulerService {
     if (alreadyMonitored?.id) {
       await job.updateProgress({ total: 0, current: 0, success: 0, failed: 0 });
       await job.log('该商品已在监控，已忽略（不重复加购）');
+      console.log(`[Scheduler] 加购任务已忽略（已在监控）jobId=${jobIdText} accountId=${accountId} taobaoId=${taobaoId}`);
       return { success: true, taobaoId, productId: String(alreadyMonitored.id) };
     }
 
+    const queueStats = await getCartAddQueueStats().catch(() => null as any);
+    console.log(
+      `[Scheduler] 加购任务开始 jobId=${jobIdText} accountId=${accountId} taobaoId=${taobaoId}${
+        queueStats ? ` ${formatCartAddQueueStats(queueStats)}` : ''
+      }`
+    );
+
     let lastProgressUpdateAt = 0;
+    let lastConsoleAt = 0;
+    let lastConsoleTotal = -1;
+    const logAddProgressToConsole = (progress: any) => {
+      const totalRaw = typeof progress?.total === 'number' ? progress.total : Number(progress?.total);
+      const currentRaw = typeof progress?.current === 'number' ? progress.current : Number(progress?.current);
+      const successRaw = typeof progress?.success === 'number' ? progress.success : Number(progress?.success);
+      const failedRaw = typeof progress?.failed === 'number' ? progress.failed : Number(progress?.failed);
+
+      const total = Number.isFinite(totalRaw) ? Math.max(0, Math.floor(totalRaw)) : 0;
+      const current = Number.isFinite(currentRaw) ? Math.max(0, Math.floor(currentRaw)) : 0;
+      const success = Number.isFinite(successRaw) ? Math.max(0, Math.floor(successRaw)) : 0;
+      const failed = Number.isFinite(failedRaw) ? Math.max(0, Math.floor(failedRaw)) : 0;
+      if (total <= 0) return;
+
+      const now = Date.now();
+      const shouldLog = total !== lastConsoleTotal || now - lastConsoleAt >= 2000 || current >= total;
+      if (!shouldLog) return;
+      lastConsoleAt = now;
+      lastConsoleTotal = total;
+      console.log(
+        `[Scheduler] 加购任务进度 jobId=${jobIdText} taobaoId=${taobaoId} SKU=${current}/${total} 成功=${success} 失败=${failed}`
+      );
+    };
+
     const onProgress = (progress: any, log?: string) => {
       const now = Date.now();
       const shouldUpdate =
@@ -545,6 +626,7 @@ class SchedulerService {
         void job.updateProgress(progress).catch(() => {});
       }
       if (log) void job.log(log).catch(() => {});
+      logAddProgressToConsole(progress);
     };
 
     const result = agentIdToUse
@@ -575,6 +657,9 @@ class SchedulerService {
     };
     await job.updateProgress(finalProgress);
     await job.log(`SKU处理完成: ${result.successCount}/${result.totalSkus}`);
+    console.log(
+      `[Scheduler] 加购任务SKU完成 jobId=${jobIdText} taobaoId=${taobaoId} 成功=${result.successCount}/${result.totalSkus} 失败=${result.failedCount}`
+    );
 
     const existingBase = await prisma.product.findFirst({
       where: {
@@ -728,6 +813,7 @@ class SchedulerService {
   }
 
   private async processCartBatchAddJob(job: Job): Promise<any> {
+    const batchJobIdText = toJobIdText(job.id);
     const accountId = String((job.data as any)?.accountId || '').trim();
     const items = Array.isArray((job.data as any)?.items) ? ((job.data as any).items as any[]) : [];
 
@@ -802,6 +888,12 @@ class SchedulerService {
 
     await job.updateProgress(status);
     await job.log(`开始批量加购: ${items.length} 个商品 delayScale=${humanDelayScale}`);
+    const batchQueueStats = await getCartAddQueueStats().catch(() => null as any);
+    console.log(
+      `[Scheduler] 批量加购开始 batchJobId=${batchJobIdText} accountId=${accountId} 总任务=${items.length}${
+        batchQueueStats ? ` ${formatCartAddQueueStats(batchQueueStats)}` : ''
+      }`
+    );
 
     const batchTaobaoIds = items
       .map((it) => String(it?.taobaoId || '').trim())
@@ -856,6 +948,9 @@ class SchedulerService {
         status.progress.completedItems++;
         status.progress.successItems++;
         await job.log(`[${item.index}] 已在监控，已忽略`);
+        console.log(
+          `[Scheduler] 批量加购进度 batchJobId=${batchJobIdText} 当前=${i + 1}/${items.length} taobaoId=${itemTaobaoId} 已在监控，已忽略（完成=${status.progress.completedItems}/${status.progress.totalItems}）`
+        );
         flushBatchProgress(true);
         continue;
       }
@@ -872,14 +967,43 @@ class SchedulerService {
 
       itemStatus.status = 'running';
       await job.log(`[${item.index}] 开始处理 taobaoId=${item.taobaoId}`);
+      console.log(
+        `[Scheduler] 批量加购进度 batchJobId=${batchJobIdText} 当前=${i + 1}/${items.length} taobaoId=${itemTaobaoId} 开始`
+      );
       flushBatchProgress(true);
 
       try {
         setHumanDelayScale(humanDelayScale);
+        const itemIndex1 = i + 1;
+        let lastConsoleAt = 0;
+        let lastConsoleTotal = -1;
+        const logBatchSkuProgressToConsole = (progress: any) => {
+          const totalRaw = typeof progress?.total === 'number' ? progress.total : Number(progress?.total);
+          const currentRaw = typeof progress?.current === 'number' ? progress.current : Number(progress?.current);
+          const successRaw = typeof progress?.success === 'number' ? progress.success : Number(progress?.success);
+          const failedRaw = typeof progress?.failed === 'number' ? progress.failed : Number(progress?.failed);
+
+          const total = Number.isFinite(totalRaw) ? Math.max(0, Math.floor(totalRaw)) : 0;
+          const current = Number.isFinite(currentRaw) ? Math.max(0, Math.floor(currentRaw)) : 0;
+          const success = Number.isFinite(successRaw) ? Math.max(0, Math.floor(successRaw)) : 0;
+          const failed = Number.isFinite(failedRaw) ? Math.max(0, Math.floor(failedRaw)) : 0;
+          if (total <= 0) return;
+
+          const now = Date.now();
+          const shouldLog = total !== lastConsoleTotal || now - lastConsoleAt >= 2000 || current >= total;
+          if (!shouldLog) return;
+          lastConsoleAt = now;
+          lastConsoleTotal = total;
+          console.log(
+            `[Scheduler] 批量加购进度 batchJobId=${batchJobIdText} 总体=${status.progress.completedItems}/${status.progress.totalItems} 当前=${itemIndex1}/${items.length} taobaoId=${itemTaobaoId} SKU=${current}/${total} 成功=${success} 失败=${failed}`
+          );
+        };
+
         const onProgress = (progress: any, log?: string) => {
           itemStatus.progress = progress;
           flushBatchProgress();
           if (log) void job.log(`[${item.index}] ${log}`).catch(() => {});
+          logBatchSkuProgressToConsole(progress);
         };
 
         const result = agentIdToUse
@@ -1057,6 +1181,9 @@ class SchedulerService {
         status.progress.successItems++;
         flushBatchProgress(true);
         await job.log(`[${item.index}] 完成`);
+        console.log(
+          `[Scheduler] 批量加购进度 batchJobId=${batchJobIdText} 当前=${itemIndex1}/${items.length} taobaoId=${itemTaobaoId} 完成（完成=${status.progress.completedItems}/${status.progress.totalItems} 成功=${status.progress.successItems} 失败=${status.progress.failedItems}）`
+        );
       } catch (error: any) {
         itemStatus.status = 'failed';
         itemStatus.error = error?.message ? String(error.message) : String(error);
@@ -1065,6 +1192,9 @@ class SchedulerService {
         flushBatchProgress(true);
         await job.log(`[${item.index}] 错误: ${itemStatus.error}`);
         console.error(`[BatchCartAPI] 商品 ${String(item.taobaoId)} 失败:`, error?.stack || error);
+        console.log(
+          `[Scheduler] 批量加购进度 batchJobId=${batchJobIdText} 当前=${i + 1}/${items.length} taobaoId=${itemTaobaoId} 失败（完成=${status.progress.completedItems}/${status.progress.totalItems} 成功=${status.progress.successItems} 失败=${status.progress.failedItems}）`
+        );
       }
     }
 
@@ -1074,6 +1204,9 @@ class SchedulerService {
 
     await job.updateProgress(status);
     await job.log(`批量加购完成: ${status.progress.successItems}/${status.progress.totalItems} 成功`);
+    console.log(
+      `[Scheduler] 批量加购完成 batchJobId=${batchJobIdText} 成功=${status.progress.successItems}/${status.progress.totalItems} 失败=${status.progress.failedItems}`
+    );
     return status;
   }
 
