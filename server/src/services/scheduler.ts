@@ -136,32 +136,48 @@ class SchedulerService {
     return pauseMs;
   }
 
-  private async resolveAgentIdForAccount(account: { agentId: string | null; userId: string | null }): Promise<string | null> {
+  private async resolveAgentIdForAccount(
+    account: { agentId: string | null; userId: string | null },
+    ownerUserId: string | null
+  ): Promise<string | null> {
     const boundAgentId = account.agentId ? String(account.agentId).trim() : '';
-    const userId = account.userId ? String(account.userId).trim() : null;
 
-    if (boundAgentId && agentHub.isConnected(boundAgentId) && agentHub.isOwnedBy(boundAgentId, userId)) {
-      return boundAgentId;
+    // 账号已绑定 Agent：只允许使用该 Agent（在线才返回；不在线不回退到其他 Agent）
+    if (boundAgentId) {
+      return agentHub.isConnected(boundAgentId) ? boundAgentId : null;
     }
 
-    if (userId) {
+    const contextUserIdRaw = ownerUserId
+      ? String(ownerUserId).trim()
+      : account.userId
+        ? String(account.userId).trim()
+        : null;
+    const contextUserId = contextUserIdRaw || null;
+
+    // With user context, allow preferred agent / any agent owned by that user.
+    if (contextUserId) {
       const preferredAgentId =
         (await (prisma as any).systemUser
           .findUnique({
-            where: { id: userId },
+            where: { id: contextUserId },
             select: { preferredAgentId: true },
           })
           .catch(() => null as any))?.preferredAgentId ?? null;
 
       const preferred = preferredAgentId ? String(preferredAgentId).trim() : '';
-      if (preferred && agentHub.isConnected(preferred) && agentHub.isOwnedBy(preferred, userId)) {
+      if (preferred && agentHub.isConnected(preferred) && agentHub.isOwnedBy(preferred, contextUserId)) {
         return preferred;
       }
+
+      const fallback =
+        agentHub.listConnectedAgents().find((a) => agentHub.isOwnedBy(a.agentId, contextUserId))?.agentId ?? null;
+      return fallback ? String(fallback).trim() : null;
     }
 
-    const fallback =
-      agentHub.listConnectedAgents().find((a) => agentHub.isOwnedBy(a.agentId, userId))?.agentId ?? null;
-    return fallback ? String(fallback).trim() : null;
+    // No user context: do NOT use arbitrary online user agents; only allow system/shared agents.
+    const systemAgent =
+      agentHub.listConnectedAgents().find((a) => agentHub.isOwnedBy(a.agentId, null))?.agentId ?? null;
+    return systemAgent ? String(systemAgent).trim() : null;
   }
 
   private pickAccountIdFromPool(accountIds: string[], preferredAccountId: string | null): string {
@@ -453,7 +469,17 @@ class SchedulerService {
         throw new Error('Account not found');
       }
 
-      const agentIdToUse = await this.resolveAgentIdForAccount(account);
+      const agentIdToUse = await this.resolveAgentIdForAccount(account, null);
+      if (account.agentId && (!agentIdToUse || !agentHub.isConnected(agentIdToUse))) {
+        console.warn(
+          `[Scheduler] 账号绑定Agent离线，回退到本地抓价 accountId=${accountId} boundAgentId=${String(account.agentId)}`
+        );
+      }
+      console.log(
+        `[Scheduler] 购物车抓价执行器 accountId=${accountId} boundAgentId=${account.agentId || 'null'} agentId=${
+          agentIdToUse && agentHub.isConnected(agentIdToUse) ? agentIdToUse : 'local'
+        }`
+      );
 
       const expectedTaobaoIds = await (async (): Promise<string[]> => {
         const rowsBase = await prisma.product.findMany({
@@ -597,14 +623,24 @@ class SchedulerService {
     if (useAccountPool) {
       const poolAccounts = await prisma.taobaoAccount.findMany({
         where: { isActive: true, ...(ownerUserId ? { userId: ownerUserId } : {}) },
-        select: { id: true },
+        select: { id: true, agentId: true, userId: true },
         orderBy: { createdAt: 'asc' },
       });
 
-      accountId = this.pickAccountIdFromPool(
-        poolAccounts.map((a) => a.id),
-        requestedAccountId || null
-      );
+      const poolAccountIds = poolAccounts.map((a) => a.id);
+      const preferredAccountId = requestedAccountId || null;
+
+      // 优先选择“可用 Agent 在线”的账号，避免回退到本地浏览器（Docker 环境会直接失败）
+      const onlineAccountIds: string[] = [];
+      for (const acc of poolAccounts) {
+        const agentId = await this.resolveAgentIdForAccount(acc, ownerUserId);
+        if (agentId && agentHub.isConnected(agentId)) {
+          onlineAccountIds.push(acc.id);
+        }
+      }
+
+      const candidateAccountIds = onlineAccountIds.length > 0 ? onlineAccountIds : poolAccountIds;
+      accountId = this.pickAccountIdFromPool(candidateAccountIds, preferredAccountId);
     }
 
     const scraperConfig = await (prisma as any).scraperConfig.findFirst().catch(() => null as any);
@@ -633,7 +669,15 @@ class SchedulerService {
       throw new Error('Account not found or inactive');
     }
 
-    const agentIdToUse = await this.resolveAgentIdForAccount(account);
+    const agentIdToUse = await this.resolveAgentIdForAccount(account, ownerUserId);
+    await job.log(
+      `使用账号 accountId=${accountId} agentId=${agentIdToUse && agentHub.isConnected(agentIdToUse) ? agentIdToUse : 'local'}`
+    );
+    if (account.agentId && (!agentIdToUse || !agentHub.isConnected(agentIdToUse))) {
+      console.warn(
+        `[Scheduler] 账号绑定Agent离线，回退到本地加购 jobId=${jobIdText} accountId=${accountId} boundAgentId=${String(account.agentId)}`
+      );
+    }
 
     const alreadyMonitoredBase =
       (await prisma.product
@@ -669,7 +713,9 @@ class SchedulerService {
 
     const queueStats = await getCartAddQueueStats().catch(() => null as any);
     console.log(
-      `[Scheduler] 加购任务开始 jobId=${jobIdText} accountId=${accountId} taobaoId=${taobaoId}${
+      `[Scheduler] 加购任务开始 jobId=${jobIdText} accountId=${accountId} agentId=${
+        agentIdToUse && agentHub.isConnected(agentIdToUse) ? agentIdToUse : 'local'
+      } taobaoId=${taobaoId}${
         queueStats ? ` ${formatCartAddQueueStats(queueStats)}` : ''
       }`
     );
@@ -955,10 +1001,20 @@ class SchedulerService {
       if (cached !== undefined) return cached;
 
       const account = poolById.get(accountId) ?? null;
-      const resolved = account ? await this.resolveAgentIdForAccount(account) : null;
+      const resolved = account ? await this.resolveAgentIdForAccount(account, ownerUserId) : null;
       agentIdCache.set(accountId, resolved);
       return resolved;
     };
+
+    const onlinePoolAccountIds: string[] = [];
+    for (const id of poolAccountIds) {
+      const agentId = await getAgentIdToUse(id);
+      if (agentId && agentHub.isConnected(agentId)) {
+        onlinePoolAccountIds.push(id);
+      }
+    }
+
+    const selectablePoolAccountIds = onlinePoolAccountIds.length > 0 ? onlinePoolAccountIds : poolAccountIds;
 
     const status: any = {
       status: 'running',
@@ -1048,7 +1104,7 @@ class SchedulerService {
         }
       }
 
-      const itemAccountId = this.pickAccountIdFromPool(poolAccountIds, preferredAccountId);
+      const itemAccountId = this.pickAccountIdFromPool(selectablePoolAccountIds, preferredAccountId);
       const account = poolById.get(itemAccountId) ?? null;
       if (!account || !account.isActive) {
         throw new Error(`Account not found or inactive: ${itemAccountId}`);
@@ -1058,9 +1114,14 @@ class SchedulerService {
       itemStatus.accountName = account.name || undefined;
 
       const agentIdToUse = await getAgentIdToUse(itemAccountId);
+      itemStatus.agentId = agentIdToUse;
 
       itemStatus.status = 'running';
-      await job.log(`[${item.index}] 开始处理 accountId=${itemAccountId} taobaoId=${itemTaobaoId}`);
+      await job.log(
+        `[${item.index}] 开始处理 accountId=${itemAccountId} agentId=${
+          agentIdToUse && agentHub.isConnected(agentIdToUse) ? agentIdToUse : 'local'
+        } taobaoId=${itemTaobaoId}`
+      );
       flushBatchProgress(true);
 
       try {
@@ -1389,7 +1450,7 @@ class SchedulerService {
       throw new Error('Account not found or inactive');
     }
 
-    const agentIdToUse = await this.resolveAgentIdForAccount(account);
+    const agentIdToUse = await this.resolveAgentIdForAccount(account, ownerUserId);
 
     const status: any = {
       status: 'running',
