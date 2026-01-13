@@ -14,11 +14,60 @@ type SkuSelection = {
 };
 
 function normalizeSkuProperties(input: string): string {
-  return String(input || '')
+  const raw = String(input ?? '').trim();
+  if (!raw) return '';
+
+  const normalized = raw
+    .replace(/[；]/g, ';')
+    .replace(/[：]/g, ':')
     .replace(/\s+/g, ' ')
-    .replace(/[;；]+/g, ';')
     .replace(/\s*;\s*/g, ';')
     .trim();
+
+  const pairs: Array<{ label: string; value: string }> = [];
+  const pairRe = /([^:;\s]+)\s*:\s*([^;]+?)(?=\s+[^:;\s]+\s*:|;|$)/g;
+  for (const match of normalized.matchAll(pairRe)) {
+    const label = String(match[1] ?? '').trim();
+    const value = String(match[2] ?? '').trim();
+    if (!label || !value) continue;
+    pairs.push({ label, value });
+  }
+
+  if (pairs.length === 0) return normalized;
+  pairs.sort((a, b) => a.label.localeCompare(b.label) || a.value.localeCompare(b.value));
+  return pairs.map((p) => `${p.label}:${p.value}`).join(';');
+}
+
+function isDigits(input: unknown): boolean {
+  return /^\d+$/.test(String(input ?? '').trim());
+}
+
+function toCartSkuIdKey(input: unknown): string | null {
+  const text = String(input ?? '').trim();
+  if (!text) return null;
+  if (!isDigits(text)) return null;
+  return `id:${text}`;
+}
+
+function toCartSkuPropsKey(input: unknown): string | null {
+  const norm = normalizeSkuProperties(String(input ?? '').trim());
+  if (!norm) return null;
+  return `props:${norm}`;
+}
+
+function normalizeExistingCartSkuKey(input: unknown): string | null {
+  const text = String(input ?? '').trim();
+  if (!text) return null;
+  if (text.startsWith('id:') || text.startsWith('props:')) return text;
+  const idKey = toCartSkuIdKey(text);
+  if (idKey) return idKey;
+  return toCartSkuPropsKey(text);
+}
+
+function hasAnySkuKey(set: Set<string>, idKey: string | null, propsKey: string | null): boolean {
+  if (idKey && set.has(idKey)) return true;
+  if (propsKey && set.has(propsKey)) return true;
+  return false;
 }
 
 function randomInt(min: number, max: number): number {
@@ -46,6 +95,11 @@ export interface AddAllSkusResult {
   failedCount: number;
   results: SkuAddResult[];
   duration: number;
+  skuTotal?: number;
+  skuAvailable?: number;
+  skuTarget?: number;
+  cartProducts?: any[];
+  uiTotalCount?: number | null;
 }
 
 export interface ProgressCallback {
@@ -92,14 +146,17 @@ export class AutoCartAdder {
     await this.waitForOverlaysCleared().catch(() => {});
   }
 
-  private async collectCartSkuPropertiesForTaobaoId(taobaoId: string): Promise<Set<string>> {
+  private async collectCartSkuKeysForTaobaoId(
+    taobaoId: string
+  ): Promise<{ keys: Set<string>; uniqueCount: number }> {
     const targetId = String(taobaoId || '').trim();
-    if (!/^\d+$/.test(targetId)) return new Set<string>();
+    if (!/^\d+$/.test(targetId)) return { keys: new Set<string>(), uniqueCount: 0 };
 
     await this.page.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' as any })).catch(() => {});
     await this.humanSimulator.sleep(randomDelay(350, 650));
 
-    const seen = new Set<string>();
+    const keys = new Set<string>();
+    const canonical = new Set<string>();
     let stableAfterFound = 0;
     let stableNoNewRounds = 0;
     let stuckRounds = 0;
@@ -155,7 +212,7 @@ export class AutoCartAdder {
     applyUiTotalCount(uiTotalInitial);
 
     const extract = async (): Promise<{
-      rawList: string[];
+      rawList: Array<{ skuId: string; skuProperties: string }>;
       found: boolean;
       uiTotalCount: number | null;
       loadedQty: number;
@@ -185,7 +242,7 @@ export class AutoCartAdder {
             return doc;
           };
 
-          const out: string[] = [];
+          const out: Array<{ skuId: string; skuProperties: string }> = [];
           let found = false;
           let loadedQty = 0;
 
@@ -230,13 +287,29 @@ export class AutoCartAdder {
 
             found = true;
 
+            const skuIdMatch = href.match(/[?&]skuId=(\d+)/i);
+            let skuId = skuIdMatch ? skuIdMatch[1] : '';
+
+            if (!skuId) {
+              const root =
+                (item.closest?.('[data-sku],[data-skuid],[data-sku-id],[data-skuId]') as HTMLElement | null) ||
+                (item as HTMLElement);
+              const dataSku =
+                root.getAttribute('data-skuid') ||
+                root.getAttribute('data-sku-id') ||
+                root.getAttribute('data-skuId') ||
+                root.getAttribute('data-sku') ||
+                '';
+              if (/^\d+$/.test(dataSku)) skuId = dataSku;
+            }
+
             const skuEl = item.querySelector('.trade-cart-item-sku-old');
             const skuLabels = skuEl ? Array.from(skuEl.querySelectorAll('.label--T4deixnF')) : [];
             const skuProperties = skuLabels
               .map((label) => label.textContent?.trim() || '')
               .join(' ')
               .trim();
-            if (skuProperties) out.push(skuProperties);
+            if (skuId || skuProperties) out.push({ skuId, skuProperties });
           }
 
           let isEmptyCart = false;
@@ -392,11 +465,18 @@ export class AutoCartAdder {
       const fullyLoaded = uiTotalCount === null || loadedQty >= uiTotalCount || endReached;
 
       let added = 0;
-      for (const raw of snapshot.rawList) {
-        const norm = normalizeSkuProperties(raw);
-        if (!norm || seen.has(norm)) continue;
-        seen.add(norm);
-        added++;
+      for (const item of snapshot.rawList) {
+        const idKey = toCartSkuIdKey(item?.skuId);
+        const propsKey = toCartSkuPropsKey(item?.skuProperties);
+        const canonKey = idKey || propsKey;
+        if (!canonKey) continue;
+
+        if (!canonical.has(canonKey)) {
+          canonical.add(canonKey);
+          added++;
+        }
+        if (idKey) keys.add(idKey);
+        if (propsKey) keys.add(propsKey);
       }
 
       if (snapshot.found) seenTarget = true;
@@ -492,7 +572,7 @@ export class AutoCartAdder {
       console.log(`[AutoCart] 购物车预检查检测到结束标记: ${endReachedReason}`);
     }
 
-    return seen;
+    return { keys, uniqueCount: canonical.size };
   }
 
   private async openProductFromCartOrNavigate(
@@ -758,6 +838,7 @@ export class AutoCartAdder {
       onProgress?: ProgressCallback;
       existingCartSkus?: Map<string, Set<string>>;
       skuDelayMs?: { min: number; max: number };
+      skuLimit?: number;
     }
   ): Promise<AddAllSkusResult> {
     return this.runExclusive(async () => {
@@ -814,14 +895,22 @@ export class AutoCartAdder {
 
         // 阶段1：打开购物车预检查已存在的SKU
         // 如果批量模式已经预先抓取过购物车，则直接使用传入的数据
-        let existedSkuProps: Set<string>;
+        let existedSkuKeys: Set<string>;
+        let existedSkuCount = 0;
         if (options?.existingCartSkus?.has(taobaoId)) {
-          existedSkuProps = options.existingCartSkus.get(taobaoId)!;
-          console.log(`[AutoCart] 使用预取购物车数据: taobaoId=${taobaoId} existedSkus=${existedSkuProps.size}`);
+          const raw = options.existingCartSkus.get(taobaoId)!;
+          existedSkuKeys = new Set<string>();
+          for (const entry of raw) {
+            const key = normalizeExistingCartSkuKey(entry);
+            if (key) existedSkuKeys.add(key);
+          }
+          const idCount = Array.from(existedSkuKeys).filter((k) => k.startsWith('id:')).length;
+          existedSkuCount = idCount > 0 ? idCount : existedSkuKeys.size;
+          console.log(`[AutoCart] 使用预取购物车数据: taobaoId=${taobaoId} existedSkus=${existedSkuCount}`);
           if (options?.onProgress) {
             options.onProgress(
               { total: 0, current: 0, success: 0, failed: 0 },
-              `【阶段1/5】使用预抓取的购物车数据，已存在 ${existedSkuProps.size} 个SKU`
+              `【阶段1/5】使用预抓取的购物车数据，已存在 ${existedSkuCount} 个SKU`
             );
           }
           lastProgress = { total: 0, current: 0, success: 0, failed: 0 };
@@ -835,12 +924,14 @@ export class AutoCartAdder {
           }
           lastProgress = { total: 0, current: 0, success: 0, failed: 0 };
           await this.navigateToCartPage();
-          existedSkuProps = await this.collectCartSkuPropertiesForTaobaoId(taobaoId);
-          console.log(`[AutoCart] 购物车预检查: taobaoId=${taobaoId} existedSkus=${existedSkuProps.size}`);
+          const precheck = await this.collectCartSkuKeysForTaobaoId(taobaoId);
+          existedSkuKeys = precheck.keys;
+          existedSkuCount = precheck.uniqueCount;
+          console.log(`[AutoCart] 购物车预检查: taobaoId=${taobaoId} existedSkus=${existedSkuCount}`);
           if (options?.onProgress) {
             options.onProgress(
               { total: 0, current: 0, success: 0, failed: 0 },
-              `【阶段1/5】购物车预检查完成，已存在 ${existedSkuProps.size} 个SKU`
+              `【阶段1/5】购物车预检查完成，已存在 ${existedSkuCount} 个SKU`
             );
           }
           lastProgress = { total: 0, current: 0, success: 0, failed: 0 };
@@ -882,23 +973,53 @@ export class AutoCartAdder {
         const availableSkus = skuTree.combinations.filter((sku) => sku.stock > 0);
         console.log(`[AutoCart] 可用 SKU 数量: ${availableSkus.length}`);
 
-        const existedNorm = new Set(Array.from(existedSkuProps.values()).map((x) => normalizeSkuProperties(x)));
-        const skippedCount = availableSkus.filter(sku => {
-          const norm = normalizeSkuProperties(sku.properties);
-          return norm && existedNorm.has(norm);
-        }).length;
-        const toAddCount = availableSkus.length - skippedCount;
-        
+        const rawLimit = (options as any)?.skuLimit;
+        const skuLimit = Number.isFinite(Number(rawLimit)) ? Math.max(0, Math.floor(Number(rawLimit))) : 0;
+        const skuTotal = skuTree.combinations.length;
+        const skuAvailable = availableSkus.length;
+        const skuTarget = skuLimit > 0 ? Math.min(skuLimit, skuAvailable) : skuAvailable;
+
+        const existedKeys = existedSkuKeys;
+
         const shuffled = this.shuffleArray(availableSkus);
+        let selected: SkuCombination[] = shuffled;
+        let existingSelected: SkuCombination[] = [];
+
+        if (skuLimit > 0) {
+          for (const sku of shuffled) {
+            if (existingSelected.length >= skuTarget) break;
+            const idKey = toCartSkuIdKey(sku.skuId);
+            const propsKey = toCartSkuPropsKey(sku.properties);
+            if (hasAnySkuKey(existedKeys, idKey, propsKey)) existingSelected.push(sku);
+          }
+
+          const candidates = shuffled.filter((sku) => {
+            const idKey = toCartSkuIdKey(sku.skuId);
+            const propsKey = toCartSkuPropsKey(sku.properties);
+            return !hasAnySkuKey(existedKeys, idKey, propsKey);
+          });
+
+          selected = [...existingSelected, ...candidates];
+        }
+
+        const skippedCount =
+          skuLimit > 0
+            ? existingSelected.length
+            : selected.filter((sku) => {
+                const idKey = toCartSkuIdKey(sku.skuId);
+                const propsKey = toCartSkuPropsKey(sku.properties);
+                return hasAnySkuKey(existedKeys, idKey, propsKey);
+              }).length;
+        const toAddCount = skuLimit > 0 ? Math.max(0, skuTarget - skippedCount) : selected.length - skippedCount;
 
         // 阶段4：开始加购
         if (options?.onProgress) {
           options.onProgress(
-            { total: shuffled.length, current: 0, success: 0, failed: 0 },
-            `【阶段4/5】开始加购：总计 ${shuffled.length} 个SKU，已存在 ${skippedCount} 个将跳过，需新加购 ${toAddCount} 个`
+            { total: skuTarget, current: 0, success: 0, failed: 0 },
+            `【阶段4/5】开始加购：目标 ${skuTarget} 个SKU（可用 ${skuAvailable}），已存在 ${skippedCount} 个将跳过，需新加购 ${toAddCount} 个`
           );
         }
-        lastProgress = { total: shuffled.length, current: 0, success: 0, failed: 0 };
+        lastProgress = { total: skuTarget, current: 0, success: 0, failed: 0 };
 
         const results: SkuAddResult[] = [];
         const skuDelayMinMsRaw = (options as any)?.skuDelayMs?.min;
@@ -910,17 +1031,26 @@ export class AutoCartAdder {
           ? Math.max(skuDelayMinMs, Math.floor(Number(skuDelayMaxMsRaw)))
           : 2200;
 
-        for (let i = 0; i < shuffled.length; i++) {
+        let successCount = 0;
+        let failedCount = 0;
+
+        for (let i = 0; i < selected.length; i++) {
           await pauseIfRequested('【抢占】暂停加购，优先抓价中…');
 
-          const sku = shuffled[i];
-          console.log(`[AutoCart] 处理 SKU ${i + 1}/${shuffled.length}: ${sku.properties}`);
+          if (skuLimit > 0 && successCount >= skuTarget) break;
+
+          const sku = selected[i];
+          const displayTotal = skuLimit > 0 ? skuTarget : selected.length;
+          const displayIndex = skuLimit > 0 ? Math.min(successCount + 1, skuTarget) : i + 1;
+          console.log(`[AutoCart] 处理 SKU ${displayIndex}/${displayTotal}: ${sku.properties}`);
 
           try {
-            const norm = normalizeSkuProperties(sku.properties);
+            const idKey = toCartSkuIdKey(sku.skuId);
+            const propsKey = toCartSkuPropsKey(sku.properties);
             let result: SkuAddResult;
+            const skipped = hasAnySkuKey(existedKeys, idKey, propsKey);
 
-            if (norm && existedNorm.has(norm)) {
+            if (skipped) {
               console.log(`[AutoCart] SKU 已在购物车中，跳过: ${sku.properties}`);
               result = {
                 skuId: sku.skuId,
@@ -934,25 +1064,39 @@ export class AutoCartAdder {
                 })),
                 thumbnailUrl: (sku as any)?.imageUrl ?? null,
               };
+              successCount++;
+              if (idKey) existedKeys.add(idKey);
+              if (propsKey) existedKeys.add(propsKey);
             } else {
               result = await this.addSingleSkuAsHuman(sku, taobaoId);
-              if (norm) existedNorm.add(norm);
+              if (result.success) {
+                successCount++;
+                if (idKey) existedKeys.add(idKey);
+                if (propsKey) existedKeys.add(propsKey);
+              } else {
+                failedCount++;
+              }
             }
 
             results.push(result);
 
             // 实时更新进度
-            const successCount = results.filter((r) => r.success).length;
-            const failedCount = results.filter((r) => !r.success).length;
-            lastProgress = { total: shuffled.length, current: i + 1, success: successCount, failed: failedCount };
+            const current = skuLimit > 0 ? Math.min(successCount, skuTarget) : i + 1;
+            lastProgress = { total: skuTarget, current, success: successCount, failed: failedCount };
             if (options?.onProgress) {
+              const log =
+                skuLimit > 0
+                  ? `补齐 ${successCount}/${skuTarget}：${result.success ? '成功' : '失败'} - ${sku.properties}`
+                  : `已处理 ${i + 1}/${selected.length}：${result.success ? '成功' : '失败'} - ${sku.properties}`;
               options.onProgress(
-                { total: shuffled.length, current: i + 1, success: successCount, failed: failedCount },
-                `已处理 ${i + 1}/${shuffled.length}：${result.success ? '成功' : '失败'} - ${sku.properties}`
+                { total: skuTarget, current, success: successCount, failed: failedCount },
+                log
               );
             }
 
-            if (i < shuffled.length - 1) {
+            if (skuLimit > 0 && successCount >= skuTarget) break;
+
+            if (!skipped && i < selected.length - 1) {
               // SKU 间隔：保持随机但适度加快；偶尔更长停顿更“像人”
               let delay = randomDelay(skuDelayMinMs, skuDelayMaxMs);
               if (Math.random() < 0.08) delay += randomDelay(2000, 5000);
@@ -978,35 +1122,38 @@ export class AutoCartAdder {
             });
 
             // 更新失败进度
-            const successCount = results.filter((r) => r.success).length;
-            const failedCount = results.filter((r) => !r.success).length;
-            lastProgress = { total: shuffled.length, current: i + 1, success: successCount, failed: failedCount };
+            failedCount++;
+            const current = skuLimit > 0 ? Math.min(successCount, skuTarget) : i + 1;
+            lastProgress = { total: skuTarget, current, success: successCount, failed: failedCount };
             if (options?.onProgress) {
+              const log =
+                skuLimit > 0
+                  ? `补齐 ${successCount}/${skuTarget}：失败 - ${error.message}`
+                  : `已处理 ${i + 1}/${selected.length}：失败 - ${error.message}`;
               options.onProgress(
-                { total: shuffled.length, current: i + 1, success: successCount, failed: failedCount },
-                `已处理 ${i + 1}/${shuffled.length}：失败 - ${error.message}`
+                { total: skuTarget, current, success: successCount, failed: failedCount },
+                log
               );
             }
           }
         }
 
-        const successCount = results.filter((r) => r.success).length;
         const duration = Date.now() - startTime;
 
-        console.log(`[AutoCart] 完成: ${successCount}/${shuffled.length} 成功，耗时=${duration}ms`);
+        console.log(`[AutoCart] 完成: ${successCount}/${skuTarget} 成功，耗时=${duration}ms`);
 
         // 阶段5：关闭商品详情页，切回购物车页面刷新获取价格
         if (options?.onProgress) {
           options.onProgress(
-            { total: shuffled.length, current: shuffled.length, success: successCount, failed: shuffled.length - successCount },
+            { total: skuTarget, current: skuTarget, success: successCount, failed: failedCount },
             '【阶段5/5】返回购物车页面刷新获取价格...'
           );
         }
         lastProgress = {
-          total: shuffled.length,
-          current: shuffled.length,
+          total: skuTarget,
+          current: skuTarget,
           success: successCount,
-          failed: shuffled.length - successCount,
+          failed: failedCount,
         };
         
         // 关闭商品详情页（当前页面）
@@ -1046,13 +1193,16 @@ export class AutoCartAdder {
 
         return {
           taobaoId,
-          totalSkus: shuffled.length,
+          totalSkus: skuTarget,
           successCount,
-          failedCount: shuffled.length - successCount,
+          failedCount,
           results,
           duration,
           cartProducts, // 直接返回购物车数据，避免再次调用 scrapeCart
           uiTotalCount,
+          skuTotal,
+          skuAvailable,
+          skuTarget,
         };
       } finally {
         markAddEnd(accountId);

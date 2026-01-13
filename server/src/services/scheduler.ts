@@ -70,10 +70,28 @@ function isDigits(input: string): boolean {
 }
 
 function normalizeSkuProperties(input: string): string {
-  return String(input || '')
+  const raw = String(input ?? '').trim();
+  if (!raw) return '';
+
+  const normalized = raw
+    .replace(/[；]/g, ';')
+    .replace(/[：]/g, ':')
     .replace(/\s+/g, ' ')
-    .replace(/[;；]+/g, ';')
+    .replace(/\s*;\s*/g, ';')
     .trim();
+
+  const pairs: Array<{ label: string; value: string }> = [];
+  const pairRe = /([^:;\s]+)\s*:\s*([^;]+?)(?=\s+[^:;\s]+\s*:|;|$)/g;
+  for (const match of normalized.matchAll(pairRe)) {
+    const label = String(match[1] ?? '').trim();
+    const value = String(match[2] ?? '').trim();
+    if (!label || !value) continue;
+    pairs.push({ label, value });
+  }
+
+  if (pairs.length === 0) return normalized;
+  pairs.sort((a, b) => a.label.localeCompare(b.label) || a.value.localeCompare(b.value));
+  return pairs.map((p) => `${p.label}:${p.value}`).join(';');
 }
 
 // 任务队列（BullMQ）
@@ -462,6 +480,15 @@ class SchedulerService {
           : 1;
       setHumanDelayScale(humanDelayScale);
 
+      const cartAddSkuDelayMinMsRaw = Number((scraperConfig as any)?.cartAddSkuDelayMinMs);
+      const cartAddSkuDelayMaxMsRaw = Number((scraperConfig as any)?.cartAddSkuDelayMaxMs);
+      const cartAddSkuDelayMinMs = Number.isFinite(cartAddSkuDelayMinMsRaw)
+        ? Math.max(0, Math.floor(cartAddSkuDelayMinMsRaw))
+        : 900;
+      const cartAddSkuDelayMaxMs = Number.isFinite(cartAddSkuDelayMaxMsRaw)
+        ? Math.max(cartAddSkuDelayMinMs, Math.floor(cartAddSkuDelayMaxMsRaw))
+        : 2200;
+
       const account = await prisma.taobaoAccount.findUnique({
         where: { id: accountId },
         select: { id: true, name: true, cookies: true, agentId: true, userId: true }
@@ -589,6 +616,156 @@ class SchedulerService {
         setCartSkuStats(accountId, { cartSkuTotal, cartSkuLoaded });
       } catch {}
 
+      // 限量模式：抓价时若该商品 SKU 数不足，则先补齐再更新价格（只对带 skuTarget 元数据的新增任务生效）
+      if (cart?.success && Array.isArray(cart?.products)) {
+        try {
+          const uiTotalCountRaw = (cart as any)?.uiTotalCount;
+          const uiTotalCount =
+            typeof uiTotalCountRaw === 'number' && Number.isFinite(uiTotalCountRaw) ? uiTotalCountRaw : null;
+          const cartLoadedQty = cart.products.length;
+          const canTrustSkuCounts = uiTotalCount === null || cartLoadedQty >= uiTotalCount;
+
+          if (!canTrustSkuCounts) {
+            await job.log(`购物车未完全加载 loaded=${cartLoadedQty} < uiTotal=${uiTotalCount}，跳过SKU补齐`);
+            console.log(
+              `[Scheduler] 购物车未完全加载，跳过SKU补齐 accountId=${accountId} loaded=${cartLoadedQty} uiTotal=${uiTotalCount}`
+            );
+          } else {
+          const baseProducts = await prisma.product.findMany({
+            where: {
+              ownerAccountId: accountId,
+              monitorMode: 'CART',
+              skuId: CART_BASE_SKU_ID,
+              isActive: true,
+            },
+            select: { id: true, taobaoId: true },
+          });
+
+          const productIds = baseProducts.map((p) => p.id);
+          const snapshots = productIds.length
+            ? await prisma.priceSnapshot.findMany({
+                where: { productId: { in: productIds } },
+                orderBy: [{ productId: 'asc' }, { capturedAt: 'desc' }],
+                distinct: ['productId'],
+                select: { productId: true, rawData: true },
+              })
+            : [];
+
+          const latestRawByProductId = new Map<string, any>();
+          for (const s of snapshots as any[]) {
+            const pid = String(s?.productId || '').trim();
+            if (!pid || latestRawByProductId.has(pid)) continue;
+            latestRawByProductId.set(pid, (s as any)?.rawData ?? null);
+          }
+
+          const skuKeysByTaobaoId = new Map<string, Set<string>>();
+          for (const p of cart.products as any[]) {
+            const tid = p?.taobaoId ? String(p.taobaoId).trim() : '';
+            if (!tid) continue;
+            const skuId = p?.skuId ? String(p.skuId).trim() : '';
+            const skuProps = normalizeSkuProperties(String(p?.skuProperties || '').trim());
+            const key = skuId || skuProps;
+            if (!key) continue;
+            const set = skuKeysByTaobaoId.get(tid) ?? new Set<string>();
+            set.add(key);
+            skuKeysByTaobaoId.set(tid, set);
+          }
+
+          const underfilled: Array<{ taobaoId: string; current: number; target: number }> = [];
+          for (const bp of baseProducts as any[]) {
+            const tid = String(bp?.taobaoId || '').trim();
+            if (!tid) continue;
+            const raw = latestRawByProductId.get(String(bp.id)) ?? null;
+            const cartAddSkuLimitRaw = raw?.cartAddSkuLimit;
+            const skuTargetRaw = raw?.skuTarget;
+
+            const cartAddSkuLimitNum =
+              typeof cartAddSkuLimitRaw === 'number' ? cartAddSkuLimitRaw : Number(cartAddSkuLimitRaw);
+            const skuTargetNum = typeof skuTargetRaw === 'number' ? skuTargetRaw : Number(skuTargetRaw);
+
+            const cartAddSkuLimit =
+              Number.isFinite(cartAddSkuLimitNum) && cartAddSkuLimitNum >= 0 ? Math.floor(cartAddSkuLimitNum) : null;
+            const skuTarget =
+              Number.isFinite(skuTargetNum) && skuTargetNum > 0 ? Math.floor(skuTargetNum) : null;
+
+            if (!skuTarget) continue;
+            if (cartAddSkuLimit !== null && cartAddSkuLimit <= 0) continue;
+
+            const current = skuKeysByTaobaoId.get(tid)?.size ?? 0;
+            if (current > 0 && current < skuTarget) underfilled.push({ taobaoId: tid, current, target: skuTarget });
+          }
+
+          if (underfilled.length > 0) {
+            await job.log(`检测到 ${underfilled.length} 个商品SKU不足，开始补齐...`);
+            console.log(
+              `[Scheduler] SKU不足，触发补齐 accountId=${accountId} items=${underfilled
+                .map((x) => `${x.taobaoId}:${x.current}/${x.target}`)
+                .join(',')}`
+            );
+
+            for (const item of underfilled) {
+              await job.log(`补齐 taobaoId=${item.taobaoId} current=${item.current} target=${item.target}`);
+              const addResult = agentIdToUse && agentHub.isConnected(agentIdToUse)
+                ? await agentHub.call<any>(
+                    agentIdToUse,
+                    'addAllSkusToCart',
+                    {
+                      accountId,
+                      taobaoId: item.taobaoId,
+                      cookies: account.cookies,
+                      delayScale: humanDelayScale,
+                      skuDelayMinMs: cartAddSkuDelayMinMs,
+                      skuDelayMaxMs: cartAddSkuDelayMaxMs,
+                      cartAddSkuLimit: item.target,
+                    },
+                    { timeoutMs: 30 * 60 * 1000 }
+                  )
+                : await autoCartAdder.addAllSkusToCart(accountId, item.taobaoId, account.cookies, {
+                    headless: true,
+                    skuLimit: item.target,
+                    skuDelayMs: { min: cartAddSkuDelayMinMs, max: cartAddSkuDelayMaxMs },
+                  });
+
+              const done = `${(addResult as any)?.successCount ?? 0}/${(addResult as any)?.totalSkus ?? 0}`;
+              await job.log(`补齐完成 taobaoId=${item.taobaoId} success=${done}`);
+            }
+
+            // 补齐后重新抓取一次购物车（使用同样的抢占机制避免与加购冲突）
+            const pauseTimeoutMs = 20000;
+            const pausedUsingAgent = Boolean(agentIdToUse && agentHub.isConnected(agentIdToUse));
+            if (pausedUsingAgent && agentIdToUse) {
+              await agentHub
+                .call<any>(agentIdToUse, 'pauseAddForScrape', { accountId, timeoutMs: pauseTimeoutMs }, { timeoutMs: pauseTimeoutMs + 5000 })
+                .catch(() => {});
+            } else {
+              await requestPauseForAddWithTimeout(accountId, pauseTimeoutMs).catch(() => {});
+            }
+
+            try {
+              const next = await scrapeCart();
+              if (next?.success) cart = next;
+            } finally {
+              if (pausedUsingAgent && agentIdToUse) {
+                await agentHub.call<any>(agentIdToUse, 'resumeAddForScrape', { accountId }, { timeoutMs: 15000 }).catch(() => {});
+              } else {
+                resumeAdd(accountId);
+              }
+            }
+
+            try {
+              const cartSkuLoaded = cart?.success && Array.isArray(cart?.products) ? cart.products.length : 0;
+              const cartSkuTotalRaw = (cart as any)?.uiTotalCount;
+              const cartSkuTotal =
+                typeof cartSkuTotalRaw === 'number' && Number.isFinite(cartSkuTotalRaw) ? cartSkuTotalRaw : null;
+              setCartSkuStats(accountId, { cartSkuTotal, cartSkuLoaded });
+            } catch {}
+          }
+          }
+        } catch (e) {
+          console.warn(`[Scheduler] SKU补齐逻辑异常，忽略并继续抓价 accountId=${accountId}:`, e);
+        }
+      }
+
       const result = await cartScraper.updatePricesFromCart(accountId, account.cookies, { cartResult: cart });
 
       console.log(
@@ -660,9 +837,28 @@ class SchedulerService {
       ? Math.max(cartAddSkuDelayMinMs, Math.floor(cartAddSkuDelayMaxMsRaw))
       : 2200;
 
+    const cartAddSkuLimitDefaultRaw = Number((scraperConfig as any)?.cartAddSkuLimit);
+    const cartAddSkuLimitDefault = Number.isFinite(cartAddSkuLimitDefaultRaw)
+      ? Math.max(0, Math.floor(cartAddSkuLimitDefaultRaw))
+      : 0;
+    const cartAddSkuLimitOverrideRaw = Object.prototype.hasOwnProperty.call(job.data as any, 'cartAddSkuLimit')
+      ? (job.data as any).cartAddSkuLimit
+      : undefined;
+    const cartAddSkuLimitOverrideNum =
+      cartAddSkuLimitOverrideRaw === undefined
+        ? null
+        : typeof cartAddSkuLimitOverrideRaw === 'number'
+          ? cartAddSkuLimitOverrideRaw
+          : Number(cartAddSkuLimitOverrideRaw);
+    const cartAddSkuLimit =
+      cartAddSkuLimitOverrideNum !== null && Number.isFinite(cartAddSkuLimitOverrideNum)
+        ? Math.max(0, Math.floor(cartAddSkuLimitOverrideNum))
+        : cartAddSkuLimitDefault;
+
     await job.updateProgress({ total: 0, current: 0, success: 0, failed: 0 });
     await job.log(`开始处理商品 ${taobaoId}...`);
     await job.log(`delayScale=${humanDelayScale}`);
+    await job.log(`skuLimit=${cartAddSkuLimit > 0 ? cartAddSkuLimit : 'all'}`);
 
     const account = await prisma.taobaoAccount.findUnique({
       where: { id: accountId },
@@ -777,12 +973,14 @@ class SchedulerService {
             delayScale: humanDelayScale,
             skuDelayMinMs: cartAddSkuDelayMinMs,
             skuDelayMaxMs: cartAddSkuDelayMaxMs,
+            cartAddSkuLimit,
           },
           { timeoutMs: 30 * 60 * 1000, onProgress }
         )
       : await autoCartAdder.addAllSkusToCart(accountId, taobaoId, account.cookies, {
           headless: false,
           onProgress,
+          skuLimit: cartAddSkuLimit,
           skuDelayMs: { min: cartAddSkuDelayMinMs, max: cartAddSkuDelayMaxMs },
         });
 
@@ -932,13 +1130,28 @@ class SchedulerService {
         },
       });
 
+      const rawData: any = { taobaoId, source: 'cart_initial', variants, cartAddSkuLimit };
+      try {
+        const skuTotalRaw = (result as any)?.skuTotal;
+        const skuAvailableRaw = (result as any)?.skuAvailable;
+        const skuTargetRaw = (result as any)?.skuTarget;
+
+        const skuTotalNum = typeof skuTotalRaw === 'number' ? skuTotalRaw : Number(skuTotalRaw);
+        const skuAvailableNum = typeof skuAvailableRaw === 'number' ? skuAvailableRaw : Number(skuAvailableRaw);
+        const skuTargetNum = typeof skuTargetRaw === 'number' ? skuTargetRaw : Number(skuTargetRaw);
+
+        if (Number.isFinite(skuTotalNum) && skuTotalNum >= 0) rawData.skuTotal = Math.floor(skuTotalNum);
+        if (Number.isFinite(skuAvailableNum) && skuAvailableNum >= 0) rawData.skuAvailable = Math.floor(skuAvailableNum);
+        if (Number.isFinite(skuTargetNum) && skuTargetNum >= 0) rawData.skuTarget = Math.floor(skuTargetNum);
+      } catch {}
+
       await prisma.priceSnapshot.create({
         data: {
           productId: baseProduct.id,
           finalPrice: minPrice,
           originalPrice: minOrig,
           accountId,
-          rawData: { taobaoId, source: 'cart_initial', variants } as any,
+          rawData,
         },
       });
 
@@ -968,6 +1181,7 @@ class SchedulerService {
       ownerUserId: string | null;
       preferredAccountId: string | null;
       humanDelayScale: number;
+      cartAddSkuLimit: number;
       cartAddSkuDelayMinMs: number;
       cartAddSkuDelayMaxMs: number;
       cartAddProductDelayMinMs: number;
@@ -980,6 +1194,7 @@ class SchedulerService {
       ownerUserId,
       preferredAccountId,
       humanDelayScale,
+      cartAddSkuLimit,
       cartAddSkuDelayMinMs,
       cartAddSkuDelayMaxMs,
       cartAddProductDelayMinMs,
@@ -1174,12 +1389,14 @@ class SchedulerService {
                 delayScale: humanDelayScale,
                 skuDelayMinMs: cartAddSkuDelayMinMs,
                 skuDelayMaxMs: cartAddSkuDelayMaxMs,
+                cartAddSkuLimit,
               },
               { timeoutMs: 30 * 60 * 1000, onProgress }
             )
           : await autoCartAdder.addAllSkusToCart(itemAccountId, item.taobaoId, account.cookies, {
               headless: false,
               onProgress,
+              skuLimit: cartAddSkuLimit,
               skuDelayMs: { min: cartAddSkuDelayMinMs, max: cartAddSkuDelayMaxMs },
             });
 
@@ -1340,13 +1557,28 @@ class SchedulerService {
             },
           });
 
+          const rawData: any = { taobaoId: item.taobaoId, source: 'cart_initial', variants, cartAddSkuLimit };
+          try {
+            const skuTotalRaw = (result as any)?.skuTotal;
+            const skuAvailableRaw = (result as any)?.skuAvailable;
+            const skuTargetRaw = (result as any)?.skuTarget;
+
+            const skuTotalNum = typeof skuTotalRaw === 'number' ? skuTotalRaw : Number(skuTotalRaw);
+            const skuAvailableNum = typeof skuAvailableRaw === 'number' ? skuAvailableRaw : Number(skuAvailableRaw);
+            const skuTargetNum = typeof skuTargetRaw === 'number' ? skuTargetRaw : Number(skuTargetRaw);
+
+            if (Number.isFinite(skuTotalNum) && skuTotalNum >= 0) rawData.skuTotal = Math.floor(skuTotalNum);
+            if (Number.isFinite(skuAvailableNum) && skuAvailableNum >= 0) rawData.skuAvailable = Math.floor(skuAvailableNum);
+            if (Number.isFinite(skuTargetNum) && skuTargetNum >= 0) rawData.skuTarget = Math.floor(skuTargetNum);
+          } catch {}
+
           await prisma.priceSnapshot.create({
             data: {
               productId: baseProduct.id,
               finalPrice: minPrice,
               originalPrice: minOrig,
               accountId: itemAccountId,
-              rawData: { taobaoId: item.taobaoId, source: 'cart_initial', variants } as any,
+              rawData,
             },
           });
 
@@ -1432,6 +1664,24 @@ class SchedulerService {
       ? Math.max(cartAddProductDelayMinMs, Math.floor(cartAddProductDelayMaxMsRaw))
       : cartAddProductDelayMinMs;
 
+    const cartAddSkuLimitDefaultRaw = Number((scraperConfig as any)?.cartAddSkuLimit);
+    const cartAddSkuLimitDefault = Number.isFinite(cartAddSkuLimitDefaultRaw)
+      ? Math.max(0, Math.floor(cartAddSkuLimitDefaultRaw))
+      : 0;
+    const cartAddSkuLimitOverrideRaw = Object.prototype.hasOwnProperty.call(job.data as any, 'cartAddSkuLimit')
+      ? (job.data as any).cartAddSkuLimit
+      : undefined;
+    const cartAddSkuLimitOverrideNum =
+      cartAddSkuLimitOverrideRaw === undefined
+        ? null
+        : typeof cartAddSkuLimitOverrideRaw === 'number'
+          ? cartAddSkuLimitOverrideRaw
+          : Number(cartAddSkuLimitOverrideRaw);
+    const cartAddSkuLimit =
+      cartAddSkuLimitOverrideNum !== null && Number.isFinite(cartAddSkuLimitOverrideNum)
+        ? Math.max(0, Math.floor(cartAddSkuLimitOverrideNum))
+        : cartAddSkuLimitDefault;
+
     if (useAccountPool) {
       return this.processCartBatchAddJobAccountPool(job, {
         batchJobIdText,
@@ -1439,6 +1689,7 @@ class SchedulerService {
         ownerUserId,
         preferredAccountId: requestedAccountId || null,
         humanDelayScale,
+        cartAddSkuLimit,
         cartAddSkuDelayMinMs,
         cartAddSkuDelayMaxMs,
         cartAddProductDelayMinMs,
@@ -1606,6 +1857,7 @@ class SchedulerService {
                 delayScale: humanDelayScale,
                 skuDelayMinMs: cartAddSkuDelayMinMs,
                 skuDelayMaxMs: cartAddSkuDelayMaxMs,
+                cartAddSkuLimit,
               },
               { timeoutMs: 30 * 60 * 1000, onProgress }
             )
@@ -1613,6 +1865,7 @@ class SchedulerService {
               headless: false,
               onProgress,
               existingCartSkus,
+              skuLimit: cartAddSkuLimit,
               skuDelayMs: { min: cartAddSkuDelayMinMs, max: cartAddSkuDelayMaxMs },
             });
         performedAgentAdd++;
@@ -1760,13 +2013,28 @@ class SchedulerService {
             },
           });
 
+          const rawData: any = { taobaoId: item.taobaoId, source: 'cart_initial', variants, cartAddSkuLimit };
+          try {
+            const skuTotalRaw = (result as any)?.skuTotal;
+            const skuAvailableRaw = (result as any)?.skuAvailable;
+            const skuTargetRaw = (result as any)?.skuTarget;
+
+            const skuTotalNum = typeof skuTotalRaw === 'number' ? skuTotalRaw : Number(skuTotalRaw);
+            const skuAvailableNum = typeof skuAvailableRaw === 'number' ? skuAvailableRaw : Number(skuAvailableRaw);
+            const skuTargetNum = typeof skuTargetRaw === 'number' ? skuTargetRaw : Number(skuTargetRaw);
+
+            if (Number.isFinite(skuTotalNum) && skuTotalNum >= 0) rawData.skuTotal = Math.floor(skuTotalNum);
+            if (Number.isFinite(skuAvailableNum) && skuAvailableNum >= 0) rawData.skuAvailable = Math.floor(skuAvailableNum);
+            if (Number.isFinite(skuTargetNum) && skuTargetNum >= 0) rawData.skuTarget = Math.floor(skuTargetNum);
+          } catch {}
+
           await prisma.priceSnapshot.create({
             data: {
               productId: baseProduct.id,
               finalPrice: minPrice,
               originalPrice: minOrig,
               accountId,
-              rawData: { taobaoId: item.taobaoId, source: 'cart_initial', variants } as any,
+              rawData,
             },
           });
 

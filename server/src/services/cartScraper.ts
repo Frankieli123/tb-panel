@@ -1,12 +1,26 @@
 import { Page, Frame } from 'playwright';
-import { PrismaClient } from '@prisma/client';
 import { sharedBrowserManager } from './sharedBrowserManager.js';
 import { HumanSimulator, randomDelay, randomRange } from './humanSimulator.js';
-import { notificationService } from './notification.js';
-import { frontendPush } from './frontendPush.js';
 import { calculatePriceDrop } from '../utils/helpers.js';
 
-const prisma = new PrismaClient();
+import type { PrismaClient } from '@prisma/client';
+
+let prismaInstance: PrismaClient | null = null;
+
+async function getPrisma(): Promise<PrismaClient> {
+  if (prismaInstance) return prismaInstance;
+  const mod = await import('@prisma/client');
+  prismaInstance = new mod.PrismaClient();
+  return prismaInstance;
+}
+
+async function getNotificationService(): Promise<any> {
+  return (await import('./notification.js')).notificationService as any;
+}
+
+async function getFrontendPush(): Promise<any> {
+  return (await import('./frontendPush.js')).frontendPush as any;
+}
 
 const CART_BASE_SKU_ID = '__BASE__';
 
@@ -73,6 +87,8 @@ export class CartScraper {
     userId?: string | null
   ): Promise<void> {
     try {
+      const prisma = await getPrisma();
+      const notificationService = await getNotificationService();
       const product = await prisma.product.findUnique({ where: { id: productId } });
       if (!product) return;
 
@@ -727,6 +743,9 @@ export class CartScraper {
   }> {
     console.log(`[CartScraper] 从购物车更新价格 accountId=${accountId}`);
 
+    const prisma = await getPrisma();
+    const frontendPush = await getFrontendPush();
+
     const accountUserId =
       (await prisma.taobaoAccount.findUnique({
         where: { id: accountId },
@@ -870,17 +889,37 @@ export class CartScraper {
           }
         });
 
+        const rawData: any = {
+          taobaoId: product.taobaoId,
+          source: 'cart',
+          variants
+        };
+
+        try {
+          const cartAddSkuLimitRaw = prevRaw?.cartAddSkuLimit;
+          const skuTotalRaw = prevRaw?.skuTotal;
+          const skuAvailableRaw = prevRaw?.skuAvailable;
+          const skuTargetRaw = prevRaw?.skuTarget;
+
+          const cartAddSkuLimitNum =
+            typeof cartAddSkuLimitRaw === 'number' ? cartAddSkuLimitRaw : Number(cartAddSkuLimitRaw);
+          const skuTotalNum = typeof skuTotalRaw === 'number' ? skuTotalRaw : Number(skuTotalRaw);
+          const skuAvailableNum = typeof skuAvailableRaw === 'number' ? skuAvailableRaw : Number(skuAvailableRaw);
+          const skuTargetNum = typeof skuTargetRaw === 'number' ? skuTargetRaw : Number(skuTargetRaw);
+
+          if (Number.isFinite(cartAddSkuLimitNum) && cartAddSkuLimitNum >= 0) rawData.cartAddSkuLimit = Math.floor(cartAddSkuLimitNum);
+          if (Number.isFinite(skuTotalNum) && skuTotalNum >= 0) rawData.skuTotal = Math.floor(skuTotalNum);
+          if (Number.isFinite(skuAvailableNum) && skuAvailableNum >= 0) rawData.skuAvailable = Math.floor(skuAvailableNum);
+          if (Number.isFinite(skuTargetNum) && skuTargetNum >= 0) rawData.skuTarget = Math.floor(skuTargetNum);
+        } catch {}
+
         await prisma.priceSnapshot.create({
           data: {
             productId: product.id,
             finalPrice: minPrice,
             originalPrice: minOrig,
             accountId,
-            rawData: {
-              taobaoId: product.taobaoId,
-              source: 'cart',
-              variants
-            } as any
+            rawData,
           }
         });
 
@@ -911,6 +950,7 @@ export class CartScraper {
   }
 
   private async ensureBaseProducts(accountId: string): Promise<void> {
+    const prisma = await getPrisma();
     const legacy = await prisma.product.findMany({
       where: {
         ownerAccountId: accountId,

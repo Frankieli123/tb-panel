@@ -166,6 +166,7 @@ export interface ScraperConfig {
   maxDelay: number;      // 最大延迟(秒)
   pollingInterval: number; // 轮询间隔(分钟)
   humanDelayScale: number; // 人类操作延迟缩放（<1 更快，>1 更慢）
+  cartAddSkuLimit: number; // 加购：每商品随机 SKU 数（0=全部）
   cartAddSkuDelayMinMs: number; // 加购：SKU 间隔最小(ms)
   cartAddSkuDelayMaxMs: number; // 加购：SKU 间隔最大(ms)
   cartAddProductDelayMinMs: number; // 加购：商品开始间隔最小(ms)

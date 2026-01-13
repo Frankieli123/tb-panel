@@ -14,6 +14,7 @@ export default function AddProductModal({ isOpen, onClose, onSuccess, onTaskStar
   const [url, setUrl] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [cartAddSkuLimitText, setCartAddSkuLimitText] = useState('');
 
   const [accounts, setAccounts] = useState<TaobaoAccount[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState('auto');
@@ -54,11 +55,16 @@ export default function AddProductModal({ isOpen, onClose, onSuccess, onTaskStar
     setError('');
 
     try {
+      const cartAddSkuLimit =
+        cartAddSkuLimitText.trim().length > 0
+          ? Math.max(0, parseInt(cartAddSkuLimitText.trim(), 10) || 0)
+          : undefined;
+
       // 购物车模式：启动后台任务并立即关闭弹窗
       const { jobId } =
         selectedAccountId === 'auto'
-          ? await api.addCartModeProduct(url.trim(), undefined, true)
-          : await api.addCartModeProduct(url.trim(), selectedAccountId);
+          ? await api.addCartModeProduct(url.trim(), undefined, true, cartAddSkuLimit)
+          : await api.addCartModeProduct(url.trim(), selectedAccountId, false, cartAddSkuLimit);
 
       // 通知 Dashboard 开始监控此任务
       if (onTaskStart) {
@@ -68,6 +74,7 @@ export default function AddProductModal({ isOpen, onClose, onSuccess, onTaskStar
 
       // 立即关闭弹窗并重置状态
       setUrl('');
+      setCartAddSkuLimitText('');
       setLoading(false);
       onSuccess();
       onClose();
@@ -96,7 +103,7 @@ export default function AddProductModal({ isOpen, onClose, onSuccess, onTaskStar
 
         <form onSubmit={handleSubmit} className="p-6">
           <p className="text-sm text-gray-500 mb-4">
-            自动将商品的所有 SKU 加入购物车，并通过购物车抓取精准价格（需要选择已登录账号）。
+            自动将商品的部分或全部 SKU 加入购物车，并通过购物车抓取价格（需要选择已登录账号）。
           </p>
 
           <div className="relative mb-4">
@@ -132,6 +139,21 @@ export default function AddProductModal({ isOpen, onClose, onSuccess, onTaskStar
             {accounts.length === 0 && (
               <p className="mt-1 text-xs text-red-500">没有可用账号，请先添加并登录账号</p>
             )}
+          </div>
+
+          <div className="mb-4">
+            <label className="block text-sm font-medium text-gray-700 mb-1">加购 SKU 数量（可选）</label>
+            <input
+              type="number"
+              min="0"
+              step="1"
+              value={cartAddSkuLimitText}
+              onChange={(e) => setCartAddSkuLimitText(e.target.value)}
+              placeholder="留空=默认；0=全部；N=随机 N 个"
+              className="block w-full py-2.5 px-3 border border-gray-200 rounded-xl bg-gray-50 focus:outline-none focus:bg-white focus:ring-2 focus:ring-orange-500 transition-colors text-sm"
+              disabled={loading}
+            />
+            <p className="mt-1 text-xs text-gray-400">仅影响本次新增任务，不会改变已在监控的商品。</p>
           </div>
 
           {error && (

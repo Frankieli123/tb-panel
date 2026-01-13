@@ -326,6 +326,8 @@ async function redeemPairCode(options: { wsBase: string; agentId: string; code: 
 }
 
 async function ensureUiOpenedOnce(statusUrl: string): Promise<void> {
+  if (hasFlag('--no-ui-open')) return;
+
   const dir = getAgentStoreDir();
   const flagPath = path.join(dir, 'ui-opened.txt');
   try {
@@ -734,6 +736,10 @@ async function main(): Promise<void> {
             : null;
           const skuDelayMs =
             skuDelayMinMs !== null && skuDelayMaxMs !== null ? { min: skuDelayMinMs, max: skuDelayMaxMs } : undefined;
+          const cartAddSkuLimitRaw = (params as any).cartAddSkuLimit;
+          const cartAddSkuLimitNum =
+            typeof cartAddSkuLimitRaw === 'number' ? cartAddSkuLimitRaw : Number(cartAddSkuLimitRaw);
+          const cartAddSkuLimit = Number.isFinite(cartAddSkuLimitNum) ? Math.max(0, Math.floor(cartAddSkuLimitNum)) : 0;
           const delayScaleRaw =
             typeof (params as any).delayScale === 'number'
               ? (params as any).delayScale
@@ -746,6 +752,7 @@ async function main(): Promise<void> {
             headless: false,
             onProgress: (progress, log) => sendProgress(progress, log),
             existingCartSkus,
+            skuLimit: cartAddSkuLimit,
             skuDelayMs,
           });
 

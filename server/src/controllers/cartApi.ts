@@ -18,12 +18,14 @@ const addCartModeProductSchema = z.object({
   url: z.string().min(1),
   accountId: z.string().uuid().optional(),
   useAccountPool: z.boolean().optional(),
+  cartAddSkuLimit: z.number().int().min(0).optional(),
 });
 
 const batchAddCartModeSchema = z.object({
   urls: z.array(z.string().min(1)).min(1).max(100),
   accountId: z.string().uuid().optional(),
   useAccountPool: z.boolean().optional(),
+  cartAddSkuLimit: z.number().int().min(0).optional(),
 });
 
 type AddProgressStatus = 'pending' | 'running' | 'completed' | 'failed';
@@ -79,7 +81,7 @@ function groupItemLogs(lines: string[]): Map<number, string[]> {
 
 router.post('/products/add-cart-mode', async (req: Request, res: Response) => {
   try {
-    const { url, accountId, useAccountPool } = addCartModeProductSchema.parse(req.body);
+    const { url, accountId, useAccountPool, cartAddSkuLimit } = addCartModeProductSchema.parse(req.body);
     const resolvedUseAccountPool = Boolean(useAccountPool) || !accountId;
 
     const taobaoId = extractTaobaoId(url);
@@ -109,24 +111,23 @@ router.post('/products/add-cart-mode', async (req: Request, res: Response) => {
     const scope = getRequestScope(req);
     const ownerUserId = scope.kind === 'user' ? scope.userId : null;
 
-    await taskQueue.add(
-      'cart-add',
-      {
-        accountId: resolvedUseAccountPool ? null : (accountId ?? null),
-        useAccountPool: resolvedUseAccountPool,
-        taobaoId,
-        url,
-        ownerUserId,
-      },
-      {
-        jobId,
-        priority: 10,
-        attempts: 1,
-        keepLogs: 500,
-        removeOnComplete: { age: 60 * 60, count: 500 },
-        removeOnFail: { age: 24 * 60 * 60, count: 500 },
-      }
-    );
+    const jobData: any = {
+      accountId: resolvedUseAccountPool ? null : (accountId ?? null),
+      useAccountPool: resolvedUseAccountPool,
+      taobaoId,
+      url,
+      ownerUserId,
+    };
+    if (cartAddSkuLimit !== undefined) jobData.cartAddSkuLimit = cartAddSkuLimit;
+
+    await taskQueue.add('cart-add', jobData, {
+      jobId,
+      priority: 10,
+      attempts: 1,
+      keepLogs: 500,
+      removeOnComplete: { age: 60 * 60, count: 500 },
+      removeOnFail: { age: 24 * 60 * 60, count: 500 },
+    });
 
     res.json({
       success: true,
@@ -178,7 +179,7 @@ router.get('/products/add-progress/:jobId', async (req: Request, res: Response) 
 
 router.post('/products/batch-add-cart-mode', async (req: Request, res: Response) => {
   try {
-    const { urls, accountId, useAccountPool } = batchAddCartModeSchema.parse(req.body);
+    const { urls, accountId, useAccountPool, cartAddSkuLimit } = batchAddCartModeSchema.parse(req.body);
     const resolvedUseAccountPool = Boolean(useAccountPool) || !accountId;
 
     if (!resolvedUseAccountPool) {
@@ -223,23 +224,22 @@ router.post('/products/batch-add-cart-mode', async (req: Request, res: Response)
     const scope = getRequestScope(req);
     const ownerUserId = scope.kind === 'user' ? scope.userId : null;
 
-    await taskQueue.add(
-      'cart-batch-add',
-      {
-        accountId: resolvedUseAccountPool ? null : (accountId ?? null),
-        useAccountPool: resolvedUseAccountPool,
-        items: accepted,
-        ownerUserId,
-      },
-      {
-        jobId: batchJobId,
-        priority: 10,
-        attempts: 1,
-        keepLogs: 2000,
-        removeOnComplete: { age: 60 * 60, count: 200 },
-        removeOnFail: { age: 24 * 60 * 60, count: 200 },
-      }
-    );
+    const jobData: any = {
+      accountId: resolvedUseAccountPool ? null : (accountId ?? null),
+      useAccountPool: resolvedUseAccountPool,
+      items: accepted,
+      ownerUserId,
+    };
+    if (cartAddSkuLimit !== undefined) jobData.cartAddSkuLimit = cartAddSkuLimit;
+
+    await taskQueue.add('cart-batch-add', jobData, {
+      jobId: batchJobId,
+      priority: 10,
+      attempts: 1,
+      keepLogs: 2000,
+      removeOnComplete: { age: 60 * 60, count: 200 },
+      removeOnFail: { age: 24 * 60 * 60, count: 200 },
+    });
 
     res.json({
       success: true,

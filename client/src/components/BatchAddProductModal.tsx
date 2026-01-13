@@ -22,6 +22,7 @@ export default function BatchAddProductModal({ isOpen, onClose, onSuccess, onTas
   const [text, setText] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [cartAddSkuLimitText, setCartAddSkuLimitText] = useState('');
 
   const [accounts, setAccounts] = useState<TaobaoAccount[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState('auto');
@@ -31,6 +32,7 @@ export default function BatchAddProductModal({ isOpen, onClose, onSuccess, onTas
     loadAccounts();
     setText('');
     setError('');
+    setCartAddSkuLimitText('');
   }, [isOpen]);
 
   const loadAccounts = async () => {
@@ -109,10 +111,14 @@ export default function BatchAddProductModal({ isOpen, onClose, onSuccess, onTas
     setError('');
 
     try {
+      const cartAddSkuLimit =
+        cartAddSkuLimitText.trim().length > 0
+          ? Math.max(0, parseInt(cartAddSkuLimitText.trim(), 10) || 0)
+          : undefined;
       const { batchJobId, accepted } =
         selectedAccountId === 'auto'
-          ? await api.addBatchCartModeProducts(validUrls, undefined, true)
-          : await api.addBatchCartModeProducts(validUrls, selectedAccountId);
+          ? await api.addBatchCartModeProducts(validUrls, undefined, true, cartAddSkuLimit)
+          : await api.addBatchCartModeProducts(validUrls, selectedAccountId, false, cartAddSkuLimit);
 
       if (onTaskStart) {
         const title = `批量添加: ${accepted} 个商品`;
@@ -240,6 +246,21 @@ export default function BatchAddProductModal({ isOpen, onClose, onSuccess, onTas
             {accounts.length === 0 && (
               <p className="mt-1 text-xs text-red-500">没有可用账号，请先添加并登录账号</p>
             )}
+          </div>
+
+          <div className="mb-4">
+            <label className="block text-sm font-medium text-gray-700 mb-1">加购 SKU 数量（可选）</label>
+            <input
+              type="number"
+              min="0"
+              step="1"
+              value={cartAddSkuLimitText}
+              onChange={(e) => setCartAddSkuLimitText(e.target.value)}
+              placeholder="留空=默认；0=全部；N=随机 N 个"
+              className="block w-full py-2.5 px-3 border border-gray-200 rounded-xl bg-gray-50 focus:outline-none focus:bg-white focus:ring-2 focus:ring-orange-500 transition-colors text-sm"
+              disabled={loading}
+            />
+            <p className="mt-1 text-xs text-gray-400">该设置对本次批量任务内所有商品生效。</p>
           </div>
 
           {error && (

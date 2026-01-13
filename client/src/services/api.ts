@@ -111,18 +111,30 @@ export const api = {
   // 商品
   getProducts: () => request<Product[]>('/products'),
 
-  addCartModeProduct: (url: string, accountId?: string, useAccountPool?: boolean) =>
+  addCartModeProduct: (url: string, accountId?: string, useAccountPool?: boolean, cartAddSkuLimit?: number) =>
     request<{ jobId: string }>('/products/add-cart-mode', {
       method: 'POST',
       headers: csrfToken ? { 'x-csrf-token': csrfToken } : undefined,
-      body: JSON.stringify(useAccountPool ? { url, useAccountPool: true } : { url, accountId }),
+      body: JSON.stringify(
+        (() => {
+          const body: any = useAccountPool ? { url, useAccountPool: true } : { url, accountId };
+          if (cartAddSkuLimit !== undefined) body.cartAddSkuLimit = cartAddSkuLimit;
+          return body;
+        })()
+      ),
     }),
 
-  addBatchCartModeProducts: (urls: string[], accountId?: string, useAccountPool?: boolean) =>
+  addBatchCartModeProducts: (urls: string[], accountId?: string, useAccountPool?: boolean, cartAddSkuLimit?: number) =>
     request<{ batchJobId: string; accepted: number; rejected: number }>('/products/batch-add-cart-mode', {
       method: 'POST',
       headers: csrfToken ? { 'x-csrf-token': csrfToken } : undefined,
-      body: JSON.stringify(useAccountPool ? { urls, useAccountPool: true } : { urls, accountId }),
+      body: JSON.stringify(
+        (() => {
+          const body: any = useAccountPool ? { urls, useAccountPool: true } : { urls, accountId };
+          if (cartAddSkuLimit !== undefined) body.cartAddSkuLimit = cartAddSkuLimit;
+          return body;
+        })()
+      ),
     }),
 
   getBatchAddProgress: (batchJobId: string) =>

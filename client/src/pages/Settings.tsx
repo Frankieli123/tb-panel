@@ -28,6 +28,7 @@ export default function Settings() {
       const maxDelay = Math.max(minDelay, Math.floor(n(data.maxDelay, 180)));
       const pollingInterval = Math.max(10, Math.floor(n(data.pollingInterval, 60)));
 
+      const cartAddSkuLimit = Math.max(0, Math.floor(n(data.cartAddSkuLimit, 0)));
       const cartAddSkuDelayMinMs = Math.max(0, Math.floor(n(data.cartAddSkuDelayMinMs, 900)));
       const cartAddSkuDelayMaxMs = Math.max(cartAddSkuDelayMinMs, Math.floor(n(data.cartAddSkuDelayMaxMs, 2200)));
       const cartAddProductDelayMinMs = Math.max(0, Math.floor(n(data.cartAddProductDelayMinMs, 0)));
@@ -42,6 +43,7 @@ export default function Settings() {
         maxDelay,
         pollingInterval,
         humanDelayScale,
+        cartAddSkuLimit,
         cartAddSkuDelayMinMs,
         cartAddSkuDelayMaxMs,
         cartAddProductDelayMinMs,
@@ -185,6 +187,22 @@ export default function Settings() {
           </div>
 
           <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">每商品加购 SKU 数量</label>
+            <div className="relative">
+              <input
+                type="number"
+                min="0"
+                step="1"
+                value={config.cartAddSkuLimit}
+                onChange={(e) => updateConfig({ cartAddSkuLimit: Math.max(0, parseInt(e.target.value) || 0) })}
+                className="w-full pl-4 pr-12 py-2.5 border border-gray-200 rounded-xl focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 outline-none transition-all"
+              />
+              <span className="absolute right-4 top-2.5 text-gray-400 text-sm">个</span>
+            </div>
+            <p className="text-xs text-gray-400 mt-2">0 表示全部 SKU，仅影响新增的加购任务。</p>
+          </div>
+
+          <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">操作速度倍率（影响加购/购物车抓取）</label>
             <div className="relative">
               <input
@@ -222,7 +240,7 @@ export default function Settings() {
 
           <div className="text-sm text-gray-500 bg-gray-50 p-4 rounded-xl">
             <span className="font-medium text-gray-700">当前生效：</span>
-            SKU 间隔({config.cartAddSkuDelayMinMs}~{config.cartAddSkuDelayMaxMs}ms)；商品开始间隔({config.cartAddProductDelayMinMs}~{config.cartAddProductDelayMaxMs}ms)；操作速度按 <span className="text-orange-600 font-bold">{config.humanDelayScale}x</span> 缩放。
+            SKU 数量({config.cartAddSkuLimit === 0 ? '全部' : `${config.cartAddSkuLimit}个`})；SKU 间隔({config.cartAddSkuDelayMinMs}~{config.cartAddSkuDelayMaxMs}ms)；商品开始间隔({config.cartAddProductDelayMinMs}~{config.cartAddProductDelayMaxMs}ms)；操作速度按 <span className="text-orange-600 font-bold">{config.humanDelayScale}x</span> 缩放。
           </div>
         </div>
       </section>
