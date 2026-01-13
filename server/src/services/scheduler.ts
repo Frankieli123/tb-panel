@@ -390,7 +390,7 @@ class SchedulerService {
       }
 
       // 获取抓取配置
-      const scraperConfig = await (prisma as any).scraperConfig.findFirst();
+      const scraperConfig = await (prisma as any).scraperConfig.findFirst({ orderBy: { updatedAt: 'desc' } });
       const quietNow = this.isWithinQuietHours(new Date(nowMs), scraperConfig);
       if (quietNow) {
         if (!this.isQuietPaused) {
@@ -445,15 +445,17 @@ class SchedulerService {
    */
   private async processCartScrapeJob(job: Job): Promise<{ success: boolean; updated: number; failed: number; missing: number }> {
     const { accountId, productCount } = job.data;
-    console.log(`[Scheduler] 购物车抓价开始 accountId=${accountId} products=${productCount}`);
 
     try {
-      const scraperConfig = await (prisma as any).scraperConfig.findFirst();
+      const scraperConfig = await (prisma as any).scraperConfig.findFirst({ orderBy: { updatedAt: 'desc' } });
       const force = Boolean((job.data as any)?.force);
       if (!force && this.isWithinQuietHours(new Date(), scraperConfig)) {
-        console.log(`[Scheduler] 静默时间生效，跳过购物车抓价 accountId=${accountId}`);
+        console.log(`[Scheduler] 静默时间生效，跳过购物车抓价 accountId=${accountId} products=${productCount}`);
         return { success: true, updated: 0, failed: 0, missing: 0 };
       }
+      console.log(
+        `[Scheduler] 购物车抓价开始 accountId=${accountId} products=${productCount}${force ? ' force=1' : ''}`
+      );
       const humanDelayScale =
         typeof scraperConfig?.humanDelayScale === 'number' && Number.isFinite(scraperConfig.humanDelayScale)
           ? scraperConfig.humanDelayScale
@@ -643,7 +645,9 @@ class SchedulerService {
       accountId = this.pickAccountIdFromPool(candidateAccountIds, preferredAccountId);
     }
 
-    const scraperConfig = await (prisma as any).scraperConfig.findFirst().catch(() => null as any);
+    const scraperConfig = await (prisma as any)
+      .scraperConfig.findFirst({ orderBy: { updatedAt: 'desc' } })
+      .catch(() => null as any);
     const humanDelayScale =
       typeof scraperConfig?.humanDelayScale === 'number' && Number.isFinite(scraperConfig.humanDelayScale)
         ? scraperConfig.humanDelayScale
@@ -1402,7 +1406,9 @@ class SchedulerService {
       throw new Error('Invalid cart-batch-add job payload');
     }
 
-    const scraperConfig = await (prisma as any).scraperConfig.findFirst().catch(() => null as any);
+    const scraperConfig = await (prisma as any)
+      .scraperConfig.findFirst({ orderBy: { updatedAt: 'desc' } })
+      .catch(() => null as any);
     const humanDelayScale =
       typeof scraperConfig?.humanDelayScale === 'number' && Number.isFinite(scraperConfig.humanDelayScale)
         ? scraperConfig.humanDelayScale

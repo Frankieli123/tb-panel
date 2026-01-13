@@ -1220,7 +1220,7 @@ router.post('/system/scheduler/:action', requireAdminOrApiKey, async (req: Reque
 // 获取抓取配置
 router.get('/scraper/config', requireAdminOrApiKey, async (req: Request, res: Response) => {
   try {
-    let scraperConfig = await (prisma as any).scraperConfig.findFirst();
+    let scraperConfig = await (prisma as any).scraperConfig.findFirst({ orderBy: { updatedAt: 'desc' } });
 
     if (!scraperConfig) {
       scraperConfig = await (prisma as any).scraperConfig.create({
@@ -1280,7 +1280,7 @@ router.put('/scraper/config', requireAdminOrApiKey, async (req: Request, res: Re
       return res.status(400).json({ success: false, error: '最小延迟不能大于最大延迟' });
     }
 
-    let scraperConfig = await (prisma as any).scraperConfig.findFirst();
+    let scraperConfig = await (prisma as any).scraperConfig.findFirst({ orderBy: { updatedAt: 'desc' } });
 
     const cartAddSkuDelayMinMs = data.cartAddSkuDelayMinMs ?? scraperConfig?.cartAddSkuDelayMinMs ?? 900;
     const cartAddSkuDelayMaxMs = data.cartAddSkuDelayMaxMs ?? scraperConfig?.cartAddSkuDelayMaxMs ?? 2200;
