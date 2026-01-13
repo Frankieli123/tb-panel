@@ -1,9 +1,19 @@
+export const AGENT_STATUS_FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <rect width="32" height="32" rx="8" fill="#f97316" />
+  <g transform="translate(4, 4)" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4Z" />
+    <path d="M3 6h18" />
+    <path d="M16 10a4 4 0 0 1-8 0" />
+  </g>
+</svg>`;
+
 export const AGENT_STATUS_HTML = `<!doctype html>
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>Taobao Agent 状态</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <style>
       :root {
         --bg: #0b1020;
@@ -394,4 +404,3 @@ export const AGENT_STATUS_HTML = `<!doctype html>
   </body>
 </html>
 `;
-

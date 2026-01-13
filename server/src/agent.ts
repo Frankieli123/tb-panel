@@ -11,7 +11,7 @@ import { chromeLauncher } from './services/chromeLauncher.js';
 import { requestPauseForAddWithTimeout, resumeAdd } from './services/accountTaskControl.js';
 import { setHumanDelayScale } from './services/humanSimulator.js';
 import { sharedBrowserManager } from './services/sharedBrowserManager.js';
-import { AGENT_STATUS_HTML } from './ui/agentStatusPage.js';
+import { AGENT_STATUS_FAVICON_SVG, AGENT_STATUS_HTML } from './ui/agentStatusPage.js';
 
 dotenv.config();
 
@@ -382,6 +382,14 @@ async function startStatusServer(options: {
         res.setHeader('content-type', 'text/html; charset=utf-8');
         res.setHeader('cache-control', 'no-store');
         res.end(AGENT_STATUS_HTML);
+        return;
+      }
+
+      if (method === 'GET' && pathname === '/favicon.svg') {
+        res.statusCode = 200;
+        res.setHeader('content-type', 'image/svg+xml; charset=utf-8');
+        res.setHeader('cache-control', 'no-store');
+        res.end(AGENT_STATUS_FAVICON_SVG);
         return;
       }
 
