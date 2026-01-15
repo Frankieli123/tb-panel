@@ -832,14 +832,54 @@ export class CartScraper {
         const prevRaw = (latestSnapshot as any)?.rawData as any;
         const prevVariants = Array.isArray(prevRaw?.variants) ? prevRaw.variants : [];
 
+        const cartAddSkuLimitRaw = prevRaw?.cartAddSkuLimit;
+        const skuTargetRaw = prevRaw?.skuTarget;
+        const cartAddSkuLimitNum =
+          typeof cartAddSkuLimitRaw === 'number' ? cartAddSkuLimitRaw : Number(cartAddSkuLimitRaw);
+        const skuTargetNum = typeof skuTargetRaw === 'number' ? skuTargetRaw : Number(skuTargetRaw);
+        const skuTarget = Number.isFinite(skuTargetNum) && skuTargetNum > 0 ? Math.floor(skuTargetNum) : null;
+        const cartAddSkuLimit =
+          Number.isFinite(cartAddSkuLimitNum) && cartAddSkuLimitNum > 0 ? Math.floor(cartAddSkuLimitNum) : null;
+        const skuLimit = skuTarget ?? cartAddSkuLimit;
+
         const prevByKey = new Map<string, any>();
+        const prevSkuIds = new Set<string>();
+        const prevSkuProps = new Set<string>();
         for (const v of prevVariants) {
+          const skuId = String(v?.skuId || '').trim();
+          const skuProperties = String(v?.skuProperties || '').trim();
+          if (skuId) prevSkuIds.add(skuId);
+          if (skuProperties) prevSkuProps.add(skuProperties);
           const k = String(v?.skuId ?? v?.variantKey ?? v?.skuProperties ?? v?.vidPath ?? '').trim();
           if (!k) continue;
           if (!prevByKey.has(k)) prevByKey.set(k, v);
         }
 
-        const variants = cartItems.map((c) => {
+        let scopedCartItems = cartItems;
+        if (skuLimit !== null && scopedCartItems.length > skuLimit) {
+          const matchPrev = (c: any): boolean => {
+            const skuId = String(c?.skuId || '').trim();
+            if (skuId && prevSkuIds.has(skuId)) return true;
+            const skuProperties = String(c?.skuProperties || '').trim();
+            if (skuProperties && prevSkuProps.has(skuProperties)) return true;
+            return false;
+          };
+
+          const toStableKey = (c: any): string =>
+            `${String(c?.skuId || '').trim()}|${String(c?.skuProperties || '').trim()}`;
+
+          const kept = (prevSkuIds.size > 0 || prevSkuProps.size > 0) ? scopedCartItems.filter(matchPrev) : [];
+          const rest = kept.length > 0 ? scopedCartItems.filter((c) => !matchPrev(c)) : scopedCartItems.slice();
+
+          const next =
+            kept.length > 0
+              ? [...kept, ...rest.sort((a, b) => toStableKey(a).localeCompare(toStableKey(b)))].slice(0, skuLimit)
+              : rest.sort((a, b) => toStableKey(a).localeCompare(toStableKey(b))).slice(0, skuLimit);
+
+          scopedCartItems = next.length > 0 ? next : scopedCartItems;
+        }
+
+        const variants = scopedCartItems.map((c) => {
           const prev =
             prevByKey.get(String(c.skuId)) ||
             prevByKey.get(String(c.skuProperties || '').trim()) ||
@@ -874,7 +914,7 @@ export class CartScraper {
           .filter((n: any) => typeof n === 'number' && n > 0);
         const minOrig = origs.length > 0 ? Math.min(...origs) : null;
 
-        const first = cartItems[0];
+        const first = scopedCartItems[0];
 
         // 找到匹配的商品，更新价格
         const updatedProduct = await prisma.product.update({
@@ -896,16 +936,10 @@ export class CartScraper {
         };
 
         try {
-          const cartAddSkuLimitRaw = prevRaw?.cartAddSkuLimit;
           const skuTotalRaw = prevRaw?.skuTotal;
           const skuAvailableRaw = prevRaw?.skuAvailable;
-          const skuTargetRaw = prevRaw?.skuTarget;
-
-          const cartAddSkuLimitNum =
-            typeof cartAddSkuLimitRaw === 'number' ? cartAddSkuLimitRaw : Number(cartAddSkuLimitRaw);
           const skuTotalNum = typeof skuTotalRaw === 'number' ? skuTotalRaw : Number(skuTotalRaw);
           const skuAvailableNum = typeof skuAvailableRaw === 'number' ? skuAvailableRaw : Number(skuAvailableRaw);
-          const skuTargetNum = typeof skuTargetRaw === 'number' ? skuTargetRaw : Number(skuTargetRaw);
 
           if (Number.isFinite(cartAddSkuLimitNum) && cartAddSkuLimitNum >= 0) rawData.cartAddSkuLimit = Math.floor(cartAddSkuLimitNum);
           if (Number.isFinite(skuTotalNum) && skuTotalNum >= 0) rawData.skuTotal = Math.floor(skuTotalNum);

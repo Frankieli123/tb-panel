@@ -61,7 +61,7 @@ RUN npm run build
 FROM node:20-alpine AS production
 ARG NPM_REGISTRY
 
-RUN apk add --no-cache nginx supervisor openssl tzdata
+RUN apk add --no-cache nginx supervisor openssl tzdata chromium
 
 # 安装 nginx、supervisor，并提供 `openssl` 可执行文件供 Prisma 检测 OpenSSL 版本
 # tzdata 用于支持 TZ 时区（静默时间等按本地时间计算的功能）

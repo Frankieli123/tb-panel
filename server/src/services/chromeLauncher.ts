@@ -359,8 +359,7 @@ export class ChromeLauncher {
     console.log(`[ChromeLauncher] 找到 Chrome: ${chromePath}`);
     console.log(`[ChromeLauncher] 使用用户数据目录: ${this.userDataDir}`);
 
-    // 启动 Chrome 进程
-    this.chromeProcess = spawn(chromePath, [
+    const args = [
       `--remote-debugging-port=${this.debugPort}`,
       `--user-data-dir=${this.userDataDir}`,
       '--no-first-run',
@@ -371,7 +370,21 @@ export class ChromeLauncher {
       '--disable-background-timer-throttling',
       '--disable-backgrounding-occluded-windows',
       '--disable-renderer-backgrounding',
-    ], {
+    ];
+
+    const hasDisplay = Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
+    if (process.platform !== 'win32' && !hasDisplay) {
+      args.push('--headless=new');
+    }
+
+    try {
+      if (typeof process.getuid === 'function' && process.getuid() === 0) {
+        args.push('--no-sandbox', '--disable-setuid-sandbox');
+      }
+    } catch {}
+
+    // 启动 Chrome 进程
+    this.chromeProcess = spawn(chromePath, args, {
       detached: false,
       stdio: 'ignore'
     });

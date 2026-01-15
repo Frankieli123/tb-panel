@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ExternalLink, RefreshCw, Trash2, ChevronDown, ChevronUp, AlertCircle, TrendingDown, TrendingUp, ShoppingCart, User } from 'lucide-react';
+import { ExternalLink, RefreshCw, Trash2, ChevronDown, ChevronUp, AlertCircle, TrendingDown, TrendingUp, ShoppingCart, User, CheckCircle2, Circle } from 'lucide-react';
 import { Product } from '../types';
 import SkuVariantPanel from './SkuVariantPanel';
 
@@ -7,9 +7,12 @@ interface ProductCardProps {
   product: Product;
   onRefresh: (id: string) => void;
   onDelete: (id: string) => void;
+  isSelectionMode?: boolean;
+  isSelected?: boolean;
+  onToggleSelect?: () => void;
 }
 
-export default function ProductCard({ product, onRefresh, onDelete }: ProductCardProps) {
+export default function ProductCard({ product, onRefresh, onDelete, isSelectionMode, isSelected, onToggleSelect }: ProductCardProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [, setTick] = useState(0); // 用于强制重新渲染时间显示
 
@@ -70,9 +73,12 @@ export default function ProductCard({ product, onRefresh, onDelete }: ProductCar
   };
 
   return (
-    <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden transition-all hover:shadow-md">
+    <div 
+      className={`bg-white rounded-2xl shadow-sm border overflow-hidden transition-all hover:shadow-md ${isSelected ? 'border-blue-500 ring-1 ring-blue-500' : 'border-gray-100'}`}
+      onClick={isSelectionMode ? onToggleSelect : undefined}
+    >
       {/* Main Card Content */}
-      <div className="p-4 md:p-5 flex gap-4">
+      <div className={`p-4 md:p-5 flex gap-4 ${isSelectionMode ? 'cursor-pointer select-none' : ''}`}>
         {/* Image */}
         <div className="w-20 h-20 md:w-24 md:h-24 bg-gray-100 rounded-lg overflow-hidden flex-shrink-0 relative">
           {product.imageUrl ? (
@@ -100,6 +106,17 @@ export default function ProductCard({ product, onRefresh, onDelete }: ProductCar
               </span>
             </div>
           )}
+
+          {/* Selection Checkbox Overlay */}
+          {isSelectionMode && (
+            <div className={`absolute inset-0 bg-black/10 flex items-center justify-center backdrop-blur-[1px] transition-opacity ${isSelected ? 'opacity-100' : 'opacity-0 hover:opacity-100'}`}>
+              {isSelected ? (
+                <CheckCircle2 className="w-8 h-8 text-blue-600 fill-white" />
+              ) : (
+                <Circle className="w-8 h-8 text-white fill-black/20" />
+              )}
+            </div>
+          )}
         </div>
 
         {/* Info */}
@@ -119,14 +136,17 @@ export default function ProductCard({ product, onRefresh, onDelete }: ProductCar
                 </div>
               </div>
             </div>
-            <a
-              href={`https://item.taobao.com/item.htm?id=${product.taobaoId}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-gray-400 hover:text-orange-500 transition-colors flex-shrink-0"
-            >
-              <ExternalLink className="w-4 h-4" />
-            </a>
+            {!isSelectionMode && (
+              <a
+                href={`https://item.taobao.com/item.htm?id=${product.taobaoId}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-gray-400 hover:text-orange-500 transition-colors flex-shrink-0"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <ExternalLink className="w-4 h-4" />
+              </a>
+            )}
           </div>
 
           <div className="flex items-end justify-between mt-2">
@@ -165,19 +185,21 @@ export default function ProductCard({ product, onRefresh, onDelete }: ProductCar
             </div>
 
             {/* Mobile Actions (Compact) */}
-            <div className="flex gap-2 md:hidden flex-shrink-0 mb-0.5">
-              <button
-                onClick={() => setIsExpanded(!isExpanded)}
-                className="p-1.5 bg-gray-50 rounded-lg text-gray-600 border border-gray-100"
-              >
-                {isExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-              </button>
-            </div>
+            {!isSelectionMode && (
+              <div className="flex gap-2 md:hidden flex-shrink-0 mb-0.5">
+                <button
+                  onClick={(e) => { e.stopPropagation(); setIsExpanded(!isExpanded); }}
+                  className="p-1.5 bg-gray-50 rounded-lg text-gray-600 border border-gray-100"
+                >
+                  {isExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                </button>
+              </div>
+            )}
           </div>
         </div>
 
         {/* Desktop Stats & Actions (Hidden on Mobile) */}
-        <div className="hidden md:flex flex-col items-end justify-between border-l border-gray-100 pl-6 ml-2 min-w-[140px]">
+        <div className={`hidden md:flex flex-col items-end justify-between border-l border-gray-100 pl-6 ml-2 min-w-[140px] ${isSelectionMode ? 'opacity-50 pointer-events-none' : ''}`}>
           <div className={`px-2.5 py-1 rounded-full text-xs font-bold ${getStatusColor(product)}`}>
             {getStatusText(product)}
           </div>

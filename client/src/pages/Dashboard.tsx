@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { Plus, TrendingDown, Package, Users, Layers } from 'lucide-react';
+import { Plus, TrendingDown, Package, Users, Layers, Trash2 } from 'lucide-react';
 import { api } from '../services/api';
 import { Product, SystemStatus } from '../types';
 import ProductCard from '../components/ProductCard';
@@ -14,6 +14,8 @@ export default function Dashboard() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isBatchModalOpen, setIsBatchModalOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [isSelectionMode, setIsSelectionMode] = useState(false);
+  const [selectedProductIds, setSelectedProductIds] = useState<Set<string>>(new Set());
 
   const { startTaskMonitoring, startBatchTaskMonitoring } = useTask();
 
@@ -90,12 +92,59 @@ export default function Dashboard() {
     }
   };
 
+  const toggleSelectionMode = () => {
+    setIsSelectionMode(!isSelectionMode);
+    setSelectedProductIds(new Set());
+  };
+
+  const toggleProductSelection = (id: string) => {
+    const newSelected = new Set(selectedProductIds);
+    if (newSelected.has(id)) {
+      newSelected.delete(id);
+    } else {
+      newSelected.add(id);
+    }
+    setSelectedProductIds(newSelected);
+  };
+
+  const selectAll = () => {
+    if (selectedProductIds.size === filteredProducts.length) {
+      setSelectedProductIds(new Set());
+    } else {
+      setSelectedProductIds(new Set(filteredProducts.map(p => p.id)));
+    }
+  };
+
+  const handleBulkDelete = async () => {
+    if (selectedProductIds.size === 0) return;
+    
+    if (!confirm(`确定要停止监控选中的 ${selectedProductIds.size} 个商品吗？`)) return;
+
+    const idsToDelete = Array.from(selectedProductIds);
+    const newSelected = new Set(selectedProductIds);
+    
+    for (const id of idsToDelete) {
+      try {
+        await api.deleteProduct(id);
+        newSelected.delete(id);
+        setProducts((prev) => prev.filter((p) => p.id !== id));
+      } catch (error) {
+        console.error(`Failed to delete product ${id}:`, error);
+      }
+    }
+    
+    setSelectedProductIds(newSelected);
+    if (newSelected.size === 0) {
+      setIsSelectionMode(false);
+    }
+  };
+
   const filteredProducts = products;
 
   return (
     <div className="space-y-6">
       {/* Page Header */}
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+      <div className={`flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 ${isSelectionMode ? 'hidden' : ''}`}>
         <div>
           <h2 className="text-2xl font-bold text-gray-900">监控面板</h2>
           <p className="text-gray-500 text-sm mt-1">
@@ -103,6 +152,13 @@ export default function Dashboard() {
           </p>
         </div>
         <div className="flex gap-2 w-full sm:w-auto">
+          <button
+            onClick={toggleSelectionMode}
+            className="flex-1 sm:flex-none w-full sm:w-auto bg-white hover:bg-red-50 text-red-600 px-5 py-2.5 rounded-xl text-sm font-bold flex items-center justify-center gap-2 transition-all border border-red-200"
+          >
+            <Trash2 className="w-4 h-4" />
+            批量删除
+          </button>
           <button
             onClick={() => setIsBatchModalOpen(true)}
             className="flex-1 sm:flex-none w-full sm:w-auto bg-white hover:bg-gray-50 text-gray-700 px-5 py-2.5 rounded-xl text-sm font-bold flex items-center justify-center gap-2 transition-all border border-gray-200"
@@ -120,8 +176,38 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* Selection Mode Header */}
+      {isSelectionMode && (
+        <div className="sticky top-0 z-10 bg-white p-4 rounded-xl shadow-md border border-gray-200 flex flex-wrap items-center justify-between gap-4 animate-in slide-in-from-top-2">
+          <div className="flex items-center gap-4">
+            <span className="font-bold text-gray-900">已选择 {selectedProductIds.size} 项</span>
+            <button 
+              onClick={selectAll}
+              className="text-sm text-blue-600 hover:text-blue-800 font-medium"
+            >
+              {selectedProductIds.size === filteredProducts.length ? '取消全选' : '全选'}
+            </button>
+          </div>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleBulkDelete}
+              disabled={selectedProductIds.size === 0}
+              className="px-4 py-2 bg-red-50 text-red-600 rounded-lg text-sm font-bold hover:bg-red-100 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            >
+              删除选中
+            </button>
+            <button
+              onClick={toggleSelectionMode}
+              className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg text-sm font-medium transition-colors"
+            >
+              完成
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Stats Cards */}
-      {status && (
+      {status && !isSelectionMode && (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100">
             <div className="flex items-center gap-3">
@@ -170,9 +256,11 @@ export default function Dashboard() {
         </div>
       )}
 
-      <div className="flex items-center">
-        <span className="text-xs text-gray-400 ml-auto">显示 {filteredProducts.length} 个商品</span>
-      </div>
+      {!isSelectionMode && (
+        <div className="flex items-center">
+          <span className="text-xs text-gray-400 ml-auto">显示 {filteredProducts.length} 个商品</span>
+        </div>
+      )}
 
       {/* Content */}
       {isLoading ? (
@@ -189,6 +277,9 @@ export default function Dashboard() {
               product={product}
               onRefresh={handleRefresh}
               onDelete={handleDelete}
+              isSelectionMode={isSelectionMode}
+              isSelected={selectedProductIds.has(product.id)}
+              onToggleSelect={() => toggleProductSelection(product.id)}
             />
           ))}
           {filteredProducts.length === 0 && (
