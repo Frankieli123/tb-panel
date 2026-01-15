@@ -369,6 +369,47 @@ router.post('/cart/scrape/:accountId', async (req: Request, res: Response) => {
   }
 });
 
+// 仅入队：用于 UI “刷新购物车统计”按钮（避免长时间阻塞请求）
+router.post('/cart/scrape/:accountId/queue', async (req: Request, res: Response) => {
+  try {
+    const { accountId } = req.params;
+
+    const account = await prisma.taobaoAccount.findFirst({
+      where: { id: accountId, ...buildVisibleAccountsWhere(req) },
+      select: { id: true },
+    });
+
+    if (!account) {
+      return res.status(404).json({ success: false, error: 'Account not found' });
+    }
+
+    const bucket = Math.floor(Date.now() / 15000);
+    const jobId = `cart_scrape_manual_${accountId}_${bucket}`;
+
+    try {
+      await taskQueue.add(
+        'cart-scrape',
+        { accountId, force: true, source: 'manual_cart_scrape_queue' },
+        {
+          jobId,
+          priority: 0,
+          attempts: 1,
+          keepLogs: 200,
+          removeOnComplete: { age: 10 * 60, count: 200 },
+          removeOnFail: { age: 60 * 60, count: 200 },
+        }
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.toLowerCase().includes('already exists')) throw error;
+    }
+
+    res.json({ success: true, data: { queued: true, jobId } });
+  } catch (error) {
+    res.status(500).json({ success: false, error: String(error) });
+  }
+});
+
 router.get('/cart/products/:accountId', async (req: Request, res: Response) => {
   try {
     const { accountId } = req.params;

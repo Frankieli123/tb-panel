@@ -34,7 +34,8 @@ FROM node:20-alpine AS production
 WORKDIR /app
 
 # Prisma 在 Alpine 需要 `openssl` 可执行文件用于识别 OpenSSL 3.x
-RUN apk add --no-cache openssl
+# 购物车模式需要系统 Chromium（Playwright 通过 CDP 连接）
+RUN apk add --no-cache openssl tzdata chromium
 
 # 安装生产依赖
 COPY package*.json ./

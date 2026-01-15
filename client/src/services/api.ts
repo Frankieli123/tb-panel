@@ -237,6 +237,13 @@ export const api = {
       body: JSON.stringify({ agentId }),
     }),
 
+  queueCartScrape: (accountId: string) =>
+    request<{ queued: boolean; jobId: string }>(`/cart/scrape/${encodeURIComponent(accountId)}/queue`, {
+      method: 'POST',
+      headers: csrfToken ? { 'x-csrf-token': csrfToken } : undefined,
+      body: JSON.stringify({}),
+    }),
+
   // 通知
   getNotificationConfig: () => request<NotificationConfig>('/notifications/config'),
 

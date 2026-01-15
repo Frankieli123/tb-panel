@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
-import { Plus, Cookie, Trash2, AlertTriangle, Play, Pause, QrCode, X, Loader2, Monitor, ShoppingCart } from 'lucide-react';
+import { Plus, Cookie, Trash2, AlertTriangle, Play, Pause, QrCode, X, Loader2, Monitor, ShoppingCart, RefreshCw } from 'lucide-react';
 import { api } from '../services/api';
 import { getLoginWsUrl } from '../services/api';
 import type { AgentConnection, TaobaoAccount } from '../types';
@@ -33,6 +33,7 @@ export default function Accounts() {
   const [cookieInput, setCookieInput] = useState('');
   const [loginState, setLoginState] = useState<LoginState | null>(null);
   const [screenshotState, setScreenshotState] = useState<ScreenshotState | null>(null);
+  const [refreshingCartIds, setRefreshingCartIds] = useState<Set<string>>(new Set());
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
@@ -208,6 +209,29 @@ export default function Accounts() {
     }
   };
 
+  const handleRefreshCart = async (accountId: string) => {
+    setRefreshingCartIds((prev) => {
+      const next = new Set(prev);
+      next.add(accountId);
+      return next;
+    });
+
+    try {
+      await api.queueCartScrape(accountId);
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      await loadAccounts();
+    } catch (error) {
+      console.error('Failed to refresh cart:', error);
+      alert(`刷新失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setRefreshingCartIds((prev) => {
+        const next = new Set(prev);
+        next.delete(accountId);
+        return next;
+      });
+    }
+  };
+
   const handleAddAccount = async () => {
     if (!newAccountName.trim()) return;
     try {
@@ -351,6 +375,17 @@ export default function Accounts() {
                         : '-'}
                     </span>
                   </div>
+
+                  <button
+                    onClick={() => void handleRefreshCart(account.id)}
+                    disabled={refreshingCartIds.has(account.id)}
+                    className={`p-1 rounded hover:bg-gray-100 transition-colors ${
+                      refreshingCartIds.has(account.id) ? 'text-orange-500' : 'text-gray-400 hover:text-orange-500'
+                    }`}
+                    title="刷新购物车统计"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${refreshingCartIds.has(account.id) ? 'animate-spin' : ''}`} />
+                  </button>
 
                   {account.cartSkuUpdatedAt && (
                     <span className="text-gray-400">{formatTime(account.cartSkuUpdatedAt)}</span>
