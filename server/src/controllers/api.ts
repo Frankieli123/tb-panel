@@ -233,6 +233,34 @@ router.delete('/products/:id', async (req: Request, res: Response) => {
       });
     }
 
+    if (product.monitorMode === 'CART' && product.ownerAccountId && product.taobaoId) {
+      const accountId = String(product.ownerAccountId || '').trim();
+      const taobaoId = String(product.taobaoId || '').trim();
+      if (accountId && taobaoId) {
+        const bucket = Math.floor(Date.now() / 15000);
+        const jobId = `cart_remove_${accountId}_${taobaoId}_${bucket}`;
+
+        taskQueue
+          .add(
+            'cart-remove',
+            { accountId, taobaoId, source: 'delete_product', productId: product.id },
+            {
+              jobId,
+              priority: 0,
+              attempts: 1,
+              keepLogs: 200,
+              removeOnComplete: { age: 10 * 60, count: 200 },
+              removeOnFail: { age: 60 * 60, count: 200 },
+            }
+          )
+          .catch((error) => {
+            const message = error instanceof Error ? error.message : String(error);
+            if (message.toLowerCase().includes('already exists')) return;
+            console.warn(`[API] queue cart-remove failed accountId=${accountId} taobaoId=${taobaoId}:`, error);
+          });
+      }
+    }
+
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ success: false, error: String(error) });

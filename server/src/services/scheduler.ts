@@ -446,6 +446,10 @@ class SchedulerService {
       return this.processCartScrapeJob(job);
     }
 
+    if (job.name === 'cart-remove') {
+      return this.processCartRemoveJob(job);
+    }
+
     if (job.name === 'cart-add') {
       return this.processCartAddJob(job);
     }
@@ -781,6 +785,113 @@ class SchedulerService {
     } catch (error) {
       console.error(`[Scheduler] 购物车抓价失败 accountId=${accountId}:`, error);
       throw error;
+    }
+  }
+
+  private async processCartRemoveJob(job: Job): Promise<{ success: boolean; taobaoId: string; removed: number }> {
+    const accountId = String((job.data as any)?.accountId || '').trim();
+    const taobaoId = String((job.data as any)?.taobaoId || '').trim();
+
+    if (!accountId || !isDigits(taobaoId)) {
+      throw new Error('Invalid cart-remove job payload');
+    }
+
+    const account = await prisma.taobaoAccount.findUnique({
+      where: { id: accountId },
+      select: { id: true, cookies: true, agentId: true, userId: true }
+    });
+
+    if (!account) {
+      throw new Error('Account not found');
+    }
+
+    const agentIdToUse = await this.resolveAgentIdForAccount(account, null);
+    if (account.agentId && (!agentIdToUse || !agentHub.isConnected(agentIdToUse))) {
+      console.warn(
+        `[Scheduler] 账号绑定Agent离线，回退到本地删购物车 accountId=${accountId} boundAgentId=${String(account.agentId)}`
+      );
+    }
+
+    console.log(
+      `[Scheduler] 购物车删除执行器 accountId=${accountId} boundAgentId=${account.agentId || 'null'} agentId=${
+        agentIdToUse && agentHub.isConnected(agentIdToUse) ? agentIdToUse : 'local'
+      } taobaoId=${taobaoId}`
+    );
+
+    const pauseTimeoutMs = 20000;
+    const pausedUsingAgent = Boolean(agentIdToUse && agentHub.isConnected(agentIdToUse));
+    if (pausedUsingAgent && agentIdToUse) {
+      await agentHub
+        .call<any>(agentIdToUse, 'pauseAddForScrape', { accountId, timeoutMs: pauseTimeoutMs }, { timeoutMs: pauseTimeoutMs + 5000 })
+        .catch((err) => {
+          console.warn(`[Scheduler] 删购物车前暂停加购失败 accountId=${accountId} agentId=${agentIdToUse}:`, err);
+        });
+    } else {
+      await requestPauseForAddWithTimeout(accountId, pauseTimeoutMs).catch(() => {});
+    }
+
+    try {
+      const removeViaAgent = async (): Promise<any> => {
+        if (!agentIdToUse) throw new Error('Missing agentId');
+        return agentHub.call<any>(
+          agentIdToUse,
+          'removeTaobaoIdFromCart',
+          { accountId, taobaoId, cookies: account.cookies },
+          { timeoutMs: 10 * 60 * 1000 }
+        );
+      };
+
+      const removeViaLocal = async (): Promise<any> => {
+        return cartScraper.removeTaobaoIdFromCart(accountId, taobaoId, account.cookies);
+      };
+
+      let removeResult: any;
+      if (pausedUsingAgent && agentIdToUse) {
+        try {
+          removeResult = await removeViaAgent();
+        } catch (err: any) {
+          const msg = err?.message ? String(err.message) : String(err);
+          if (/Unknown method/i.test(msg)) {
+            console.warn(`[Scheduler] Agent 不支持 removeTaobaoIdFromCart，回退本地执行 accountId=${accountId} agentId=${agentIdToUse}`);
+            removeResult = await removeViaLocal();
+          } else {
+            throw err;
+          }
+        }
+      } else {
+        removeResult = await removeViaLocal();
+      }
+
+      const removedRaw = (removeResult as any)?.removed;
+      const removed = typeof removedRaw === 'number' && Number.isFinite(removedRaw) ? Math.max(0, Math.floor(removedRaw)) : 0;
+
+      try {
+        await job.log(`removed=${removed} taobaoId=${taobaoId}`);
+      } catch {}
+
+      // 刷新一次购物车统计，避免“已满”状态卡住
+      const scrapeCart = async (): Promise<any> => {
+        if (agentIdToUse && agentHub.isConnected(agentIdToUse)) {
+          return agentHub.call<any>(agentIdToUse, 'scrapeCart', { accountId, cookies: account.cookies }, { timeoutMs: 120000 });
+        }
+        return cartScraper.scrapeCart(accountId, account.cookies);
+      };
+
+      const cart = await scrapeCart().catch(() => null as any);
+      try {
+        const cartSkuLoaded = cart?.success && Array.isArray(cart?.products) ? cart.products.length : 0;
+        const cartSkuTotalRaw = (cart as any)?.uiTotalCount;
+        const cartSkuTotal = typeof cartSkuTotalRaw === 'number' && Number.isFinite(cartSkuTotalRaw) ? cartSkuTotalRaw : null;
+        setCartSkuStats(accountId, { cartSkuTotal, cartSkuLoaded });
+      } catch {}
+
+      return { success: true, taobaoId, removed };
+    } finally {
+      if (pausedUsingAgent && agentIdToUse) {
+        await agentHub.call<any>(agentIdToUse, 'resumeAddForScrape', { accountId }, { timeoutMs: 15000 }).catch(() => {});
+      } else {
+        resumeAdd(accountId);
+      }
     }
   }
 

@@ -778,6 +778,23 @@ async function main(): Promise<void> {
           return;
         }
 
+        if (method === 'removeTaobaoIdFromCart') {
+          const accountId = required('params.accountId', params.accountId as any);
+          const taobaoId = required('params.taobaoId', (params as any).taobaoId as any);
+          const cookies = String((params.cookies as any) || '');
+          const delayScaleRaw =
+            typeof (params as any).delayScale === 'number'
+              ? (params as any).delayScale
+              : Number.parseFloat(String((params as any).delayScale ?? ''));
+          if (Number.isFinite(delayScaleRaw) && delayScaleRaw > 0) {
+            setHumanDelayScale(delayScaleRaw);
+          }
+
+          const result = await cartScraper.removeTaobaoIdFromCart(accountId, taobaoId, cookies);
+          wsConn.send(JSON.stringify({ type: 'rpc_result', requestId, ok: true, result }));
+          return;
+        }
+
         if (method === 'pauseAddForScrape') {
           const accountId = required('params.accountId', params.accountId as any);
           const timeoutMsRaw = Number((params as any).timeoutMs);

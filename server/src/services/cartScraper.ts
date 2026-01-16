@@ -377,6 +377,423 @@ export class CartScraper {
     });
   }
 
+  async removeTaobaoIdFromCart(
+    accountId: string,
+    taobaoId: string,
+    cookies?: string
+  ): Promise<{ success: boolean; removed: number; error?: string }> {
+    const tid = String(taobaoId || '').trim();
+    if (!/^\d+$/.test(tid)) {
+      return { success: false, removed: 0, error: 'Invalid taobaoId' };
+    }
+
+    console.log(`[CartScraper] 从购物车删除商品 accountId=${accountId} taobaoId=${tid}`);
+
+    return this.runExclusive(async () => {
+      let lastErr: any = null;
+      const maxAttempts = this.keepOpen ? 2 : 1;
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          const session = await this.getOrCreateSession(accountId, cookies);
+          await this.refreshCartPage(session);
+
+          const page = session.page;
+
+          const scrollToTop = async (): Promise<void> => {
+            await page
+              .evaluate(() => {
+                const findScrollContainer = (): HTMLElement => {
+                  const doc = (document.scrollingElement as HTMLElement) || document.documentElement;
+                  const firstItem = document.querySelector('.trade-cart-item-info') as HTMLElement | null;
+                  let el = firstItem?.parentElement as HTMLElement | null;
+
+                  const isScrollable = (node: HTMLElement): boolean => {
+                    if (node.scrollHeight <= node.clientHeight + 32) return false;
+                    const style = window.getComputedStyle(node);
+                    const overflowY = style?.overflowY || '';
+                    return overflowY === 'auto' || overflowY === 'scroll';
+                  };
+
+                  while (el && el !== document.body) {
+                    if (isScrollable(el)) return el;
+                    el = el.parentElement;
+                  }
+
+                  return doc;
+                };
+
+                const container = findScrollContainer();
+                const doc = (document.scrollingElement as HTMLElement) || document.documentElement;
+                if (container === doc) {
+                  window.scrollTo(0, 0);
+                  return;
+                }
+                container.scrollTop = 0;
+                try {
+                  container.dispatchEvent(new Event('scroll', { bubbles: true }));
+                } catch {}
+              })
+              .catch(() => {});
+            await page.waitForTimeout(randomDelay(500, 900));
+          };
+
+          const getScrollState = async (): Promise<{ top: number; height: number; client: number }> => {
+            return page
+              .evaluate(() => {
+                const findScrollContainer = (): HTMLElement => {
+                  const doc = (document.scrollingElement as HTMLElement) || document.documentElement;
+                  const firstItem = document.querySelector('.trade-cart-item-info') as HTMLElement | null;
+                  let el = firstItem?.parentElement as HTMLElement | null;
+
+                  const isScrollable = (node: HTMLElement): boolean => {
+                    if (node.scrollHeight <= node.clientHeight + 32) return false;
+                    const style = window.getComputedStyle(node);
+                    const overflowY = style?.overflowY || '';
+                    return overflowY === 'auto' || overflowY === 'scroll';
+                  };
+
+                  while (el && el !== document.body) {
+                    if (isScrollable(el)) return el;
+                    el = el.parentElement;
+                  }
+
+                  return doc;
+                };
+
+                const container = findScrollContainer();
+                return {
+                  top: container.scrollTop || (window.scrollY || 0),
+                  height: container.scrollHeight || 0,
+                  client: container.clientHeight || window.innerHeight || 0,
+                };
+              })
+              .catch(() => ({ top: 0, height: 0, client: 0 }));
+          };
+
+          const scrollBy = async (delta: number): Promise<number> => {
+            return page
+              .evaluate((d) => {
+                const findScrollContainer = (): HTMLElement => {
+                  const doc = (document.scrollingElement as HTMLElement) || document.documentElement;
+                  const firstItem = document.querySelector('.trade-cart-item-info') as HTMLElement | null;
+                  let el = firstItem?.parentElement as HTMLElement | null;
+
+                  const isScrollable = (node: HTMLElement): boolean => {
+                    if (node.scrollHeight <= node.clientHeight + 32) return false;
+                    const style = window.getComputedStyle(node);
+                    const overflowY = style?.overflowY || '';
+                    return overflowY === 'auto' || overflowY === 'scroll';
+                  };
+
+                  while (el && el !== document.body) {
+                    if (isScrollable(el)) return el;
+                    el = el.parentElement;
+                  }
+
+                  return doc;
+                };
+
+                const container = findScrollContainer();
+                const doc = (document.scrollingElement as HTMLElement) || document.documentElement;
+                if (container === doc) {
+                  window.scrollBy(0, d);
+                  return doc.scrollTop || (window.scrollY || 0);
+                }
+
+                const before = container.scrollTop || 0;
+                container.scrollTop = before + d;
+                try {
+                  container.dispatchEvent(new Event('scroll', { bubbles: true }));
+                } catch {}
+                return container.scrollTop || 0;
+              }, delta)
+              .catch(() => 0);
+          };
+
+          const findFirstVisibleMatch = async (): Promise<{ index: number; cartItemId: string }> => {
+            return page
+              .evaluate((targetId) => {
+                const items = Array.from(document.querySelectorAll('.trade-cart-item-info'));
+
+                const computeMeta = (item: Element): { taobaoId: string; cartItemId: string } => {
+                  const titleEl = item.querySelector('a.title--dsuLK9IN') as HTMLAnchorElement | null;
+
+                  const skuEl = item.querySelector('.trade-cart-item-sku-old');
+                  const skuLabels = skuEl ? Array.from(skuEl.querySelectorAll('.label--T4deixnF')) : [];
+                  const skuProperties = skuLabels.map((label) => label.textContent?.trim() || '').join(' ').trim();
+
+                  const linkEl =
+                    titleEl ||
+                    (item.querySelector(
+                      'a[href*="item.taobao.com/item.htm"], a[href*="detail.tmall.com/item.htm"], a[href*="/i"]'
+                    ) as HTMLAnchorElement | null) ||
+                    (item.querySelector('a[href*="item.htm?id="], a[href*="?id="]') as HTMLAnchorElement | null);
+
+                  const hrefRaw = linkEl?.getAttribute('href') || '';
+                  const href = hrefRaw.startsWith('//') ? 'https:' + hrefRaw : hrefRaw;
+
+                  const taobaoIdMatch =
+                    href.match(/[?&]id=(\d+)/) || href.match(/\/i(\d+)\.htm/) || href.match(/item\/(\d+)\.htm/);
+                  const skuIdMatch = href.match(/[?&]skuId=(\d+)/);
+
+                  let taobaoId = taobaoIdMatch ? taobaoIdMatch[1] : '';
+                  let skuId = skuIdMatch ? skuIdMatch[1] : '';
+
+                  if (!taobaoId || !skuId) {
+                    const root =
+                      (item.closest?.(
+                        '[data-id],[data-item-id],[data-itemid],[data-itemId],[data-taobao-id]'
+                      ) as HTMLElement | null) || (item as HTMLElement);
+
+                    if (!taobaoId) {
+                      const dataId =
+                        root.getAttribute('data-taobao-id') ||
+                        root.getAttribute('data-item-id') ||
+                        root.getAttribute('data-itemid') ||
+                        root.getAttribute('data-id') ||
+                        '';
+                      if (/^\d+$/.test(dataId)) taobaoId = dataId;
+                    }
+
+                    if (!skuId) {
+                      const dataSku =
+                        root.getAttribute('data-sku-id') ||
+                        root.getAttribute('data-skuid') ||
+                        root.getAttribute('data-sku') ||
+                        '';
+                      if (/^\d+$/.test(dataSku)) skuId = dataSku;
+                    }
+                  }
+
+                  const keySuffix = skuId || skuProperties || '';
+                  const cartItemId = taobaoId ? (keySuffix ? `${taobaoId}_${keySuffix}` : taobaoId) : '';
+                  return { taobaoId, cartItemId };
+                };
+
+                for (let i = 0; i < items.length; i++) {
+                  const meta = computeMeta(items[i]);
+                  if (meta.taobaoId && meta.taobaoId === targetId) {
+                    return { index: i, cartItemId: meta.cartItemId };
+                  }
+                }
+
+                return { index: -1, cartItemId: '' };
+              }, tid)
+              .catch(() => ({ index: -1, cartItemId: '' }));
+          };
+
+          const waitUntilCartItemGone = async (cartItemId: string): Promise<void> => {
+            if (!cartItemId) return;
+
+            await page
+              .waitForFunction(
+                (id) => {
+                  const items = Array.from(document.querySelectorAll('.trade-cart-item-info'));
+                  const computeMeta = (item: Element): string => {
+                    const titleEl = item.querySelector('a.title--dsuLK9IN') as HTMLAnchorElement | null;
+
+                    const skuEl = item.querySelector('.trade-cart-item-sku-old');
+                    const skuLabels = skuEl ? Array.from(skuEl.querySelectorAll('.label--T4deixnF')) : [];
+                    const skuProperties = skuLabels.map((label) => label.textContent?.trim() || '').join(' ').trim();
+
+                    const linkEl =
+                      titleEl ||
+                      (item.querySelector(
+                        'a[href*="item.taobao.com/item.htm"], a[href*="detail.tmall.com/item.htm"], a[href*="/i"]'
+                      ) as HTMLAnchorElement | null) ||
+                      (item.querySelector('a[href*="item.htm?id="], a[href*="?id="]') as HTMLAnchorElement | null);
+
+                    const hrefRaw = linkEl?.getAttribute('href') || '';
+                    const href = hrefRaw.startsWith('//') ? 'https:' + hrefRaw : hrefRaw;
+
+                    const taobaoIdMatch =
+                      href.match(/[?&]id=(\d+)/) || href.match(/\/i(\d+)\.htm/) || href.match(/item\/(\d+)\.htm/);
+                    const skuIdMatch = href.match(/[?&]skuId=(\d+)/);
+
+                    let taobaoId = taobaoIdMatch ? taobaoIdMatch[1] : '';
+                    let skuId = skuIdMatch ? skuIdMatch[1] : '';
+
+                    if (!taobaoId || !skuId) {
+                      const root =
+                        (item.closest?.(
+                          '[data-id],[data-item-id],[data-itemid],[data-itemId],[data-taobao-id]'
+                        ) as HTMLElement | null) || (item as HTMLElement);
+
+                      if (!taobaoId) {
+                        const dataId =
+                          root.getAttribute('data-taobao-id') ||
+                          root.getAttribute('data-item-id') ||
+                          root.getAttribute('data-itemid') ||
+                          root.getAttribute('data-id') ||
+                          '';
+                        if (/^\d+$/.test(dataId)) taobaoId = dataId;
+                      }
+
+                      if (!skuId) {
+                        const dataSku =
+                          root.getAttribute('data-sku-id') ||
+                          root.getAttribute('data-skuid') ||
+                          root.getAttribute('data-sku') ||
+                          '';
+                        if (/^\d+$/.test(dataSku)) skuId = dataSku;
+                      }
+                    }
+
+                    const keySuffix = skuId || skuProperties || '';
+                    return taobaoId ? (keySuffix ? `${taobaoId}_${keySuffix}` : taobaoId) : '';
+                  };
+
+                  const target = String(id || '');
+                  return !items.some((x) => computeMeta(x) === target);
+                },
+                cartItemId,
+                { timeout: 15000 }
+              )
+              .catch(() => {});
+          };
+
+          const confirmDeleteIfNeeded = async (): Promise<void> => {
+            const candidates = [
+              '[role="dialog"] button:has-text("确定")',
+              '[role="dialog"] button:has-text("确认")',
+              '[aria-modal="true"] button:has-text("确定")',
+              '[aria-modal="true"] button:has-text("确认")',
+              '.ant-modal-root button:has-text("确定")',
+              '.ant-modal-root button:has-text("确认")',
+              '.next-dialog button:has-text("确定")',
+              '.next-dialog button:has-text("确认")',
+              '[role="button"]:has-text("确定")',
+              '[role="button"]:has-text("确认")',
+            ];
+
+            for (const selector of candidates) {
+              const btn = page.locator(selector).first();
+              const visible = await btn.isVisible().catch(() => false);
+              if (!visible) continue;
+              await btn.click({ timeout: 8000 }).catch(() => {});
+              await page.waitForTimeout(randomDelay(450, 850));
+              return;
+            }
+          };
+
+          await scrollToTop();
+
+          let removed = 0;
+          let stableBottomRounds = 0;
+          let bottomWaits = 0;
+          const bottomWaitLimit = 12;
+
+          for (let round = 0; round < 800; round++) {
+            let removedThisSpot = 0;
+
+            for (let k = 0; k < 50; k++) {
+              const found = await findFirstVisibleMatch();
+              if (found.index < 0) break;
+
+              const info = page.locator('.trade-cart-item-info').nth(found.index);
+              await info.scrollIntoViewIfNeeded().catch(() => {});
+              await page.waitForTimeout(randomDelay(200, 450));
+
+              const containers = [
+                info,
+                info.locator('xpath=..'),
+                info.locator('xpath=../..'),
+                info.locator('xpath=../../..'),
+                info.locator('xpath=../../../..'),
+              ];
+
+              let clicked = false;
+              for (const c of containers) {
+                const btn = c.locator('.trade-cart-item-operation >> text=删除').first();
+                if ((await btn.count().catch(() => 0)) > 0) {
+                  await btn.click({ timeout: 15000 });
+                  clicked = true;
+                  break;
+                }
+              }
+
+              if (!clicked) {
+                for (const c of containers) {
+                  const btn = c.locator('text=删除').first();
+                  if ((await btn.count().catch(() => 0)) > 0) {
+                    await btn.click({ timeout: 15000 });
+                    clicked = true;
+                    break;
+                  }
+                }
+              }
+
+              if (!clicked) {
+                throw new Error(`Delete button not found for taobaoId=${tid}`);
+              }
+
+              await page.waitForTimeout(randomDelay(350, 750));
+              await confirmDeleteIfNeeded();
+              await waitUntilCartItemGone(found.cartItemId);
+
+              removed++;
+              removedThisSpot++;
+              await page.waitForTimeout(randomDelay(500, 950));
+            }
+
+            if (removedThisSpot > 0) {
+              stableBottomRounds = 0;
+              bottomWaits = 0;
+              continue;
+            }
+
+            const { top, height, client } = await getScrollState();
+            const atBottom = height > 0 && client > 0 && top + client >= height - 2;
+
+            if (atBottom) {
+              if (bottomWaits < bottomWaitLimit) {
+                bottomWaits++;
+                stableBottomRounds = 0;
+                await page.waitForTimeout(Math.min(8000, 1200 + bottomWaits * 500)).catch(() => {});
+                await scrollBy(-Math.max(260, Math.floor(client * 0.25)));
+                await page.waitForTimeout(randomDelay(240, 420)).catch(() => {});
+                continue;
+              }
+
+              stableBottomRounds++;
+              if (stableBottomRounds >= 2) break;
+            } else {
+              bottomWaits = 0;
+              stableBottomRounds = 0;
+            }
+
+            const step = Math.max(650, Math.min(2400, Math.floor((client || 800) * 0.95)));
+            const nextTop = await scrollBy(step);
+            if (nextTop === top) stableBottomRounds++;
+
+            await page.waitForTimeout(randomDelay(240, 520));
+          }
+
+          console.log(`[CartScraper] 删除完成 accountId=${accountId} taobaoId=${tid} removed=${removed}`);
+          return { success: true, removed };
+        } catch (error: any) {
+          lastErr = error;
+          console.error(`[CartScraper] 删除失败（第 ${attempt}/${maxAttempts} 次）:`, error);
+
+          const fatal = this.isFatalSessionError(error);
+          if (fatal) {
+            await sharedBrowserManager.disposeSession(accountId);
+            continue;
+          }
+
+          if (!this.keepOpen) {
+            await sharedBrowserManager.disposeSession(accountId);
+          }
+
+          break;
+        }
+      }
+
+      return { success: false, removed: 0, error: lastErr?.message ?? String(lastErr ?? 'unknown') };
+    });
+  }
+
   private async extractCartData(
     page: Page,
     options?: { expectedTaobaoIds?: string[] }
