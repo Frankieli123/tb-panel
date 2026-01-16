@@ -72,7 +72,7 @@ jobs:
           }
 
           $tag = "v$current"
-          while ((git tag --list $tag).Trim()) {
+          while ((git tag --list $tag)) {
             Write-Host ">> Tag exists ($tag), bumping again"
             Push-Location server
             npm version patch --no-git-tag-version
@@ -81,7 +81,7 @@ jobs:
             $tag = "v$current"
           }
 
-          $dirty = (git status --porcelain).Trim()
+          $dirty = ([string](git status --porcelain)).Trim()
           if ($dirty) {
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
