@@ -20,6 +20,134 @@ const router = Router();
 
 const CART_BASE_SKU_ID = '__BASE__';
 
+type AgentUpdateAsset = { url: string; sha256: string; size: number };
+type AgentUpdateManifest = {
+  version: string;
+  publishedAt: string | null;
+  zip?: AgentUpdateAsset;
+  msi?: AgentUpdateAsset;
+};
+
+const AGENT_LATEST_CACHE_MS = 2 * 60 * 1000;
+let agentLatestCache: { expiresAt: number; payload: AgentUpdateManifest } | null = null;
+
+function applyGithubProxyPrefix(rawUrl: string): string {
+  const url = String(rawUrl || '').trim();
+  if (!url) return url;
+
+  let prefix = String(process.env.AGENT_UPDATE_PROXY_PREFIX || '').trim();
+  if (!prefix) return url;
+
+  if (!prefix.endsWith('/')) prefix += '/';
+
+  if (url.startsWith('https://github.com/')) {
+    return `${prefix}${url}`;
+  }
+
+  const proxyApi = /^(1|true)$/i.test(String(process.env.AGENT_UPDATE_PROXY_GITHUB_API || '').trim());
+  if (proxyApi && url.startsWith('https://api.github.com/')) {
+    return `${prefix}${url}`;
+  }
+
+  return url;
+}
+
+function parseSha256Text(raw: string): string | null {
+  const text = String(raw || '').trim();
+  if (!text) return null;
+  const m = text.match(/[a-fA-F0-9]{64}/);
+  return m ? m[0].toLowerCase() : null;
+}
+
+async function fetchText(url: string, init?: RequestInit): Promise<string> {
+  const res = await fetch(url, init);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return await res.text();
+}
+
+async function resolveAgentLatestFromGithub(): Promise<AgentUpdateManifest> {
+  const repo = String(process.env.AGENT_UPDATE_GITHUB_REPO || '').trim();
+  if (!repo) throw new Error('Missing AGENT_UPDATE_GITHUB_REPO');
+
+  const token = String(process.env.AGENT_UPDATE_GITHUB_TOKEN || process.env.GITHUB_TOKEN || '').trim();
+  const apiUrl = applyGithubProxyPrefix(`https://api.github.com/repos/${repo}/releases/latest`);
+
+  const res = await fetch(apiUrl, {
+    headers: {
+      'user-agent': 'taobao-agent-update',
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+      accept: 'application/vnd.github+json',
+    },
+  });
+  if (!res.ok) throw new Error(`GitHub latest release failed: HTTP ${res.status}`);
+
+  const data: any = await res.json();
+  const tag = String(data?.tag_name || '').trim();
+  const version = tag.replace(/^v/i, '').trim() || String(data?.name || '').trim();
+  if (!version) throw new Error('Invalid GitHub release payload: missing version');
+
+  const publishedAt = typeof data?.published_at === 'string' ? data.published_at : null;
+  const assets = Array.isArray(data?.assets) ? data.assets : [];
+
+  const findAsset = (suffix: string) =>
+    assets.find((a: any) => typeof a?.name === 'string' && String(a.name).toLowerCase().endsWith(suffix));
+
+  const zip = findAsset('.zip');
+  const msi = findAsset('.msi');
+  const zipSha = findAsset('.zip.sha256') || findAsset('.sha256.zip') || findAsset('.zip.sha');
+  const msiSha = findAsset('.msi.sha256') || findAsset('.sha256.msi') || findAsset('.msi.sha');
+
+  const buildAsset = async (file: any, shaFile: any): Promise<AgentUpdateAsset | undefined> => {
+    if (!file?.browser_download_url || !file?.name) return undefined;
+
+    const url = applyGithubProxyPrefix(String(file.browser_download_url));
+    const size = typeof file?.size === 'number' && Number.isFinite(file.size) ? Math.max(0, Math.floor(file.size)) : 0;
+
+    let sha256 = '';
+    if (shaFile?.browser_download_url) {
+      try {
+        const shaUrl = applyGithubProxyPrefix(String(shaFile.browser_download_url));
+        sha256 = parseSha256Text(await fetchText(shaUrl, { headers: { 'user-agent': 'taobao-agent-update' } })) || '';
+      } catch {}
+    }
+
+    if (!sha256) return undefined;
+    return { url, sha256, size };
+  };
+
+  return {
+    version,
+    publishedAt,
+    zip: await buildAsset(zip, zipSha),
+    msi: await buildAsset(msi, msiSha),
+  };
+}
+
+async function resolveAgentLatestManifest(): Promise<AgentUpdateManifest> {
+  const now = Date.now();
+  if (agentLatestCache && now < agentLatestCache.expiresAt) return agentLatestCache.payload;
+
+  const manifestUrl = String(process.env.AGENT_UPDATE_MANIFEST_URL || '').trim();
+  let payload: AgentUpdateManifest;
+  if (manifestUrl) {
+    const proxied = applyGithubProxyPrefix(manifestUrl);
+    const raw = await fetchText(proxied, { headers: { 'user-agent': 'taobao-agent-update' } });
+    const parsed: any = JSON.parse(raw);
+    payload = {
+      version: String(parsed?.version || '').trim(),
+      publishedAt: typeof parsed?.publishedAt === 'string' ? parsed.publishedAt : null,
+      zip: parsed?.zip && parsed.zip.url && parsed.zip.sha256 ? parsed.zip : undefined,
+      msi: parsed?.msi && parsed.msi.url && parsed.msi.sha256 ? parsed.msi : undefined,
+    };
+    if (!payload.version) throw new Error('Invalid manifest: missing version');
+  } else {
+    payload = await resolveAgentLatestFromGithub();
+  }
+
+  agentLatestCache = { expiresAt: now + AGENT_LATEST_CACHE_MS, payload };
+  return payload;
+}
+
 function getSessionAuth(req: Request) {
   const auth = req.systemAuth;
   return auth && auth.kind === 'session' ? auth : null;
@@ -53,6 +181,19 @@ router.post('/agents/redeem', async (req: Request, res: Response) => {
     res
       .status(400)
       .json({ success: false, error: (error as any)?.message ? String((error as any).message) : String(error) });
+  }
+});
+
+// ============ Agent 更新（无需登录：托盘静默更新使用） ============
+router.get('/agents/latest', async (_req: Request, res: Response) => {
+  try {
+    const data = await resolveAgentLatestManifest();
+    res.json({ success: true, data });
+  } catch (error) {
+    res.status(404).json({
+      success: false,
+      error: (error as any)?.message ? String((error as any).message) : String(error),
+    });
   }
 });
 

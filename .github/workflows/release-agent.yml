@@ -1,0 +1,92 @@
+name: Release Agent
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: server/package-lock.json
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Install server deps
+        working-directory: server
+        run: npm ci
+
+      - name: Build agent (zip + msi)
+        shell: powershell
+        run: |
+          $domain = "${{ vars.AGENT_DOMAIN }}"
+          if (-not $domain) { $domain = "tb.slee.cc" }
+          ./scripts/build-agent-msi.ps1 -Domain $domain -Scheme https -Target win-x64 -OutDir release
+
+      - name: Compute SHA256
+        shell: powershell
+        run: |
+          $zip = Get-ChildItem release -Filter "taobao-agent_*_win-x64.zip" | Select-Object -First 1
+          $msi = Get-ChildItem release -Filter "taobao-agent_*_win-x64.msi" | Select-Object -First 1
+          if (-not $zip) { throw "Missing zip in ./release" }
+          if (-not $msi) { throw "Missing msi in ./release" }
+
+          $zipHash = (Get-FileHash -Algorithm SHA256 $zip.FullName).Hash.ToLower()
+          Set-Content -Encoding ASCII -Path ($zip.FullName + ".sha256") -Value "$zipHash  $($zip.Name)"
+
+          $msiHash = (Get-FileHash -Algorithm SHA256 $msi.FullName).Hash.ToLower()
+          Set-Content -Encoding ASCII -Path ($msi.FullName + ".sha256") -Value "$msiHash  $($msi.Name)"
+
+      - name: Build latest manifest
+        shell: powershell
+        run: |
+          $zip = Get-ChildItem release -Filter "taobao-agent_*_win-x64.zip" | Select-Object -First 1
+          $msi = Get-ChildItem release -Filter "taobao-agent_*_win-x64.msi" | Select-Object -First 1
+          if (-not $zip) { throw "Missing zip in ./release" }
+          if (-not $msi) { throw "Missing msi in ./release" }
+
+          $zipHash = (Get-FileHash -Algorithm SHA256 $zip.FullName).Hash.ToLower()
+          $msiHash = (Get-FileHash -Algorithm SHA256 $msi.FullName).Hash.ToLower()
+
+          $tag = "${{ github.ref_name }}"
+          $version = ($tag -replace '^v', '')
+          if (-not $version) { $version = $tag }
+
+          $repo = "${{ github.repository }}"
+          $zipUrl = "https://github.com/$repo/releases/latest/download/$($zip.Name)"
+          $msiUrl = "https://github.com/$repo/releases/latest/download/$($msi.Name)"
+
+          $manifest = @{
+            version     = $version
+            publishedAt = (Get-Date).ToUniversalTime().ToString('o')
+            zip         = @{ url = $zipUrl; sha256 = $zipHash; size = $zip.Length }
+            msi         = @{ url = $msiUrl; sha256 = $msiHash; size = $msi.Length }
+          } | ConvertTo-Json -Depth 5
+
+          Set-Content -Encoding UTF8 -Path (Join-Path "release" "agent-latest.json") -Value $manifest
+
+      - name: Publish GitHub Release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/agent-latest.json
+            release/*.zip
+            release/*.msi
+            release/*.sha256

@@ -126,6 +126,13 @@ if (-not (Test-Path $serverDir)) {
 
 Invoke-InDir $serverDir 'npm run build'
 
+$agentVersion = ''
+try {
+  $pkg = Get-Content (Join-Path $serverDir 'package.json') -Raw | ConvertFrom-Json
+  $agentVersion = ([string]$pkg.version).Trim()
+} catch {}
+if (-not $agentVersion) { $agentVersion = '1.0.0' }
+
 $resolvedOutDir = Resolve-Path (Join-Path $repoRoot $OutDir) -ErrorAction SilentlyContinue
 if (-not $resolvedOutDir) {
   $resolvedOutDir = Join-Path $repoRoot $OutDir
@@ -173,7 +180,10 @@ if (Test-Path (Join-Path $appDir 'node_modules\\.bin')) {
 $envFile = Join-Path $stageRoot '.env'
 @(
   "AGENT_WS_URL=$wsUrl"
+  "AGENT_VERSION=$agentVersion"
 ) | Set-Content -Encoding UTF8 -Path $envFile
+
+Set-Content -Encoding ASCII -Path (Join-Path $stageRoot 'version.txt') -Value $agentVersion
 
 $pairPromptEncoded = 'QQBkAGQALQBUAHkAcABlACAALQBBAHMAcwBlAG0AYgBsAHkATgBhAG0AZQAgAE0AaQBjAHIAbwBzAG8AZgB0AC4AVgBpAHMAdQBhAGwAQgBhAHMAaQBjAAoAJABjAG8AZABlACAAPQAgAFsATQBpAGMAcgBvAHMAbwBmAHQALgBWAGkAcwB1AGEAbABCAGEAcwBpAGMALgBJAG4AdABlAHIAYQBjAHQAaQBvAG4AXQA6ADoASQBuAHAAdQB0AEIAbwB4ACgAJwD3i5OPZVFNkflbAXgI/1AAQQBJAFIAXwBDAE8ARABFAAn/AjDvUyhXUX91mO96IABBAGcAZQBuAHQAIABil39nH3UQYgIwJwAsACcAVABhAG8AYgBhAG8AIABBAGcAZQBuAHQAIABNkflbJwAsACcAJwApAAoAVwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIAAkAGMAbwBkAGUA'
 
@@ -184,6 +194,7 @@ setlocal
 cd /d "%~dp0"
 set "AGENT_WS_URL=$wsUrl"
 set "AGENT_NAME=%COMPUTERNAME%"
+set "AGENT_VERSION=$agentVersion"
 set "CHROME_AUTO_INSTALL=1"
 set "TAOBAO_AGENT_HOME=%ProgramData%\TaobaoAgent"
 set "AGENT_UI=1"
@@ -245,6 +256,7 @@ setlocal
 cd /d "%~dp0"
 set "AGENT_WS_URL=$wsUrl"
 set "AGENT_NAME=%COMPUTERNAME%"
+set "AGENT_VERSION=$agentVersion"
 set "CHROME_AUTO_INSTALL=1"
 set "TAOBAO_AGENT_HOME=%ProgramData%\TaobaoAgent"
 set "AGENT_UI=1"

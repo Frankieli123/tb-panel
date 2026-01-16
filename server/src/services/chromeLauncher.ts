@@ -21,7 +21,18 @@ export class ChromeLauncher {
 
   constructor() {
     this.userDataDir = this.resolveUserDataDir();
-    this.autoInstallChrome = /^(1|true)$/i.test(String(process.env.CHROME_AUTO_INSTALL ?? ''));
+    const raw = String(process.env.CHROME_AUTO_INSTALL ?? '').trim();
+    if (raw) {
+      this.autoInstallChrome = /^(1|true)$/i.test(raw);
+      return;
+    }
+
+    const agentContext = Boolean(
+      String(process.env.AGENT_WS_URL || process.env.AGENT_WS || '').trim() ||
+        String(process.env.AGENT_UI || '').trim() ||
+        String(process.env.TAOBAO_AGENT_HOME || '').trim()
+    );
+    this.autoInstallChrome = process.platform === 'win32' && agentContext;
   }
 
   private resolveUserDataDir(): string {
@@ -381,7 +392,9 @@ export class ChromeLauncher {
     }
 
     if (!chromePath) {
-      throw new Error('Chrome/Chromium not found. Please install Google Chrome or Chromium.');
+      throw new Error(
+        'Chrome/Chromium not found. Please install Google Chrome/Chromium/Microsoft Edge, or enable CHROME_AUTO_INSTALL=1 to auto-download Chrome for Testing.'
+      );
     }
 
     console.log(`[ChromeLauncher] 找到 Chrome: ${chromePath}`);
@@ -521,7 +534,10 @@ export class ChromeLauncher {
         path.join(process.env.LOCALAPPDATA || '', 'Google\\Chrome\\Application\\chrome.exe'),
         path.join(process.env.PROGRAMFILES || '', 'Google\\Chrome\\Application\\chrome.exe'),
         'C:\\Program Files\\Google\\Chrome Beta\\Application\\chrome.exe',
-        'C:\\Program Files\\Chromium\\Application\\chrome.exe'
+        'C:\\Program Files\\Chromium\\Application\\chrome.exe',
+        'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+        'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+        path.join(process.env.LOCALAPPDATA || '', 'Microsoft\\Edge\\Application\\msedge.exe')
       );
     } else if (platform === 'darwin') {
       possiblePaths.push(
