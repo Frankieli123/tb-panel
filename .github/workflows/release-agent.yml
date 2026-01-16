@@ -5,6 +5,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v1.0.1). Empty = use server/package.json version"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -32,6 +37,26 @@ jobs:
       - name: Install server deps
         working-directory: server
         run: npm ci
+
+      - name: Resolve tag
+        id: tag
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $tag = "${{ github.event.inputs.tag }}"
+          if (-not $tag) { $tag = "${{ github.ref_name }}" }
+
+          if ($tag -and -not ($tag -match '^v')) { $tag = "v$tag" }
+
+          if (-not $tag -or -not ($tag -match '^v\\d+\\.\\d+\\.\\d+')) {
+            if (-not (Test-Path "server/package.json")) { throw "Missing: server/package.json" }
+            $ver = (node -p "require('./server/package.json').version").Trim()
+            if (-not $ver) { throw "Missing version in server/package.json" }
+            $tag = "v$ver"
+          }
+
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Build agent (zip + msi)
         shell: powershell
@@ -65,13 +90,13 @@ jobs:
           $zipHash = (Get-FileHash -Algorithm SHA256 $zip.FullName).Hash.ToLower()
           $msiHash = (Get-FileHash -Algorithm SHA256 $msi.FullName).Hash.ToLower()
 
-          $tag = "${{ github.ref_name }}"
+          $tag = "${{ steps.tag.outputs.tag }}"
           $version = ($tag -replace '^v', '')
           if (-not $version) { $version = $tag }
 
           $repo = "${{ github.repository }}"
-          $zipUrl = "https://github.com/$repo/releases/latest/download/$($zip.Name)"
-          $msiUrl = "https://github.com/$repo/releases/latest/download/$($msi.Name)"
+          $zipUrl = "https://github.com/$repo/releases/download/$tag/$($zip.Name)"
+          $msiUrl = "https://github.com/$repo/releases/download/$tag/$($msi.Name)"
 
           $manifest = @{
             version     = $version
@@ -85,6 +110,8 @@ jobs:
       - name: Publish GitHub Release assets
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           files: |
             release/agent-latest.json
             release/*.zip
