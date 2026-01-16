@@ -734,9 +734,21 @@ async function main(): Promise<void> {
           const skuDelayMaxMs = Number.isFinite(skuDelayMaxMsRaw)
             ? Math.max(skuDelayMinMs ?? 0, Math.floor(skuDelayMaxMsRaw))
             : null;
+          const skuDelayObj = (params as any).skuDelayMs;
+          const skuDelayObjMinRaw = skuDelayObj && typeof skuDelayObj === 'object' ? Number((skuDelayObj as any).min) : NaN;
+          const skuDelayObjMaxRaw = skuDelayObj && typeof skuDelayObj === 'object' ? Number((skuDelayObj as any).max) : NaN;
+          const skuDelayObjMin = Number.isFinite(skuDelayObjMinRaw) ? Math.max(0, Math.floor(skuDelayObjMinRaw)) : null;
+          const skuDelayObjMax = Number.isFinite(skuDelayObjMaxRaw)
+            ? Math.max(skuDelayObjMin ?? 0, Math.floor(skuDelayObjMaxRaw))
+            : null;
           const skuDelayMs =
-            skuDelayMinMs !== null && skuDelayMaxMs !== null ? { min: skuDelayMinMs, max: skuDelayMaxMs } : undefined;
-          const cartAddSkuLimitRaw = (params as any).cartAddSkuLimit;
+            skuDelayMinMs !== null && skuDelayMaxMs !== null
+              ? { min: skuDelayMinMs, max: skuDelayMaxMs }
+              : skuDelayObjMin !== null && skuDelayObjMax !== null
+                ? { min: skuDelayObjMin, max: skuDelayObjMax }
+                : undefined;
+
+          const cartAddSkuLimitRaw = (params as any).cartAddSkuLimit ?? (params as any).skuLimit;
           const cartAddSkuLimitNum =
             typeof cartAddSkuLimitRaw === 'number' ? cartAddSkuLimitRaw : Number(cartAddSkuLimitRaw);
           const cartAddSkuLimit = Number.isFinite(cartAddSkuLimitNum) ? Math.max(0, Math.floor(cartAddSkuLimitNum)) : 0;

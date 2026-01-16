@@ -709,7 +709,7 @@ class SchedulerService {
 
             for (const item of underfilled) {
               await job.log(`补齐 taobaoId=${item.taobaoId} current=${item.current} target=${item.target}`);
-              const addResult = agentIdToUse && agentHub.isConnected(agentIdToUse)
+                  const addResult = agentIdToUse && agentHub.isConnected(agentIdToUse)
                 ? await agentHub.call<any>(
                     agentIdToUse,
                     'addAllSkusToCart',
@@ -721,6 +721,9 @@ class SchedulerService {
                       skuDelayMinMs: cartAddSkuDelayMinMs,
                       skuDelayMaxMs: cartAddSkuDelayMaxMs,
                       cartAddSkuLimit: item.target,
+                      // Backward-compatible aliases for older agents
+                      skuLimit: item.target,
+                      skuDelayMs: { min: cartAddSkuDelayMinMs, max: cartAddSkuDelayMaxMs },
                     },
                     { timeoutMs: 30 * 60 * 1000 }
                   )
@@ -1085,6 +1088,9 @@ class SchedulerService {
             skuDelayMinMs: cartAddSkuDelayMinMs,
             skuDelayMaxMs: cartAddSkuDelayMaxMs,
             cartAddSkuLimit,
+            // Backward-compatible aliases for older agents
+            skuLimit: cartAddSkuLimit,
+            skuDelayMs: { min: cartAddSkuDelayMinMs, max: cartAddSkuDelayMaxMs },
           },
           { timeoutMs: 30 * 60 * 1000, onProgress }
         )
@@ -1501,6 +1507,9 @@ class SchedulerService {
                 skuDelayMinMs: cartAddSkuDelayMinMs,
                 skuDelayMaxMs: cartAddSkuDelayMaxMs,
                 cartAddSkuLimit,
+                // Backward-compatible aliases for older agents
+                skuLimit: cartAddSkuLimit,
+                skuDelayMs: { min: cartAddSkuDelayMinMs, max: cartAddSkuDelayMaxMs },
               },
               { timeoutMs: 30 * 60 * 1000, onProgress }
             )
@@ -1969,6 +1978,9 @@ class SchedulerService {
                 skuDelayMinMs: cartAddSkuDelayMinMs,
                 skuDelayMaxMs: cartAddSkuDelayMaxMs,
                 cartAddSkuLimit,
+                // Backward-compatible aliases for older agents
+                skuLimit: cartAddSkuLimit,
+                skuDelayMs: { min: cartAddSkuDelayMinMs, max: cartAddSkuDelayMaxMs },
               },
               { timeoutMs: 30 * 60 * 1000, onProgress }
             )

@@ -657,14 +657,24 @@ export class CartScraper {
             const candidates = [
               '[role="dialog"] button:has-text("确定")',
               '[role="dialog"] button:has-text("确认")',
+              '[role="dialog"] button:has-text("删除")',
+              '[role="dialog"] button:has-text("移除")',
               '[aria-modal="true"] button:has-text("确定")',
               '[aria-modal="true"] button:has-text("确认")',
+              '[aria-modal="true"] button:has-text("删除")',
+              '[aria-modal="true"] button:has-text("移除")',
               '.ant-modal-root button:has-text("确定")',
               '.ant-modal-root button:has-text("确认")',
+              '.ant-modal-root button:has-text("删除")',
+              '.ant-modal-root button:has-text("移除")',
               '.next-dialog button:has-text("确定")',
               '.next-dialog button:has-text("确认")',
+              '.next-dialog button:has-text("删除")',
+              '.next-dialog button:has-text("移除")',
               '[role="button"]:has-text("确定")',
               '[role="button"]:has-text("确认")',
+              '[role="button"]:has-text("删除")',
+              '[role="button"]:has-text("移除")',
             ];
 
             for (const selector of candidates) {
@@ -672,9 +682,46 @@ export class CartScraper {
               const visible = await btn.isVisible().catch(() => false);
               if (!visible) continue;
               await btn.click({ timeout: 8000 }).catch(() => {});
+              await page
+                .locator('.ant-modal-wrap, .next-dialog, [role="dialog"][aria-modal="true"]')
+                .first()
+                .waitFor({ state: 'hidden', timeout: 8000 })
+                .catch(() => {});
               await page.waitForTimeout(randomDelay(450, 850));
               return;
             }
+          };
+
+          const dismissBlockingModal = async (): Promise<void> => {
+            const modal = page.locator('.ant-modal-wrap, .next-dialog, [role="dialog"][aria-modal="true"]').first();
+            const visible = await modal.isVisible().catch(() => false);
+            if (!visible) return;
+
+            await page.keyboard.press('Escape').catch(() => {});
+            await page.waitForTimeout(randomDelay(200, 420));
+
+            const closeCandidates = [
+              '[role="dialog"] button:has-text("取消")',
+              '[role="dialog"] button:has-text("关闭")',
+              '[aria-modal="true"] button:has-text("取消")',
+              '[aria-modal="true"] button:has-text("关闭")',
+              '.ant-modal-root button:has-text("取消")',
+              '.ant-modal-root button:has-text("关闭")',
+              '.ant-modal-root .ant-modal-close',
+              '.next-dialog button:has-text("取消")',
+              '.next-dialog button:has-text("关闭")',
+            ];
+
+            for (const selector of closeCandidates) {
+              const btn = page.locator(selector).first();
+              const btnVisible = await btn.isVisible().catch(() => false);
+              if (!btnVisible) continue;
+              await btn.click({ timeout: 6000 }).catch(() => {});
+              break;
+            }
+
+            await modal.waitFor({ state: 'hidden', timeout: 8000 }).catch(() => {});
+            await page.waitForTimeout(randomDelay(250, 520));
           };
 
           await scrollToTop();
@@ -707,7 +754,19 @@ export class CartScraper {
               for (const c of containers) {
                 const btn = c.locator('.trade-cart-item-operation >> text=删除').first();
                 if ((await btn.count().catch(() => 0)) > 0) {
-                  await btn.click({ timeout: 15000 });
+                  await dismissBlockingModal();
+                  try {
+                    await btn.click({ timeout: 15000 });
+                  } catch (err: any) {
+                    const msg = err?.message ? String(err.message) : String(err);
+                    if (/intercepts pointer events|another element would receive the click/i.test(msg)) {
+                      await dismissBlockingModal();
+                      await page.waitForTimeout(randomDelay(200, 450));
+                      await btn.click({ timeout: 15000 });
+                    } else {
+                      throw err;
+                    }
+                  }
                   clicked = true;
                   break;
                 }
@@ -717,7 +776,19 @@ export class CartScraper {
                 for (const c of containers) {
                   const btn = c.locator('text=删除').first();
                   if ((await btn.count().catch(() => 0)) > 0) {
-                    await btn.click({ timeout: 15000 });
+                    await dismissBlockingModal();
+                    try {
+                      await btn.click({ timeout: 15000 });
+                    } catch (err: any) {
+                      const msg = err?.message ? String(err.message) : String(err);
+                      if (/intercepts pointer events|another element would receive the click/i.test(msg)) {
+                        await dismissBlockingModal();
+                        await page.waitForTimeout(randomDelay(200, 450));
+                        await btn.click({ timeout: 15000 });
+                      } else {
+                        throw err;
+                      }
+                    }
                     clicked = true;
                     break;
                   }

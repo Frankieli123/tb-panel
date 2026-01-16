@@ -1,6 +1,6 @@
 import { spawn, ChildProcess } from 'child_process';
 import { createWriteStream, existsSync } from 'fs';
-import { mkdir, rm } from 'fs/promises';
+import { mkdir, rename, rm } from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { chromium, Browser } from 'playwright';
@@ -61,29 +61,61 @@ export class ChromeLauncher {
     return input.replace(/'/g, "''");
   }
 
-  private async expandZipWithPowerShell(zipPath: string, destDir: string): Promise<void> {
-    const z = this.escapePsSingleQuoted(zipPath);
-    const d = this.escapePsSingleQuoted(destDir);
-
+  private async runPowerShell(command: string): Promise<void> {
     await new Promise<void>((resolve, reject) => {
       const ps = spawn(
         'powershell',
-        [
-          '-NoProfile',
-          '-ExecutionPolicy',
-          'Bypass',
-          '-Command',
-          `Expand-Archive -LiteralPath '${z}' -DestinationPath '${d}' -Force`,
-        ],
-        { stdio: 'ignore' }
+        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command],
+        { stdio: ['ignore', 'pipe', 'pipe'] }
       );
+
+      let stdout = '';
+      let stderr = '';
+
+      ps.stdout?.on('data', (d) => {
+        stdout += d.toString();
+      });
+      ps.stderr?.on('data', (d) => {
+        stderr += d.toString();
+      });
 
       ps.on('error', reject);
       ps.on('exit', (code) => {
-        if (code === 0) resolve();
-        else reject(new Error(`Expand-Archive failed (exit ${code ?? 'unknown'})`));
+        if (code === 0) return resolve();
+        const out = stdout.trim();
+        const err = stderr.trim();
+        const detail = [out, err].filter(Boolean).join(' | ');
+        reject(new Error(`PowerShell failed (exit ${code ?? 'unknown'}): ${detail || 'unknown error'}`));
       });
     });
+  }
+
+  private async expandZip(zipPath: string, destDir: string): Promise<void> {
+    const z = this.escapePsSingleQuoted(zipPath);
+    const d = this.escapePsSingleQuoted(destDir);
+
+    const errors: string[] = [];
+
+    try {
+      await this.runPowerShell(
+        `$ErrorActionPreference='Stop'; Expand-Archive -LiteralPath '${z}' -DestinationPath '${d}' -Force`
+      );
+      return;
+    } catch (err) {
+      errors.push(err instanceof Error ? err.message : String(err));
+    }
+
+    try {
+      await this.runPowerShell(
+        `$ErrorActionPreference='Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; ` +
+          `[System.IO.Compression.ZipFile]::ExtractToDirectory('${z}', '${d}')`
+      );
+      return;
+    } catch (err) {
+      errors.push(err instanceof Error ? err.message : String(err));
+    }
+
+    throw new Error(`Zip extraction failed: ${errors.join('; ')}`);
   }
 
   private getChromeForTestingMirrorBases(): string[] {
@@ -281,8 +313,9 @@ export class ChromeLauncher {
 
       const used = await this.downloadToFileWithFallback(urls, tmpZipPath);
       console.log(`[ChromeLauncher] 已从以下地址下载: ${used}`);
-      await this.expandZipWithPowerShell(tmpZipPath, dir);
-      await rm(tmpZipPath, { force: true }).catch(() => {});
+      await rename(tmpZipPath, zipPath);
+      await this.expandZip(zipPath, dir);
+      await rm(zipPath, { force: true }).catch(() => {});
 
       if (!existsSync(exePath)) {
         throw new Error(`Chrome for Testing install failed: ${exePath} not found`);
@@ -290,14 +323,9 @@ export class ChromeLauncher {
 
       console.log(`[ChromeLauncher] Chrome for Testing 已安装到: ${exePath}`);
       return exePath;
-    })()
-      .catch((err) => {
-        console.warn('[ChromeLauncher] 自动安装失败:', err);
-        return null;
-      })
-      .finally(() => {
-        this.installingChrome = null;
-      });
+    })().finally(() => {
+      this.installingChrome = null;
+    });
 
     return this.installingChrome;
   }

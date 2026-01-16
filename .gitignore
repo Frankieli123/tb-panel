@@ -34,10 +34,9 @@ Thumbs.db
 # Temp files
 _tmp_*
 cookies.txt
-release/
+release*/
 tools/wix*/
 tools/node-runtime/
-release/_msi_build/
 installer/**/obj/
 installer/**/bin/
 tray/**/obj/
