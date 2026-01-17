@@ -770,6 +770,19 @@ async function main(): Promise<void> {
           const cartAddSkuLimitNum =
             typeof cartAddSkuLimitRaw === 'number' ? cartAddSkuLimitRaw : Number(cartAddSkuLimitRaw);
           const cartAddSkuLimit = Number.isFinite(cartAddSkuLimitNum) ? Math.max(0, Math.floor(cartAddSkuLimitNum)) : 0;
+
+          const refreshCartAfterAddRaw = (params as any).refreshCartAfterAdd;
+          const skipCartRefreshRaw = (params as any).skipCartRefresh;
+          const refreshCartAfterAdd =
+            refreshCartAfterAddRaw === false ||
+            refreshCartAfterAddRaw === 0 ||
+            String(refreshCartAfterAddRaw).toLowerCase() === 'false' ||
+            String(refreshCartAfterAddRaw) === '0' ||
+            skipCartRefreshRaw === true ||
+            skipCartRefreshRaw === 1 ||
+            String(skipCartRefreshRaw).toLowerCase() === 'true'
+              ? false
+              : true;
           const delayScaleRaw =
             typeof (params as any).delayScale === 'number'
               ? (params as any).delayScale
@@ -784,6 +797,7 @@ async function main(): Promise<void> {
             existingCartSkus,
             skuLimit: cartAddSkuLimit,
             skuDelayMs,
+            refreshCartAfterAdd,
           });
 
           wsConn.send(JSON.stringify({ type: 'rpc_result', requestId, ok: true, result }));

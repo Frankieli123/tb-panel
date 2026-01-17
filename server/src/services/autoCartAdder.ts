@@ -839,6 +839,7 @@ export class AutoCartAdder {
       existingCartSkus?: Map<string, Set<string>>;
       skuDelayMs?: { min: number; max: number };
       skuLimit?: number;
+      refreshCartAfterAdd?: boolean;
     }
   ): Promise<AddAllSkusResult> {
     return this.runExclusive(async () => {
@@ -1143,10 +1144,13 @@ export class AutoCartAdder {
         console.log(`[AutoCart] 完成: ${successCount}/${skuTarget} 成功，耗时=${duration}ms`);
 
         // 阶段5：关闭商品详情页，切回购物车页面刷新获取价格
+        const refreshCartAfterAdd = options?.refreshCartAfterAdd !== false;
         if (options?.onProgress) {
           options.onProgress(
             { total: skuTarget, current: skuTarget, success: successCount, failed: failedCount },
-            '【阶段5/5】返回购物车页面刷新获取价格...'
+            refreshCartAfterAdd
+              ? '【阶段5/5】返回购物车页面刷新获取价格...'
+              : '【阶段5/5】已完成加购，批量任务将最后统一刷新购物车获取价格...'
           );
         }
         lastProgress = {
@@ -1163,6 +1167,20 @@ export class AutoCartAdder {
         this.page = openInfo.cartPage;
         this.humanSimulator = new HumanSimulator(this.page);
         this.skuParser = new SkuParser(this.page);
+
+        if (!refreshCartAfterAdd) {
+          return {
+            taobaoId,
+            totalSkus: skuTarget,
+            successCount,
+            failedCount,
+            results,
+            duration,
+            skuTotal,
+            skuAvailable,
+            skuTarget,
+          };
+        }
         
         // 刷新购物车页面获取最新价格
         console.log('[AutoCart] 刷新购物车页以获取最新价格...');
