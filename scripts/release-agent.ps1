@@ -1,5 +1,6 @@
 param(
   [Parameter(Mandatory = $true)]
+  [Alias('Version')]
   [string]$Tag,
 
   [switch]$AutoCommit,
@@ -60,9 +61,31 @@ Set-Location $repoRoot
 $dirty = ([string](git status --porcelain)).Trim()
 if ($dirty) {
   if (-not $AutoCommit) {
-    Write-Host '>> Working tree is dirty:' -ForegroundColor Yellow
-    git status -uall
-    throw 'Working tree is dirty. Commit/stash (or pass -AutoCommit) before releasing.'
+    $dirtyPaths = @()
+    foreach ($line in ($dirty -split "`n")) {
+      $l = ([string]$line).TrimEnd("`r")
+      if (-not $l) { continue }
+      if ($l.Length -lt 4) { continue }
+      $p = $l.Substring(3)
+      if ($p -like '* -> *') { $p = ($p -split ' -> ' | Select-Object -Last 1) }
+      if ($p) { $dirtyPaths += $p }
+    }
+    $dirtyPaths = @($dirtyPaths | Select-Object -Unique)
+
+    $safePaths = @(
+      'scripts/release-agent.ps1',
+      '.github/workflows/release-agent.yml'
+    )
+
+    $unsafe = @($dirtyPaths | Where-Object { $_ -and ($_ -notin $safePaths) })
+    if ($unsafe.Count -gt 0) {
+      Write-Host '>> Working tree is dirty:' -ForegroundColor Yellow
+      git status -uall
+      throw "Working tree is dirty (non-release files changed). Please commit/stash first, or pass -AutoCommit. Files: $($unsafe -join ', ')"
+    }
+
+    Write-Host '>> Working tree dirty (release tooling only): auto-committing' -ForegroundColor Yellow
+    $AutoCommit = $true
   }
 
   $msg = ([string]$AutoCommitMessage).Trim()
