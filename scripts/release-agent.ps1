@@ -2,6 +2,10 @@ param(
   [Parameter(Mandatory = $true)]
   [string]$Tag,
 
+  [switch]$AutoCommit,
+
+  [string]$AutoCommitMessage = '',
+
   [string]$Remote = 'origin',
 
   [string]$Branch = 'main'
@@ -55,7 +59,18 @@ Set-Location $repoRoot
 
 $dirty = ([string](git status --porcelain)).Trim()
 if ($dirty) {
-  throw 'Working tree is dirty. Please commit/stash changes before releasing.'
+  if (-not $AutoCommit) {
+    Write-Host '>> Working tree is dirty:' -ForegroundColor Yellow
+    git status -uall
+    throw 'Working tree is dirty. Commit/stash (or pass -AutoCommit) before releasing.'
+  }
+
+  $msg = ([string]$AutoCommitMessage).Trim()
+  if (-not $msg) { $msg = "chore: prepare release $tag" }
+
+  Write-Host ">> Auto-commit all changes: $msg" -ForegroundColor Yellow
+  Invoke-Native git @('add', '-A')
+  Invoke-Native git @('commit', '-m', $msg)
 }
 
 $currentBranch = (git rev-parse --abbrev-ref HEAD).Trim()
