@@ -73,7 +73,7 @@ if ($dirty) {
   Invoke-Native git @('commit', '-m', $msg)
 }
 
-$currentBranch = (git rev-parse --abbrev-ref HEAD).Trim()
+$currentBranch = ([string](git rev-parse --abbrev-ref HEAD)).Trim()
 if ($currentBranch -ne $Branch) {
   throw "You are on branch '$currentBranch'. Please checkout '$Branch' before releasing."
 }
@@ -93,7 +93,7 @@ if (-not (Test-Path $pkgPath)) {
   throw "Missing: $pkgPath"
 }
 
-$currentVersion = (node -p "require('./server/package.json').version").Trim()
+$currentVersion = ([string](node -p "require('./server/package.json').version")).Trim()
 if (-not $currentVersion) { throw 'Cannot read server/package.json version' }
 
 if ($currentVersion -ne $version) {
