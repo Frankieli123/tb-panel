@@ -58,11 +58,12 @@ $version = Get-VersionFromTag $tag
 
 Set-Location $repoRoot
 
-$dirty = ([string](git status --porcelain)).Trim()
-if ($dirty) {
+$dirtyLines = @(git status --porcelain)
+$dirty = ($dirtyLines -join "`n")
+if ($dirtyLines.Count -gt 0) {
   if (-not $AutoCommit) {
     $dirtyPaths = @()
-    foreach ($line in ($dirty -split "`n")) {
+    foreach ($line in $dirtyLines) {
       $l = ([string]$line).TrimEnd("`r")
       if (-not $l) { continue }
       if ($l.Length -lt 4) { continue }
@@ -96,7 +97,7 @@ if ($dirty) {
   Invoke-Native git @('commit', '-m', $msg)
 }
 
-$currentBranch = ([string](git rev-parse --abbrev-ref HEAD)).Trim()
+$currentBranch = (@(git branch --show-current) -join "`n").Trim()
 if ($currentBranch -ne $Branch) {
   throw "You are on branch '$currentBranch'. Please checkout '$Branch' before releasing."
 }
@@ -116,7 +117,7 @@ if (-not (Test-Path $pkgPath)) {
   throw "Missing: $pkgPath"
 }
 
-$currentVersion = ([string](node -p "require('./server/package.json').version")).Trim()
+$currentVersion = (@(node -p "require('./server/package.json').version") -join "`n").Trim()
 if (-not $currentVersion) { throw 'Cannot read server/package.json version' }
 
 if ($currentVersion -ne $version) {
@@ -130,7 +131,7 @@ if ($currentVersion -ne $version) {
 
   Invoke-Native git @('add', 'server/package.json', 'server/package-lock.json')
 
-  $staged = ([string](git diff --cached --name-only)).Trim()
+  $staged = (@(git diff --cached --name-only) -join "`n").Trim()
   if ($staged) {
     Invoke-Native git @('commit', '-m', "chore(agent): release $tag")
   }
