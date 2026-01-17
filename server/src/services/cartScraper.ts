@@ -471,6 +471,23 @@ export class CartScraper {
               .catch(() => ({ top: 0, height: 0, client: 0 }));
           };
 
+          const detectCartEndMarker = async (): Promise<{ hit: boolean; reason: string | null }> => {
+            return page
+              .evaluate(() => {
+                const keywords = ['猜你喜欢', '为你推荐', '你可能还喜欢'];
+                const bodyText = document.body?.innerText || '';
+                const hitKeyword = keywords.find((k) => bodyText.includes(k)) || null;
+                const fallbackReason =
+                  hitKeyword ||
+                  ['\u731c\u4f60\u559c\u6b22', '\u4e3a\u4f60\u63a8\u8350', '\u4f60\u53ef\u80fd\u8fd8\u559c\u6b22'].find((k) =>
+                    bodyText.includes(k)
+                  ) ||
+                  null;
+                return { hit: Boolean(fallbackReason), reason: fallbackReason };
+              })
+              .catch(() => ({ hit: false, reason: null }));
+          };
+
           const scrollBy = async (delta: number): Promise<number> => {
             return page
               .evaluate((d) => {
@@ -729,6 +746,7 @@ export class CartScraper {
           let removed = 0;
           let stableBottomRounds = 0;
           let bottomWaits = 0;
+          let noMatchRounds = 0;
           const bottomWaitLimit = 12;
 
           for (let round = 0; round < 800; round++) {
@@ -809,9 +827,16 @@ export class CartScraper {
             }
 
             if (removedThisSpot > 0) {
+              noMatchRounds = 0;
               stableBottomRounds = 0;
               bottomWaits = 0;
               continue;
+            }
+
+            noMatchRounds++;
+            if (noMatchRounds >= 3) {
+              const end = await detectCartEndMarker();
+              if (end.hit) break;
             }
 
             const { top, height, client } = await getScrollState();
@@ -1158,6 +1183,20 @@ export class CartScraper {
       );
       const needsFullLoad = typeof uiTotalCount === 'number' && loadedQty < uiTotalCount;
       if (typeof uiTotalCount === 'number' && stableNoNewRounds >= 1 && loadedQty >= uiTotalCount) break;
+
+      // 购物车底部通常会进入“猜你喜欢/为你推荐”无限滚动区域；此时即使页面还能继续向下滚动，
+      // 也不会再出现新的购物车条目。避免在推荐区无限滚动导致抓价超时/卡住。
+      if (productsByKey.size > 0 && stableNoNewRounds >= 3) {
+        const end = await detectCartEndMarker();
+        if (end.hit) {
+          if (typeof uiTotalCount === 'number' && loadedQty < uiTotalCount) {
+            console.warn(
+              `[CartScraper] 已进入推荐区域（${end.reason || 'recommend'}）loadedQty=${loadedQty} < uiTotalCount=${uiTotalCount}；停止滚动`
+            );
+          }
+          break;
+        }
+      }
 
       const { top, height, client } = snapshot.scroll;
       const atBottom = height > 0 && client > 0 && top + client >= height - 2;

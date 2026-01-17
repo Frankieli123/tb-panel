@@ -5,6 +5,13 @@ param(
 
   [switch]$AutoCommit,
 
+  [switch]$ForceUnsafeAutoCommit,
+
+  [switch]$RequireClean,
+
+  [ValidateRange(1, 2048)]
+  [int]$MaxAutoCommitFileMB = 50,
+
   [string]$AutoCommitMessage = '',
 
   [string]$Remote = 'origin',
@@ -48,6 +55,52 @@ function Invoke-Native([string]$file, [string[]]$arguments) {
   }
 }
 
+function Get-DirtyPaths([string[]]$porcelainLines) {
+  $dirtyPaths = @()
+  foreach ($line in $porcelainLines) {
+    $l = ([string]$line).TrimEnd("`r")
+    if (-not $l) { continue }
+    if ($l.Length -lt 3) { continue }
+
+    # git status --porcelain: "XY <path>" or "?? <path>"
+    $p = if ($l.Length -ge 4) { $l.Substring(3) } else { '' }
+    if ($p -like '* -> *') { $p = ($p -split ' -> ' | Select-Object -Last 1) }
+    $p = ([string]$p).Trim()
+    if ($p) { $dirtyPaths += $p }
+  }
+  return @($dirtyPaths | Select-Object -Unique)
+}
+
+function Get-UnsafeDirtyPaths([string[]]$dirtyPaths, [int]$maxFileMB) {
+  $unsafe = @()
+  $maxBytes = [int64]$maxFileMB * 1024 * 1024
+
+  foreach ($p in $dirtyPaths) {
+    $path = ([string]$p).Trim()
+    if (-not $path) { continue }
+
+    $norm = $path -replace '\\', '/'
+    if ($norm -match '^(release|releases)(/|\\)') { $unsafe += $path; continue }
+    if ($norm -match '^release\d+(/|\\)') { $unsafe += $path; continue }
+
+    $extRaw = [System.IO.Path]::GetExtension($path)
+    $ext = if ($extRaw) { $extRaw.ToLowerInvariant() } else { '' }
+    if ($ext -in @('.zip', '.7z', '.rar', '.msi', '.exe', '.dll', '.pdb')) { $unsafe += $path; continue }
+
+    if (Test-Path -LiteralPath $path) {
+      try {
+        $item = Get-Item -LiteralPath $path -ErrorAction Stop
+        if ($item -and -not $item.PSIsContainer -and ($item.Length -gt $maxBytes)) {
+          $unsafe += $path
+          continue
+        }
+      } catch {}
+    }
+  }
+
+  return @($unsafe | Select-Object -Unique)
+}
+
 Assert-Tool git
 Assert-Tool node
 Assert-Tool npm
@@ -61,31 +114,24 @@ Set-Location $repoRoot
 $dirtyLines = @(git status --porcelain)
 $dirty = ($dirtyLines -join "`n")
 if ($dirtyLines.Count -gt 0) {
+  if ($RequireClean) {
+    Write-Host '>> Working tree is dirty:' -ForegroundColor Yellow
+    git status -uall
+    throw 'Working tree is dirty. Commit/stash first, or re-run without -RequireClean.'
+  }
+
   if (-not $AutoCommit) {
-    $dirtyPaths = @()
-    foreach ($line in $dirtyLines) {
-      $l = ([string]$line).TrimEnd("`r")
-      if (-not $l) { continue }
-      if ($l.Length -lt 4) { continue }
-      $p = $l.Substring(3)
-      if ($p -like '* -> *') { $p = ($p -split ' -> ' | Select-Object -Last 1) }
-      if ($p) { $dirtyPaths += $p }
-    }
-    $dirtyPaths = @($dirtyPaths | Select-Object -Unique)
-
-    $safePaths = @(
-      'scripts/release-agent.ps1',
-      '.github/workflows/release-agent.yml'
-    )
-
-    $unsafe = @($dirtyPaths | Where-Object { $_ -and ($_ -notin $safePaths) })
-    if ($unsafe.Count -gt 0) {
+    # Default behavior: auto-commit normal source changes (one-click release),
+    # but refuse to auto-commit large artifacts / release bundles (they break GitHub push limits).
+    $dirtyPaths = Get-DirtyPaths $dirtyLines
+    $unsafe = Get-UnsafeDirtyPaths $dirtyPaths $MaxAutoCommitFileMB
+    if ($unsafe.Count -gt 0 -and -not $ForceUnsafeAutoCommit) {
       Write-Host '>> Working tree is dirty:' -ForegroundColor Yellow
       git status -uall
-      throw "Working tree is dirty (non-release files changed). Please commit/stash first, or pass -AutoCommit. Files: $($unsafe -join ', ')"
+      throw "Working tree has unsafe changes for auto-commit. Remove these files (or add to .gitignore), or pass -ForceUnsafeAutoCommit. Files: $($unsafe -join ', ')"
     }
 
-    Write-Host '>> Working tree dirty (release tooling only): auto-committing' -ForegroundColor Yellow
+    Write-Host '>> Working tree is dirty: auto-committing changes' -ForegroundColor Yellow
     $AutoCommit = $true
   }
 

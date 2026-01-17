@@ -555,7 +555,7 @@ class SchedulerService {
             agentIdToUse,
             'scrapeCart',
             { accountId, cookies: account.cookies, delayScale: humanDelayScale, expectedTaobaoIds },
-            { timeoutMs: 120000 }
+            { timeoutMs: 10 * 60 * 1000 }
           );
         }
 
@@ -792,6 +792,7 @@ class SchedulerService {
   }
 
   private async processCartRemoveJob(job: Job): Promise<{ success: boolean; taobaoId: string; removed: number }> {
+    const jobIdText = toJobIdText(job.id);
     const accountId = String((job.data as any)?.accountId || '').trim();
     const taobaoId = String((job.data as any)?.taobaoId || '').trim();
 
@@ -809,20 +810,21 @@ class SchedulerService {
     }
 
     const agentIdToUse = await this.resolveAgentIdForAccount(account, null);
+    const connectedAgentId = agentIdToUse && agentHub.isConnected(agentIdToUse) ? agentIdToUse : null;
     if (account.agentId && (!agentIdToUse || !agentHub.isConnected(agentIdToUse))) {
       console.warn(
-        `[Scheduler] 账号绑定Agent离线，回退到本地删购物车 accountId=${accountId} boundAgentId=${String(account.agentId)}`
+        `[Scheduler] 账号绑定Agent离线，回退到本地删购物车 jobId=${jobIdText} accountId=${accountId} boundAgentId=${String(account.agentId)}`
       );
     }
 
     console.log(
-      `[Scheduler] 购物车删除执行器 accountId=${accountId} boundAgentId=${account.agentId || 'null'} agentId=${
-        agentIdToUse && agentHub.isConnected(agentIdToUse) ? agentIdToUse : 'local'
+      `[Scheduler] 购物车删除执行器 jobId=${jobIdText} accountId=${accountId} boundAgentId=${account.agentId || 'null'} agentId=${
+        connectedAgentId || 'local'
       } taobaoId=${taobaoId}`
     );
 
     const pauseTimeoutMs = 20000;
-    const pausedUsingAgent = Boolean(agentIdToUse && agentHub.isConnected(agentIdToUse));
+    const pausedUsingAgent = Boolean(connectedAgentId);
     if (pausedUsingAgent && agentIdToUse) {
       await agentHub
         .call<any>(agentIdToUse, 'pauseAddForScrape', { accountId, timeoutMs: pauseTimeoutMs }, { timeoutMs: pauseTimeoutMs + 5000 })
@@ -872,10 +874,14 @@ class SchedulerService {
         await job.log(`removed=${removed} taobaoId=${taobaoId}`);
       } catch {}
 
+      console.log(
+        `[Scheduler] 购物车删除完成 jobId=${jobIdText} accountId=${accountId} agentId=${connectedAgentId || 'local'} taobaoId=${taobaoId} removed=${removed}`
+      );
+
       // 刷新一次购物车统计，避免“已满”状态卡住
       const scrapeCart = async (): Promise<any> => {
         if (agentIdToUse && agentHub.isConnected(agentIdToUse)) {
-          return agentHub.call<any>(agentIdToUse, 'scrapeCart', { accountId, cookies: account.cookies }, { timeoutMs: 120000 });
+          return agentHub.call<any>(agentIdToUse, 'scrapeCart', { accountId, cookies: account.cookies }, { timeoutMs: 10 * 60 * 1000 });
         }
         return cartScraper.scrapeCart(accountId, account.cookies);
       };
@@ -1179,7 +1185,7 @@ class SchedulerService {
               agentIdToUse,
               'scrapeCart',
               { accountId, cookies: account.cookies, delayScale: humanDelayScale, expectedTaobaoIds: [taobaoId] },
-              { timeoutMs: 120000 }
+              { timeoutMs: 10 * 60 * 1000 }
             )
           : await cartScraper.scrapeCart(accountId, account.cookies, { expectedTaobaoIds: [taobaoId] });
 
@@ -1600,7 +1606,7 @@ class SchedulerService {
                   agentIdToUse,
                   'scrapeCart',
                   { accountId: itemAccountId, cookies: account.cookies, delayScale: humanDelayScale, expectedTaobaoIds: [item.taobaoId] },
-                  { timeoutMs: 120000 }
+                  { timeoutMs: 10 * 60 * 1000 }
                 )
               : await cartScraper.scrapeCart(itemAccountId, account.cookies, { expectedTaobaoIds: [item.taobaoId] });
 
@@ -2065,12 +2071,12 @@ class SchedulerService {
            for (let retry = 0; retry < 3; retry++) {
              const cart = agentIdToUse
                ? await agentHub.call<any>(
-                   agentIdToUse,
-                   'scrapeCart',
-                   { accountId, cookies: account.cookies, delayScale: humanDelayScale, expectedTaobaoIds: [item.taobaoId] },
-                   { timeoutMs: 120000 }
-                 )
-               : await cartScraper.scrapeCart(accountId, account.cookies, { expectedTaobaoIds: [item.taobaoId] });
+                    agentIdToUse,
+                    'scrapeCart',
+                    { accountId, cookies: account.cookies, delayScale: humanDelayScale, expectedTaobaoIds: [item.taobaoId] },
+                    { timeoutMs: 10 * 60 * 1000 }
+                  )
+                : await cartScraper.scrapeCart(accountId, account.cookies, { expectedTaobaoIds: [item.taobaoId] });
             if (!cart.success) {
               lastCartError = cart.error || 'scrapeCart failed';
             } else {
