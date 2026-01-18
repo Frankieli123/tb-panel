@@ -854,6 +854,7 @@ export class AutoCartAdder {
         success: 0,
         failed: 0,
       };
+      let sessionPage: Page | null = null;
 
       const pauseIfRequested = async (logOnce?: string): Promise<void> => {
         if (!isPauseRequested(accountId)) return;
@@ -893,6 +894,7 @@ export class AutoCartAdder {
       try {
         // 复用或创建浏览器实例
         await this.ensureBrowser(accountId, cookies);
+        sessionPage = this.page;
 
         // 阶段1：打开购物车预检查已存在的SKU
         // 如果批量模式已经预先抓取过购物车，则直接使用传入的数据
@@ -1224,8 +1226,46 @@ export class AutoCartAdder {
         };
       } finally {
         markAddEnd(accountId);
-        // 不关闭页面和 context，保持购物车页面打开供用户查看
-        // 注意：浏览器实例会一直运行，直到用户手动关闭或下次任务复用
+        // 关键：异常路径也必须清理多余 tab（否则会积累一堆商品页导致卡顿）
+        // 只保留共享会话的 page（通常是购物车页）。
+        try {
+          const pages = this.context?.pages?.().filter((p) => !p.isClosed()) ?? [];
+          const keep =
+            sessionPage && !sessionPage.isClosed()
+              ? sessionPage
+              : pages.length > 0
+                ? pages[0]
+                : null;
+
+          if (pages.length > 1) {
+            const sample = pages.slice(0, 3).map((p) => {
+              try {
+                return p.url();
+              } catch {
+                return 'n/a';
+              }
+            });
+            const suffix = pages.length > 3 ? ` (+${pages.length - 3} more)` : '';
+            console.warn(
+              `[AutoCart] 检测到多余页面，开始清理 total=${pages.length} urls=${sample.join(' | ')}${suffix}`
+            );
+          }
+
+          for (const p of pages) {
+            if (keep && p === keep) continue;
+            await p.close().catch(() => {});
+          }
+
+          if (keep && this.page !== keep && !keep.isClosed()) {
+            this.page = keep;
+            this.humanSimulator = new HumanSimulator(this.page);
+            this.skuParser = new SkuParser(this.page);
+          }
+        } catch (e) {
+          console.warn('[AutoCart] 清理多余页面失败:', e);
+        }
+
+        // 不关闭 context，保持购物车页面打开供用户查看；浏览器会被复用。
         console.log('[AutoCart] 任务完成，保持购物车页打开供用户查看');
       }
     });
