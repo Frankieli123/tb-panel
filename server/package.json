@@ -1,6 +1,6 @@
 {
   "name": "taobao-price-tracker-server",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "description": "Taobao price tracking server with multi-account support",
   "main": "dist/index.js",
   "scripts": {
