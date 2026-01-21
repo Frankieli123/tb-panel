@@ -34,6 +34,7 @@ internal sealed class TrayAppContext : ApplicationContext
   private readonly SemaphoreSlim pollLock = new(1, 1);
   private readonly SemaphoreSlim updateLock = new(1, 1);
   private readonly Dictionary<string, string> envFile;
+  private readonly string versionTag;
   private readonly SynchronizationContext uiContext;
 
   private readonly Icon iconRed;
@@ -50,6 +51,8 @@ internal sealed class TrayAppContext : ApplicationContext
   {
     uiContext = SynchronizationContext.Current ?? new SynchronizationContext();
     envFile = LoadEnvFile(Path.Combine(AppContext.BaseDirectory, ".env"));
+    var current = ReadCurrentVersion(AppContext.BaseDirectory);
+    versionTag = current != null ? $"v{current}" : "";
 
     iconRed = LoadEmbeddedIcon("TaobaoAgentTray.Resources.tray-red.ico");
     iconYellow = LoadEmbeddedIcon("TaobaoAgentTray.Resources.tray-yellow.ico");
@@ -164,10 +167,11 @@ internal sealed class TrayAppContext : ApplicationContext
 
   private void UpdateUi(StatusSnapshot? status)
   {
+    var suffix = string.IsNullOrWhiteSpace(versionTag) ? "" : $" {versionTag}";
     if (status == null)
     {
       tray.Icon = iconRed;
-      tray.Text = SafeTooltip("Agent未启动");
+      tray.Text = SafeTooltip("Agent未启动" + suffix);
       SetMenuEnabled(hasStatus: false);
       return;
     }
@@ -177,7 +181,7 @@ internal sealed class TrayAppContext : ApplicationContext
     if (!status.HasToken)
     {
       tray.Icon = iconRed;
-      tray.Text = SafeTooltip("未配对");
+      tray.Text = SafeTooltip("未配对" + suffix);
       MaybeAutoOpenPairingPage(status);
       return;
     }
@@ -185,12 +189,12 @@ internal sealed class TrayAppContext : ApplicationContext
     if (!status.Connected)
     {
       tray.Icon = iconYellow;
-      tray.Text = SafeTooltip("未连接");
+      tray.Text = SafeTooltip("未连接" + suffix);
       return;
     }
 
     tray.Icon = iconGreen;
-    tray.Text = SafeTooltip("已连接");
+    tray.Text = SafeTooltip("已连接" + suffix);
   }
 
   private void MaybeAutoOpenPairingPage(StatusSnapshot status)

@@ -227,6 +227,8 @@ export const AGENT_STATUS_HTML = `<!doctype html>
             <div class="kv">
               <div class="k">AgentId</div>
               <div class="v" id="agentId">-</div>
+              <div class="k">版本</div>
+              <div class="v" id="version">-</div>
               <div class="k">WS 地址</div>
               <div class="v" id="wsUrl">-</div>
               <div class="k">是否已配对</div>
@@ -274,6 +276,7 @@ export const AGENT_STATUS_HTML = `<!doctype html>
         dot: document.getElementById('dot'),
         statusText: document.getElementById('statusText'),
         agentId: document.getElementById('agentId'),
+        version: document.getElementById('version'),
         wsUrl: document.getElementById('wsUrl'),
         hasToken: document.getElementById('hasToken'),
         lastError: document.getElementById('lastError'),
@@ -321,6 +324,7 @@ export const AGENT_STATUS_HTML = `<!doctype html>
         setDot(connected ? 'good' : (hasToken ? 'bad' : 'bad'));
 
         els.agentId.textContent = status.agentId || '-';
+        els.version.textContent = status.version || '-';
         els.wsUrl.textContent = status.wsUrl || '-';
         els.hasToken.textContent = hasToken ? '是' : '否';
         els.lastError.textContent = status.lastError || '-';

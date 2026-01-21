@@ -35,6 +35,7 @@ type LocalStatus = {
   agentId: string;
   wsUrl: string;
   adminUrl: string;
+  version: string;
   hasToken: boolean;
   lastError: string | null;
   statusUrl: string;
@@ -277,6 +278,21 @@ async function getOrCreateAgentId(): Promise<string> {
   return generated;
 }
 
+async function resolveAgentVersion(): Promise<string> {
+  const env = String(process.env.AGENT_VERSION || '').trim();
+  if (env) return env.replace(/^v/i, '').trim();
+
+  const candidates = [path.join(process.cwd(), 'version.txt')];
+  for (const p of candidates) {
+    try {
+      const text = String(await fs.readFile(p, 'utf-8')).trim();
+      if (text) return text.replace(/^v/i, '').trim();
+    } catch {}
+  }
+
+  return '1';
+}
+
 function deriveAdminUrl(wsBase: string): string {
   const url = new URL(wsBase);
   if (url.protocol === 'ws:') url.protocol = 'http:';
@@ -452,6 +468,7 @@ async function main(): Promise<void> {
     String(process.env.AGENT_WS_URL || getArgValue('--ws') || '').trim() ||
     `ws://127.0.0.1:${process.env.PORT || '4000'}/ws/agent`;
 
+  const agentVersion = await resolveAgentVersion();
   const uiMode = isTruthy(process.env.AGENT_UI || process.env.AGENT_STATUS_UI);
   const statusPort = Number.parseInt(String(process.env.AGENT_STATUS_PORT || '').trim(), 10);
   const statusLogs: string[] = [];
@@ -503,6 +520,7 @@ async function main(): Promise<void> {
     agentId,
     wsUrl: wsBase,
     adminUrl,
+    version: agentVersion,
     hasToken: Boolean(token),
     lastError: null,
     statusUrl: '',
@@ -667,7 +685,7 @@ async function main(): Promise<void> {
           type: 'hello',
           agentId,
           name: process.env.AGENT_NAME || undefined,
-          version: process.env.AGENT_VERSION || '1',
+          version: agentVersion,
           capabilities: { cart: true, addCart: true, browserStatus: true, browserScreenshot: true },
         })
       );
