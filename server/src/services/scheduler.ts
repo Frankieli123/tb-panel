@@ -8,7 +8,7 @@ import { requestPauseForAddWithTimeout, resumeAdd } from './accountTaskControl.j
 import { setHumanDelayScale } from './humanSimulator.js';
 import { notificationService } from './notification.js';
 import { randomDelay, sleep, calculatePriceDrop, encryptCookies } from '../utils/helpers.js';
-import { taskQueue, taskQueueConnection } from './taskQueue.js';
+import { taskQueue, taskQueueWorkerConnection } from './taskQueue.js';
 import { getCartSkuStats, setCartSkuStats } from './cartSkuStats.js';
 
 const prisma = new PrismaClient();
@@ -400,7 +400,7 @@ class SchedulerService {
         return this.processJob(job);
       },
       {
-        connection: taskQueueConnection,
+        connection: taskQueueWorkerConnection,
         concurrency: 2, // 允许抓价抢占加购（加购会在 Agent 侧按 SKU 边界暂停/恢复）
       }
     );
@@ -620,6 +620,7 @@ class SchedulerService {
    */
   private async processCartScrapeJob(job: Job): Promise<{ success: boolean; updated: number; failed: number; missing: number }> {
     const { accountId, productCount } = job.data;
+    const jobIdText = toJobIdText(job.id);
 
     try {
       const scraperConfig = await (prisma as any).scraperConfig.findFirst({ orderBy: { updatedAt: 'desc' } });
@@ -648,7 +649,7 @@ class SchedulerService {
 
       const account = await prisma.taobaoAccount.findUnique({
         where: { id: accountId },
-        select: { id: true, name: true, cookies: true, agentId: true, userId: true }
+        select: { id: true, name: true, cookies: true, agentId: true, userId: true, status: true, errorCount: true }
       });
 
       if (!account) {
@@ -715,6 +716,16 @@ class SchedulerService {
         return cartScraper.scrapeCart(accountId, account.cookies, { expectedTaobaoIds });
       };
 
+      let scrapeThrown: any = null;
+      const safeScrapeCart = async (): Promise<any> => {
+        try {
+          return await scrapeCart();
+        } catch (err) {
+          scrapeThrown = err;
+          return null;
+        }
+      };
+
       let cart: any;
       let bestDistinct = 0;
 
@@ -732,13 +743,14 @@ class SchedulerService {
       }
 
       try {
-        cart = await scrapeCart();
+        cart = await safeScrapeCart();
         bestDistinct = distinctCount(cart);
 
         if (!cart?.success) {
           for (let attempt = 1; attempt <= 2; attempt++) {
             await sleep(1500);
-            const next = await scrapeCart();
+            const next = await safeScrapeCart();
+            if (!next) continue;
             if (next?.success) {
               cart = next;
               bestDistinct = distinctCount(next);
@@ -748,7 +760,8 @@ class SchedulerService {
         } else if (expectedDistinctTaobaoIds > 0 && bestDistinct < expectedDistinctTaobaoIds) {
           for (let attempt = 1; attempt <= 2; attempt++) {
             await sleep(1500);
-            const next = await scrapeCart();
+            const next = await safeScrapeCart();
+            if (!next) continue;
             const nextDistinct = distinctCount(next);
             if (nextDistinct > bestDistinct) {
               cart = next;
@@ -774,6 +787,132 @@ class SchedulerService {
       } catch {}
 
       // 限量模式：抓价时若该商品 SKU 数不足，则先补齐再更新价格（只对带 skuTarget 元数据的新增任务生效）
+      if (!cart?.success) {
+        const cartErrorRaw = typeof cart?.error === 'string' ? cart.error : '';
+        const thrownMessage = scrapeThrown instanceof Error ? scrapeThrown.message : String(scrapeThrown ?? '');
+        const errorText = (cartErrorRaw || thrownMessage || 'scrapeCart failed').trim() || 'scrapeCart failed';
+        const lower = errorText.toLowerCase();
+
+        const needCaptcha =
+          Boolean(cart?.needCaptcha) ||
+          /验证码|滑块|安全验证/i.test(errorText) ||
+          /sec\.taobao\.com|punish|waf|risk|captcha|verify/i.test(lower);
+
+        const needLogin =
+          Boolean(cart?.needLogin) ||
+          /需要登录|login required/i.test(errorText) ||
+          /login\.taobao\.com|login\.tmall\.com|passport\.taobao\.com/i.test(lower);
+
+        const connectedAgentId = agentIdToUse && agentHub.isConnected(agentIdToUse) ? agentIdToUse : null;
+
+        console.warn(
+          `[Scheduler] 购物车抓价失败 jobId=${jobIdText} accountId=${accountId} agentId=${connectedAgentId || 'local'} needLogin=${needLogin} needCaptcha=${needCaptcha} error=${errorText}`
+        );
+
+        try {
+          await job.log(`scrapeCart failed: ${errorText}`);
+        } catch {}
+
+        try {
+          if (needCaptcha || needLogin) job.discard();
+        } catch {}
+
+        if (needCaptcha) {
+          await prisma.taobaoAccount
+            .update({
+              where: { id: accountId },
+              data: {
+                status: AccountStatus.CAPTCHA,
+                lastError: errorText,
+                lastErrorAt: new Date(),
+              },
+            })
+            .catch(() => {});
+
+          try {
+            const pauseMs = this.setRiskPause(Date.now());
+            await notificationService.sendSystemAlert(
+              '账号需要验证码/安全验证',
+              [
+                `account=${account.name}(${accountId})`,
+                `agent=${connectedAgentId || 'local'}`,
+                `error=${errorText}`,
+                `pauseMs=${pauseMs}`,
+              ].join('\n')
+            );
+          } catch {}
+        } else if (needLogin) {
+          await prisma.taobaoAccount
+            .update({
+              where: { id: accountId },
+              data: {
+                status: AccountStatus.LOCKED,
+                lastError: errorText,
+                lastErrorAt: new Date(),
+              },
+            })
+            .catch(() => {});
+
+          try {
+            const pauseMs = this.setRiskPause(Date.now());
+            await notificationService.sendSystemAlert(
+              '账号需要重新登录',
+              [
+                `account=${account.name}(${accountId})`,
+                `agent=${connectedAgentId || 'local'}`,
+                `pauseMs=${pauseMs}`,
+              ].join('\n')
+            );
+          } catch {}
+        } else {
+          const prevCount =
+            typeof account.errorCount === 'number' && Number.isFinite(account.errorCount) ? account.errorCount : 0;
+          const errorCount = prevCount + 1;
+
+          await prisma.taobaoAccount
+            .update({
+              where: { id: accountId },
+              data: {
+                status: errorCount >= 5 ? AccountStatus.COOLDOWN : AccountStatus.IDLE,
+                errorCount,
+                lastError: errorText,
+                lastErrorAt: new Date(),
+              },
+            })
+            .catch(() => {});
+        }
+
+        // 同步到商品：否则 Dashboard 的“手动刷新”会乐观清空 lastError，但失败时又无反馈
+        try {
+          const productIdRaw = (job.data as any)?.productId;
+          const productId = typeof productIdRaw === 'string' ? productIdRaw.trim() : '';
+          const productError = needCaptcha ? 'Captcha required' : needLogin ? 'Login required' : errorText;
+
+          if (productId) {
+            await prisma.product
+              .update({
+                where: { id: productId },
+                data: { lastCheckAt: new Date(), lastError: productError },
+              })
+              .catch(() => {});
+          } else {
+            await prisma.product
+              .updateMany({
+                where: {
+                  ownerAccountId: accountId,
+                  monitorMode: 'CART',
+                  skuId: CART_BASE_SKU_ID,
+                  isActive: true,
+                },
+                data: { lastCheckAt: new Date(), lastError: productError },
+              })
+              .catch(() => {});
+          }
+        } catch {}
+
+        throw new Error(errorText);
+      }
+
       if (cart?.success && Array.isArray(cart?.products)) {
         try {
           const uiTotalCountRaw = (cart as any)?.uiTotalCount;
@@ -902,7 +1041,7 @@ class SchedulerService {
             }
 
             try {
-              const next = await scrapeCart();
+              const next = await safeScrapeCart();
               if (next?.success) cart = next;
             } finally {
               if (pausedUsingAgent && agentIdToUse) {
@@ -931,6 +1070,13 @@ class SchedulerService {
       console.log(
         `[Scheduler] 购物车抓价完成 accountId=${accountId} updated=${result.updated} missing=${result.missing} failed=${result.failed}`
       );
+
+      await prisma.taobaoAccount
+        .update({
+          where: { id: accountId },
+          data: { status: AccountStatus.IDLE, errorCount: 0, lastError: null },
+        })
+        .catch(() => {});
 
       return {
         success: true,

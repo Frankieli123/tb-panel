@@ -42,6 +42,8 @@ export interface CartScrapeResult {
   total: number;
   uiTotalCount?: number | null;
   error?: string;
+  needLogin?: boolean;
+  needCaptcha?: boolean;
 }
 
 export class CartScraper {
@@ -368,11 +370,22 @@ export class CartScraper {
         }
       }
 
+      const message = lastErr?.message ? String(lastErr.message) : String(lastErr ?? 'unknown');
+      const lower = message.toLowerCase();
+      const needLogin =
+        /需要登录|login required/i.test(message) ||
+        /login\.taobao\.com|login\.tmall\.com|passport\.taobao\.com/i.test(lower);
+      const needCaptcha =
+        /验证码|滑块|安全验证/i.test(message) ||
+        /sec\.taobao\.com|punish|waf|risk|captcha|verify/i.test(lower);
+
       return {
         success: false,
         products: [],
         total: 0,
-        error: lastErr?.message ?? String(lastErr ?? 'unknown'),
+        error: message || 'unknown',
+        needLogin,
+        needCaptcha,
       };
     });
   }
