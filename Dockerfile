@@ -7,12 +7,14 @@
 # 默认使用镜像源，降低 `npm ci` 在部分网络环境下的 ETIMEDOUT 概率。
 # 如需改回官方源：docker build --build-arg NPM_REGISTRY=https://registry.npmjs.org/
 ARG NPM_REGISTRY=https://registry.npmmirror.com/
+ARG ALPINE_REPO=https://mirrors.aliyun.com/alpine
 
 # ==========================================
 # Stage 1: 构建前端
 # ==========================================
 FROM node:20-alpine AS frontend-builder
 ARG NPM_REGISTRY
+ARG ALPINE_REPO
 
 WORKDIR /app/client
 
@@ -33,10 +35,13 @@ RUN npm run build
 # ==========================================
 FROM node:20-alpine AS backend-builder
 ARG NPM_REGISTRY
+ARG ALPINE_REPO
 
 WORKDIR /app/server
 
-RUN apk add --no-cache openssl
+RUN sed -i "s#http://dl-cdn.alpinelinux.org/alpine#${ALPINE_REPO%/}#g; s#https://dl-cdn.alpinelinux.org/alpine#${ALPINE_REPO%/}#g" /etc/apk/repositories && \
+    apk update && \
+    apk add --no-cache openssl
 
 COPY server/package*.json ./
 COPY server/prisma ./prisma/
@@ -60,8 +65,11 @@ RUN npm run build
 # ==========================================
 FROM node:20-alpine AS production
 ARG NPM_REGISTRY
+ARG ALPINE_REPO
 
-RUN apk add --no-cache nginx supervisor openssl tzdata chromium
+RUN sed -i "s#http://dl-cdn.alpinelinux.org/alpine#${ALPINE_REPO%/}#g; s#https://dl-cdn.alpinelinux.org/alpine#${ALPINE_REPO%/}#g" /etc/apk/repositories && \
+    apk update && \
+    apk add --no-cache nginx supervisor openssl tzdata chromium
 
 # 安装 nginx、supervisor，并提供 `openssl` 可执行文件供 Prisma 检测 OpenSSL 版本
 # tzdata 用于支持 TZ 时区（静默时间等按本地时间计算的功能）
