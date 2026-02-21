@@ -8,6 +8,7 @@
 # 如需改回官方源：docker build --build-arg NPM_REGISTRY=https://registry.npmjs.org/
 ARG NPM_REGISTRY=https://registry.npmmirror.com/
 ARG ALPINE_REPO=https://mirrors.aliyun.com/alpine
+ARG PRISMA_ENGINES_MIRROR=https://cdn.npmmirror.com/binaries/prisma
 
 # ==========================================
 # Stage 1: 构建前端
@@ -36,6 +37,7 @@ RUN npm run build
 FROM node:20-alpine AS backend-builder
 ARG NPM_REGISTRY
 ARG ALPINE_REPO
+ARG PRISMA_ENGINES_MIRROR
 
 WORKDIR /app/server
 
@@ -66,6 +68,7 @@ RUN npm run build
 FROM node:20-alpine AS production
 ARG NPM_REGISTRY
 ARG ALPINE_REPO
+ARG PRISMA_ENGINES_MIRROR
 
 RUN sed -i "s#http://dl-cdn.alpinelinux.org/alpine#${ALPINE_REPO%/}#g; s#https://dl-cdn.alpinelinux.org/alpine#${ALPINE_REPO%/}#g" /etc/apk/repositories && \
     apk update && \
