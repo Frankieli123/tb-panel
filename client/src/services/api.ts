@@ -139,7 +139,7 @@ export const api = {
 
   getBatchAddProgress: (batchJobId: string) =>
     request<{
-      status: 'running' | 'completed' | 'failed' | 'partial';
+      status: 'pending' | 'running' | 'completed' | 'failed' | 'partial';
       progress: { totalItems: number; currentIndex: number; completedItems: number; successItems: number; failedItems: number };
       items: Array<{
         index: number;
@@ -159,6 +159,13 @@ export const api = {
       progress: { total: number; current: number; success: number; failed: number };
       logs: string[];
     }>(`/products/add-progress/${jobId}`),
+
+  cancelAddTask: (jobId: string) =>
+    request<{ cancelled?: boolean; cancelRequested?: boolean; finished?: boolean }>(`/products/add-cancel/${jobId}`, {
+      method: 'POST',
+      headers: csrfToken ? { 'x-csrf-token': csrfToken } : undefined,
+      body: JSON.stringify({}),
+    }),
 
   deleteProduct: (id: string) =>
     request<void>(`/products/${id}`, {

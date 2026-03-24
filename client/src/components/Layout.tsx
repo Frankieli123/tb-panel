@@ -11,7 +11,7 @@ interface LayoutProps {
 
 export default function Layout({ children }: LayoutProps) {
   const { user, logout } = useAuth();
-  const { tasks, dismissTask } = useTask();
+  const { tasks, cancelTask, dismissTask } = useTask();
   const navigate = useNavigate();
 
   const roleLabel = user?.role === 'admin' ? '管理员' : user?.role === 'operator' ? '操作员' : '';
@@ -113,7 +113,7 @@ export default function Layout({ children }: LayoutProps) {
       </nav>
 
       {/* 全局任务进度面板 */}
-      <TaskProgressPanel tasks={tasks} onDismiss={dismissTask} />
+      <TaskProgressPanel tasks={tasks} onCancel={cancelTask} onDismiss={dismissTask} />
     </div>
   );
 }

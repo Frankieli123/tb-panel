@@ -2,7 +2,14 @@ import { Page, BrowserContext, Browser, Frame } from 'playwright';
 import { SkuParser, SkuCombination } from './skuParser.js';
 import { HumanSimulator, randomDelay, randomRange } from './humanSimulator.js';
 import { sharedBrowserManager } from './sharedBrowserManager.js';
-import { isPauseRequested, markAddEnd, markAddStart, notifyPausedAtSafePoint, waitUntilResumed } from './accountTaskControl.js';
+import {
+  isCancelRequested,
+  isPauseRequested,
+  markAddEnd,
+  markAddStart,
+  notifyPausedAtSafePoint,
+  waitUntilResumed,
+} from './accountTaskControl.js';
 import fs from 'fs/promises';
 import path from 'path';
 
@@ -856,7 +863,14 @@ export class AutoCartAdder {
       };
       let sessionPage: Page | null = null;
 
+      const throwIfCancelled = (): void => {
+        if (isCancelRequested(accountId)) {
+          throw new Error('任务已取消');
+        }
+      };
+
       const pauseIfRequested = async (logOnce?: string): Promise<void> => {
+        throwIfCancelled();
         if (!isPauseRequested(accountId)) return;
 
         notifyPausedAtSafePoint(accountId);
@@ -872,6 +886,7 @@ export class AutoCartAdder {
 
         const resumed = waitUntilResumed(accountId);
         while (isPauseRequested(accountId)) {
+          throwIfCancelled();
           const done = await Promise.race([
             resumed.then(() => true),
             this.humanSimulator.sleep(2500).then(() => false),
@@ -884,6 +899,7 @@ export class AutoCartAdder {
       const sleepInterruptible = async (ms: number): Promise<void> => {
         let remaining = Math.max(0, Math.floor(ms));
         while (remaining > 0) {
+          throwIfCancelled();
           if (isPauseRequested(accountId)) break;
           const step = Math.min(500, remaining);
           await this.humanSimulator.sleep(step);
@@ -892,8 +908,10 @@ export class AutoCartAdder {
       };
 
       try {
+        throwIfCancelled();
         // 复用或创建浏览器实例
         await this.ensureBrowser(accountId, cookies);
+        throwIfCancelled();
         sessionPage = this.page;
 
         // 阶段1：打开购物车预检查已存在的SKU
@@ -927,7 +945,9 @@ export class AutoCartAdder {
           }
           lastProgress = { total: 0, current: 0, success: 0, failed: 0 };
           await this.navigateToCartPage();
+          throwIfCancelled();
           const precheck = await this.collectCartSkuKeysForTaobaoId(taobaoId);
+          throwIfCancelled();
           existedSkuKeys = precheck.keys;
           existedSkuCount = precheck.uniqueCount;
           console.log(`[AutoCart] 购物车预检查: taobaoId=${taobaoId} existedSkus=${existedSkuCount}`);
@@ -949,6 +969,7 @@ export class AutoCartAdder {
         }
         lastProgress = { total: 0, current: 0, success: 0, failed: 0 };
         const openInfo = await this.openProductFromCartOrNavigate(taobaoId);
+        throwIfCancelled();
         await this.assertNotAuthPage('打开商品页');
 
         await this.humanSimulator.browsePage({
@@ -971,6 +992,7 @@ export class AutoCartAdder {
         }
         lastProgress = { total: 0, current: 0, success: 0, failed: 0 };
         const skuTree = await this.skuParser.parseSkuTree(taobaoId);
+        throwIfCancelled();
         console.log(`[AutoCart] 找到 ${skuTree.combinations.length} 个 SKU 组合`);
 
         const availableSkus = skuTree.combinations.filter((sku) => sku.stock > 0);
@@ -1039,6 +1061,7 @@ export class AutoCartAdder {
 
         for (let i = 0; i < selected.length; i++) {
           await pauseIfRequested('【抢占】暂停加购，优先抓价中…');
+          throwIfCancelled();
 
           if (skuLimit > 0 && successCount >= skuTarget) break;
 
@@ -1072,6 +1095,7 @@ export class AutoCartAdder {
               if (propsKey) existedKeys.add(propsKey);
             } else {
               result = await this.addSingleSkuAsHuman(sku, taobaoId);
+              throwIfCancelled();
               if (result.success) {
                 successCount++;
                 if (idKey) existedKeys.add(idKey);
@@ -1106,8 +1130,12 @@ export class AutoCartAdder {
               console.log(`[AutoCart] 等待 ${delay}ms 后继续下一个 SKU...`);
               await sleepInterruptible(delay);
               await pauseIfRequested('【抢占】暂停加购，优先抓价中…');
+              throwIfCancelled();
             }
           } catch (error: any) {
+            if (String(error?.message || error) === '任务已取消') {
+              throw error;
+            }
             console.error(`[AutoCart] SKU 失败: ${sku.skuId}`, error);
             await this.maybeSaveDebugArtifacts('sku_failed', {
               taobaoId,
@@ -1185,9 +1213,11 @@ export class AutoCartAdder {
         }
         
         // 刷新购物车页面获取最新价格
+        throwIfCancelled();
         console.log('[AutoCart] 刷新购物车页以获取最新价格...');
         await this.page.reload({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
         await this.humanSimulator.sleep(randomDelay(1000, 2000));
+        throwIfCancelled();
         await this.closeFeatureTips().catch(() => {});
         await this.waitForOverlaysCleared().catch(() => {});
 
@@ -1209,6 +1239,7 @@ export class AutoCartAdder {
         // 直接在当前页面抓取购物车数据
         console.log('[AutoCart] 从当前页面提取购物车数据...');
         const cartProducts = await this.extractCartDataFromCurrentPage(taobaoId);
+        throwIfCancelled();
         console.log(`[AutoCart] 已提取 ${cartProducts.length} 个商品 taobaoId=${taobaoId}`);
 
         return {

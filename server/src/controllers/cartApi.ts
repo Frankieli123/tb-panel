@@ -2,6 +2,9 @@ import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { z } from 'zod';
 import { taskQueue, taskQueueEvents } from '../services/taskQueue.js';
+import { agentHub } from '../services/agentHub.js';
+import { requestCancelForAdd } from '../services/accountTaskControl.js';
+import { schedulerService } from '../services/scheduler.js';
 import { extractTaobaoId } from '../utils/helpers.js';
 import { systemAuth, requireCsrf } from '../middlewares/systemAuth.js';
 import { buildVisibleAccountsWhere, getRequestScope } from '../auth/access.js';
@@ -77,6 +80,60 @@ function groupItemLogs(lines: string[]): Map<number, string[]> {
     map.set(index, list);
   }
   return map;
+}
+
+function appendCancelTarget(
+  map: Map<string, { accountId: string; agentId: string | null }>,
+  accountIdRaw: unknown,
+  agentIdRaw: unknown
+): void {
+  const accountId = String(accountIdRaw ?? '').trim();
+  if (!accountId) return;
+  const agentId = String(agentIdRaw ?? '').trim() || null;
+  map.set(accountId, { accountId, agentId });
+}
+
+function collectActiveCancelTargets(job: any): Array<{ accountId: string; agentId: string | null }> {
+  const targets = new Map<string, { accountId: string; agentId: string | null }>();
+  const progress = job?.progress as any;
+  const data = job?.data as any;
+  const jobName = String(job?.name || '').trim();
+
+  if (jobName === 'cart-add') {
+    appendCancelTarget(targets, progress?.accountId ?? data?.accountId, progress?.agentId);
+    return Array.from(targets.values());
+  }
+
+  if (jobName !== 'cart-batch-add') {
+    return [];
+  }
+
+  if (Array.isArray(progress?.items)) {
+    for (const item of progress.items) {
+      if (item?.status !== 'running') continue;
+      appendCancelTarget(targets, item?.accountId, item?.agentId);
+    }
+  }
+
+  if (targets.size === 0) {
+    appendCancelTarget(targets, progress?.accountId ?? data?.accountId, progress?.agentId);
+  }
+
+  return Array.from(targets.values());
+}
+
+async function requestActiveJobCancellation(job: any): Promise<void> {
+  schedulerService.requestCancelCartAddJob(job?.id);
+
+  const targets = collectActiveCancelTargets(job);
+  await Promise.all(
+    targets.map(async ({ accountId, agentId }) => {
+      requestCancelForAdd(accountId);
+      if (agentId && agentHub.isConnected(agentId)) {
+        await agentHub.call(agentId, 'cancelAddForTask', { accountId }, { timeoutMs: 8000 }).catch(() => {});
+      }
+    })
+  );
 }
 
 router.post('/products/add-cart-mode', async (req: Request, res: Response) => {
@@ -172,6 +229,47 @@ router.get('/products/add-progress/:jobId', async (req: Request, res: Response) 
         logs: logs.length > 0 ? logs : status === 'pending' ? ['任务已入队，等待执行...'] : [],
       },
     });
+  } catch (error) {
+    res.status(500).json({ success: false, error: String(error) });
+  }
+});
+
+router.post('/products/add-cancel/:jobId', async (req: Request, res: Response) => {
+  try {
+    const { jobId } = req.params;
+    const job = await taskQueue.getJob(jobId);
+
+    if (!job || !['cart-add', 'cart-batch-add'].includes(String(job.name || ''))) {
+      return res.status(404).json({ success: false, error: '任务不存在' });
+    }
+
+    const scope = getRequestScope(req);
+    const ownerUserId = (job.data as any)?.ownerUserId ?? null;
+    if (scope.kind === 'user' && ownerUserId !== scope.userId) {
+      return res.status(404).json({ success: false, error: '任务不存在' });
+    }
+
+    const state = await job.getState();
+    if (state === 'completed' || state === 'failed') {
+      return res.json({ success: true, data: { cancelled: false, finished: true } });
+    }
+
+    if (state === 'active') {
+      await requestActiveJobCancellation(job);
+      return res.json({ success: true, data: { cancelled: false, cancelRequested: true } });
+    }
+
+    try {
+      await job.remove();
+      return res.json({ success: true, data: { cancelled: true } });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/active/i.test(message)) {
+        await requestActiveJobCancellation(job);
+        return res.json({ success: true, data: { cancelled: false, cancelRequested: true } });
+      }
+      throw error;
+    }
   } catch (error) {
     res.status(500).json({ success: false, error: String(error) });
   }

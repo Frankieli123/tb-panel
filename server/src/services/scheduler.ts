@@ -4,7 +4,7 @@ import { scraper, ScrapeResult } from './scraper.js';
 import { cartScraper } from './cartScraper.js';
 import { agentHub } from './agentHub.js';
 import { autoCartAdder } from './autoCartAdder.js';
-import { requestPauseForAddWithTimeout, resumeAdd } from './accountTaskControl.js';
+import { requestCancelForAdd, requestPauseForAddWithTimeout, resumeAdd } from './accountTaskControl.js';
 import { setHumanDelayScale } from './humanSimulator.js';
 import { notificationService } from './notification.js';
 import { randomDelay, sleep, calculatePriceDrop, encryptCookies } from '../utils/helpers.js';
@@ -265,6 +265,7 @@ class SchedulerService {
   private riskPauseUntilMs = 0;
   private riskStreak = 0;
   private isQuietPaused = false;
+  private cancelledCartAddJobIds = new Set<string>();
 
   private isRiskPaused(nowMs: number): boolean {
     return nowMs < this.riskPauseUntilMs;
@@ -296,6 +297,72 @@ class SchedulerService {
   private clearRiskPause(): void {
     this.riskPauseUntilMs = 0;
     this.riskStreak = 0;
+  }
+
+  requestCancelCartAddJob(jobId: unknown): void {
+    const id = toJobIdText(jobId);
+    if (id !== 'n/a') this.cancelledCartAddJobIds.add(id);
+  }
+
+  private clearCancelCartAddJob(jobId: unknown): void {
+    const id = toJobIdText(jobId);
+    if (id !== 'n/a') this.cancelledCartAddJobIds.delete(id);
+  }
+
+  private isCartAddJobCancellationRequested(jobId: unknown): boolean {
+    return this.cancelledCartAddJobIds.has(toJobIdText(jobId));
+  }
+
+  private isTaskCancelledError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error ?? '');
+    return message.includes('任务已取消');
+  }
+
+  private getCartSkuHardLimitMessage(total: number | null = null): string {
+    const current =
+      typeof total === 'number' && Number.isFinite(total) ? Math.max(0, Math.floor(total)) : CART_SKU_HARD_LIMIT;
+    return `购物车 SKU 已满（${current}/${CART_SKU_HARD_LIMIT}），无法继续加购，请先清理购物车后再试`;
+  }
+
+  private assertCartAddJobNotCancelled(job: Job): void {
+    if (this.isCartAddJobCancellationRequested(job.id)) {
+      throw new Error('任务已取消');
+    }
+  }
+
+  private assertCartSkuNotFull(accountId: string): void {
+    const total = getCartSkuStats(accountId)?.cartSkuTotal ?? null;
+    if (typeof total === 'number' && total >= CART_SKU_HARD_LIMIT) {
+      throw new Error(this.getCartSkuHardLimitMessage(total));
+    }
+  }
+
+  private async abortBatchAddJob(
+    job: Job,
+    batchJobIdText: string,
+    status: any,
+    fromIndex: number,
+    reason: string
+  ): Promise<any> {
+    for (let i = Math.max(0, fromIndex); i < status.items.length; i++) {
+      const item = status.items[i];
+      if (!item || item.status !== 'pending') continue;
+      item.status = 'failed';
+      item.error = reason;
+      status.progress.completedItems++;
+      status.progress.failedItems++;
+    }
+
+    const hasFailures = status.progress.failedItems > 0;
+    const hasSuccess = status.progress.successItems > 0;
+    status.status = hasFailures && hasSuccess ? 'partial' : hasFailures ? 'failed' : 'completed';
+
+    await job.updateProgress(status);
+    await job.log(reason);
+    console.log(
+      `[Scheduler] 批量加购中止 batchJobId=${batchJobIdText} 成功=${status.progress.successItems}/${status.progress.totalItems} 失败=${status.progress.failedItems} reason=${reason}`
+    );
+    return status;
   }
 
   private setRiskPause(nowMs: number): number {
@@ -365,6 +432,10 @@ class SchedulerService {
       })
       .filter((c) => c.total === null || c.total < CART_SKU_HARD_LIMIT);
 
+    if (candidates.length === 0) {
+      throw new Error(this.getCartSkuHardLimitMessage(CART_SKU_HARD_LIMIT));
+    }
+
     const preferred = preferredAccountId ? String(preferredAccountId).trim() : '';
     if (preferred) {
       const p = candidates.find((c) => c.id === preferred);
@@ -381,7 +452,7 @@ class SchedulerService {
     const unknown = candidates.find((c) => c.total === null);
     if (unknown) return unknown.id;
 
-    throw new Error(`No account available: cart SKU limit reached (>=${CART_SKU_SOFT_LIMIT})`);
+    throw new Error(`暂无可用账号：账号池购物车 SKU 接近上限（>=${CART_SKU_SOFT_LIMIT}），请先清理购物车或刷新统计后再试`);
   }
 
   private isRunnableAccountStatus(status: AccountStatus | null | undefined): boolean {
@@ -619,11 +690,19 @@ class SchedulerService {
     }
 
     if (job.name === 'cart-add') {
-      return this.processCartAddJob(job);
+      try {
+        return await this.processCartAddJob(job);
+      } finally {
+        this.clearCancelCartAddJob(job.id);
+      }
     }
 
     if (job.name === 'cart-batch-add') {
-      return this.processCartBatchAddJob(job);
+      try {
+        return await this.processCartBatchAddJob(job);
+      } finally {
+        this.clearCancelCartAddJob(job.id);
+      }
     }
 
     console.log(`[Scheduler] 不支持的任务 name=${job.name} jobId=${job.id}`);
@@ -1330,11 +1409,6 @@ class SchedulerService {
         ? Math.max(0, Math.floor(cartAddSkuLimitOverrideNum))
         : cartAddSkuLimitDefault;
 
-    await job.updateProgress({ total: 0, current: 0, success: 0, failed: 0 });
-    await job.log(`开始处理商品 ${taobaoId}...`);
-    await job.log(`delayScale=${humanDelayScale}`);
-    await job.log(`skuLimit=${cartAddSkuLimit > 0 ? cartAddSkuLimit : 'all'}`);
-
     const account = await prisma.taobaoAccount.findUnique({
       where: { id: accountId },
       select: { id: true, name: true, cookies: true, agentId: true, userId: true, isActive: true, status: true },
@@ -1349,8 +1423,19 @@ class SchedulerService {
     }
 
     const agentIdToUse = await this.resolveAgentIdForAccount(account, ownerUserId);
+    const activeAgentId = agentIdToUse && agentHub.isConnected(agentIdToUse) ? agentIdToUse : null;
+    const withProgressMeta = (progress: { total: number; current: number; success: number; failed: number }) => ({
+      ...progress,
+      accountId,
+      agentId: activeAgentId,
+    });
+
+    await job.updateProgress(withProgressMeta({ total: 0, current: 0, success: 0, failed: 0 }));
+    await job.log(`开始处理商品 ${taobaoId}...`);
+    await job.log(`delayScale=${humanDelayScale}`);
+    await job.log(`skuLimit=${cartAddSkuLimit > 0 ? cartAddSkuLimit : 'all'}`);
     await job.log(
-      `使用账号 accountId=${accountId} agentId=${agentIdToUse && agentHub.isConnected(agentIdToUse) ? agentIdToUse : 'local'}`
+      `使用账号 accountId=${accountId} agentId=${activeAgentId || 'local'}`
     );
     if (account.agentId && (!agentIdToUse || !agentHub.isConnected(agentIdToUse))) {
       console.warn(
@@ -1384,11 +1469,14 @@ class SchedulerService {
         })
         .catch(() => null as any)) ?? null);
     if (alreadyMonitored?.id) {
-      await job.updateProgress({ total: 0, current: 0, success: 0, failed: 0 });
+      await job.updateProgress(withProgressMeta({ total: 0, current: 0, success: 0, failed: 0 }));
       await job.log('该商品已在监控，已忽略（不重复加购）');
       console.log(`[Scheduler] 加购任务已忽略（已在监控）jobId=${jobIdText} taobaoId=${taobaoId}`);
       return { success: true, taobaoId, productId: String(alreadyMonitored.id) };
     }
+
+    this.assertCartAddJobNotCancelled(job);
+    this.assertCartSkuNotFull(accountId);
 
     const queueStats = await getCartAddQueueStats().catch(() => null as any);
     console.log(
@@ -1435,12 +1523,14 @@ class SchedulerService {
           progress.current >= progress.total);
       if (shouldUpdate) {
         lastProgressUpdateAt = now;
-        void job.updateProgress(progress).catch(() => {});
+        void job.updateProgress(withProgressMeta(progress)).catch(() => {});
       }
       if (log) void job.log(log).catch(() => {});
       logAddProgressToConsole(progress);
+      this.assertCartAddJobNotCancelled(job);
     };
 
+    this.assertCartAddJobNotCancelled(job);
     const result = agentIdToUse
       ? await agentHub.call<any>(
           agentIdToUse,
@@ -1472,7 +1562,8 @@ class SchedulerService {
       success: result.successCount,
       failed: result.failedCount,
     };
-    await job.updateProgress(finalProgress);
+    this.assertCartAddJobNotCancelled(job);
+    await job.updateProgress(withProgressMeta(finalProgress));
     await job.log(`SKU处理完成: ${result.successCount}/${result.totalSkus}`);
     console.log(
       `[Scheduler] 加购任务SKU完成 jobId=${jobIdText} taobaoId=${taobaoId} 成功=${result.successCount}/${result.totalSkus} 失败=${result.failedCount}`
@@ -1521,6 +1612,7 @@ class SchedulerService {
         });
 
     await job.log('正在处理购物车数据...');
+    this.assertCartAddJobNotCancelled(job);
 
     const successResults = (result.results || []).filter((r: any) => r && r.success);
     const wantedNumericSkuIds = new Set(
@@ -1539,6 +1631,7 @@ class SchedulerService {
       await job.log('cartProducts 为空，尝试 scrapeCart...');
       let lastCartError: string | null = null;
       for (let i = 0; i < 3; i++) {
+        this.assertCartAddJobNotCancelled(job);
         const cart = agentIdToUse
           ? await agentHub.call<any>(
               agentIdToUse,
@@ -1788,6 +1881,10 @@ class SchedulerService {
       const itemTaobaoId = String(item?.taobaoId || '').trim();
       status.progress.currentIndex = i;
 
+      if (this.isCartAddJobCancellationRequested(job.id)) {
+        return this.abortBatchAddJob(job, batchJobIdText, status, i, '任务已取消');
+      }
+
       const existingProductId = itemTaobaoId ? alreadyMonitoredByTaobaoId.get(itemTaobaoId) ?? null : null;
       if (existingProductId) {
         itemStatus.status = 'completed';
@@ -1807,10 +1904,25 @@ class SchedulerService {
         if (delay > 0) {
           await job.log(`[${item.index}] 加购间隔等待 ${delay}ms`);
           await sleep(delay);
+          if (this.isCartAddJobCancellationRequested(job.id)) {
+            return this.abortBatchAddJob(job, batchJobIdText, status, i, '任务已取消');
+          }
         }
       }
 
-      const itemAccountId = this.pickAccountIdFromPool(selectablePoolAccountIds, preferredAccountId);
+      let itemAccountId: string;
+      try {
+        itemAccountId = this.pickAccountIdFromPool(selectablePoolAccountIds, preferredAccountId);
+      } catch (error: any) {
+        const reason = error?.message ? String(error.message) : String(error);
+        itemStatus.status = 'failed';
+        itemStatus.error = reason;
+        status.progress.completedItems++;
+        status.progress.failedItems++;
+        flushBatchProgress(true);
+        await job.log(`[${item.index}] 错误: ${reason}`);
+        return this.abortBatchAddJob(job, batchJobIdText, status, i + 1, reason);
+      }
       const account = poolById.get(itemAccountId) ?? null;
       const stopReason = this.getAccountTaskStopReason(account);
       if (stopReason) {
@@ -1825,6 +1937,18 @@ class SchedulerService {
 
       const agentIdToUse = await getAgentIdToUse(itemAccountId);
       itemStatus.agentId = agentIdToUse;
+      try {
+        this.assertCartSkuNotFull(itemAccountId);
+      } catch (error: any) {
+        const reason = error?.message ? String(error.message) : String(error);
+        itemStatus.status = 'failed';
+        itemStatus.error = reason;
+        status.progress.completedItems++;
+        status.progress.failedItems++;
+        flushBatchProgress(true);
+        await job.log(`[${item.index}] 错误: ${reason}`);
+        return this.abortBatchAddJob(job, batchJobIdText, status, i + 1, reason);
+      }
 
       itemStatus.status = 'running';
       await job.log(
@@ -1835,6 +1959,7 @@ class SchedulerService {
       flushBatchProgress(true);
 
       try {
+        this.assertCartAddJobNotCancelled(job);
         setHumanDelayScale(humanDelayScale);
         const itemIndex1 = i + 1;
 
@@ -1863,12 +1988,14 @@ class SchedulerService {
         };
 
         const onProgress = (progress: any, log?: string) => {
+          this.assertCartAddJobNotCancelled(job);
           itemStatus.progress = progress;
           flushBatchProgress();
           if (log) void job.log(`[${item.index}] ${log}`).catch(() => {});
           logBatchSkuProgressToConsole(progress);
         };
 
+        this.assertCartAddJobNotCancelled(job);
         const result = agentIdToUse
           ? await agentHub.call<any>(
               agentIdToUse,
@@ -1897,6 +2024,7 @@ class SchedulerService {
             });
 
         performedAdd++;
+        this.assertCartAddJobNotCancelled(job);
 
         try {
           const uiTotalCountRaw = (result as any)?.uiTotalCount;
@@ -1971,6 +2099,15 @@ class SchedulerService {
         flushBatchProgress(true);
         await job.log(`[${item.index}] 完成`);
       } catch (error: any) {
+        if (this.isTaskCancelledError(error)) {
+          itemStatus.status = 'failed';
+          itemStatus.error = '任务已取消';
+          status.progress.completedItems++;
+          status.progress.failedItems++;
+          flushBatchProgress(true);
+          await job.log(`[${item.index}] 错误: 任务已取消`);
+          return this.abortBatchAddJob(job, batchJobIdText, status, i + 1, '任务已取消');
+        }
         itemStatus.status = 'failed';
         itemStatus.error = error?.message ? String(error.message) : String(error);
         status.progress.completedItems++;
@@ -2141,6 +2278,7 @@ class SchedulerService {
     }
 
     const agentIdToUse = await this.resolveAgentIdForAccount(account, ownerUserId);
+    const activeAgentId = agentIdToUse && agentHub.isConnected(agentIdToUse) ? agentIdToUse : null;
 
     const status: any = {
       status: 'running',
@@ -2157,6 +2295,8 @@ class SchedulerService {
         taobaoId: it.taobaoId,
         status: 'pending',
       })),
+      accountId,
+      agentId: activeAgentId,
       ownerUserId: (job.data as any)?.ownerUserId ?? null,
     };
 
@@ -2212,6 +2352,10 @@ class SchedulerService {
       const itemTaobaoId = String(item?.taobaoId || '').trim();
       status.progress.currentIndex = i;
 
+      if (this.isCartAddJobCancellationRequested(job.id)) {
+        return this.abortBatchAddJob(job, batchJobIdText, status, i, '任务已取消');
+      }
+
       const existingProductId = itemTaobaoId ? alreadyMonitoredByTaobaoId.get(itemTaobaoId) ?? null : null;
       if (existingProductId) {
         itemStatus.status = 'completed';
@@ -2235,7 +2379,23 @@ class SchedulerService {
         if (delay > 0) {
           await job.log(`[${item.index}] 加购防风控等待 ${delay}ms`);
           await sleep(delay);
+          if (this.isCartAddJobCancellationRequested(job.id)) {
+            return this.abortBatchAddJob(job, batchJobIdText, status, i, '任务已取消');
+          }
         }
+      }
+
+      try {
+        this.assertCartSkuNotFull(accountId);
+      } catch (error: any) {
+        const reason = error?.message ? String(error.message) : String(error);
+        itemStatus.status = 'failed';
+        itemStatus.error = reason;
+        status.progress.completedItems++;
+        status.progress.failedItems++;
+        flushBatchProgress(true);
+        await job.log(`[${item.index}] 错误: ${reason}`);
+        return this.abortBatchAddJob(job, batchJobIdText, status, i + 1, reason);
       }
 
       itemStatus.status = 'running';
@@ -2246,6 +2406,7 @@ class SchedulerService {
       flushBatchProgress(true);
 
       try {
+        this.assertCartAddJobNotCancelled(job);
         setHumanDelayScale(humanDelayScale);
         const itemIndex1 = i + 1;
         let lastConsoleAt = 0;
@@ -2273,12 +2434,14 @@ class SchedulerService {
         };
 
         const onProgress = (progress: any, log?: string) => {
+          this.assertCartAddJobNotCancelled(job);
           itemStatus.progress = progress;
           flushBatchProgress();
           if (log) void job.log(`[${item.index}] ${log}`).catch(() => {});
           logBatchSkuProgressToConsole(progress);
         };
 
+        this.assertCartAddJobNotCancelled(job);
         const result = agentIdToUse
           ? await agentHub.call<any>(
               agentIdToUse,
@@ -2308,6 +2471,7 @@ class SchedulerService {
               refreshCartAfterAdd: false,
             });
         performedAgentAdd++;
+        this.assertCartAddJobNotCancelled(job);
 
         try {
           const uiTotalCountRaw = (result as any)?.uiTotalCount;
@@ -2381,6 +2545,15 @@ class SchedulerService {
           `[Scheduler] 批量加购进度 batchJobId=${batchJobIdText} 当前=${itemIndex1}/${items.length} taobaoId=${itemTaobaoId} 完成（完成=${status.progress.completedItems}/${status.progress.totalItems} 成功=${status.progress.successItems} 失败=${status.progress.failedItems}）`
         );
       } catch (error: any) {
+        if (this.isTaskCancelledError(error)) {
+          itemStatus.status = 'failed';
+          itemStatus.error = '任务已取消';
+          status.progress.completedItems++;
+          status.progress.failedItems++;
+          flushBatchProgress(true);
+          await job.log(`[${item.index}] 错误: 任务已取消`);
+          return this.abortBatchAddJob(job, batchJobIdText, status, i + 1, '任务已取消');
+        }
         itemStatus.status = 'failed';
         itemStatus.error = error?.message ? String(error.message) : String(error);
         status.progress.completedItems++;

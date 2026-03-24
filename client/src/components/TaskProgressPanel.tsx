@@ -5,6 +5,7 @@ export interface TaskProgress {
   jobId: string;
   title: string;
   status: 'pending' | 'running' | 'completed' | 'failed' | 'partial';
+  cancelling?: boolean;
   progress: {
     total: number;
     current: number;
@@ -22,10 +23,11 @@ export interface TaskProgress {
 
 interface TaskProgressPanelProps {
   tasks: TaskProgress[];
+  onCancel: (jobId: string) => void | Promise<void>;
   onDismiss: (jobId: string) => void;
 }
 
-export default function TaskProgressPanel({ tasks, onDismiss }: TaskProgressPanelProps) {
+export default function TaskProgressPanel({ tasks, onCancel, onDismiss }: TaskProgressPanelProps) {
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
   const [minimized, setMinimized] = useState(false);
   const activeCount = tasks.filter((t) => t.status === 'pending' || t.status === 'running').length;
@@ -150,12 +152,24 @@ export default function TaskProgressPanel({ tasks, onDismiss }: TaskProgressPane
                             {task.title}
                           </h4>
                           <p className="text-xs text-gray-500 mt-0.5">
-                            {getStatusText(task.status)} · {formatDuration(task.startedAt)}
+                            {task.cancelling ? '取消中' : getStatusText(task.status)} · {formatDuration(task.startedAt)}
                           </p>
                         </div>
                       </div>
 
                       <div className="flex items-center gap-2">
+                        {(task.status === 'pending' || task.status === 'running') && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void onCancel(task.jobId);
+                            }}
+                            disabled={task.cancelling}
+                            className="px-2 py-1 text-[11px] font-medium rounded-md border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                          >
+                            {task.cancelling ? '取消中' : '取消'}
+                          </button>
+                        )}
                         {(task.status === 'completed' || task.status === 'failed' || task.status === 'partial') && (
                           <button
                             onClick={(e) => {

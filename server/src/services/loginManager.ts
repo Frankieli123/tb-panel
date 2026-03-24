@@ -589,9 +589,16 @@ class LoginManager {
                 return;
               }
 
-              if (evt?.type === 'login_qr' && typeof evt?.qrUrl === 'string') {
+              if (evt?.type === 'login_qr' && (typeof evt?.qrUrl === 'string' || typeof evt?.qrImage === 'string')) {
                 if (ws.readyState === WebSocket.OPEN) {
-                  ws.send(JSON.stringify({ type: 'login_qr', accountId, qrUrl: evt.qrUrl }));
+                  ws.send(
+                    JSON.stringify({
+                      type: 'login_qr',
+                      accountId,
+                      ...(typeof evt?.qrUrl === 'string' ? { qrUrl: evt.qrUrl } : {}),
+                      ...(typeof evt?.qrImage === 'string' ? { qrImage: evt.qrImage } : {}),
+                    })
+                  );
                 }
                 return;
               }

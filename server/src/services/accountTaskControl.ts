@@ -4,6 +4,7 @@ type AccountTaskControl = {
   addInProgress: boolean;
   pauseRequested: boolean;
   paused: boolean;
+  cancelRequested: boolean;
   pauseWaiters: Array<Waiter<boolean>>;
   resumeWaiters: Array<Waiter<void>>;
 };
@@ -17,6 +18,7 @@ function getControl(accountId: string): AccountTaskControl {
       addInProgress: false,
       pauseRequested: false,
       paused: false,
+      cancelRequested: false,
       pauseWaiters: [],
       resumeWaiters: [],
     };
@@ -29,6 +31,7 @@ function getControl(accountId: string): AccountTaskControl {
     addInProgress: false,
     pauseRequested: false,
     paused: false,
+    cancelRequested: false,
     pauseWaiters: [],
     resumeWaiters: [],
   };
@@ -41,6 +44,7 @@ export function markAddStart(accountId: string): void {
   if (!id) return;
   const c = getControl(id);
   c.addInProgress = true;
+  c.cancelRequested = false;
 }
 
 export function markAddEnd(accountId: string): void {
@@ -50,6 +54,7 @@ export function markAddEnd(accountId: string): void {
   c.addInProgress = false;
   c.pauseRequested = false;
   c.paused = false;
+  c.cancelRequested = false;
 
   for (const resolve of c.pauseWaiters) resolve(false);
   c.pauseWaiters = [];
@@ -69,6 +74,32 @@ export function isPauseRequested(accountId: string): boolean {
   if (!id) return false;
   const c = controls.get(id);
   return Boolean(c?.pauseRequested);
+}
+
+export function isCancelRequested(accountId: string): boolean {
+  const id = String(accountId || '').trim();
+  if (!id) return false;
+  const c = controls.get(id);
+  return Boolean(c?.cancelRequested);
+}
+
+export function requestCancelForAdd(accountId: string): boolean {
+  const id = String(accountId || '').trim();
+  if (!id) return false;
+
+  const c = getControl(id);
+  if (!c.addInProgress) return false;
+
+  c.cancelRequested = true;
+  c.pauseRequested = false;
+  c.paused = false;
+
+  for (const resolve of c.pauseWaiters) resolve(false);
+  c.pauseWaiters = [];
+  for (const resolve of c.resumeWaiters) resolve();
+  c.resumeWaiters = [];
+
+  return true;
 }
 
 export function requestPauseForAdd(accountId: string): Promise<boolean> {

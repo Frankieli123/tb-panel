@@ -13,6 +13,7 @@ interface LoginState {
   displayMode: 'qr' | 'page';
   pageModeLocked?: boolean;
   qrUrl?: string;
+  qrImage?: string;
   screenshot?: string;
   message?: string;
 }
@@ -262,7 +263,8 @@ export default function Accounts() {
             const next = {
               ...prev,
               status: 'scanning' as const,
-              qrUrl: data.qrUrl,
+              qrUrl: typeof data.qrUrl === 'string' && data.qrUrl ? data.qrUrl : prev.qrUrl,
+              qrImage: typeof data.qrImage === 'string' && data.qrImage ? data.qrImage : prev.qrImage,
               message: '请使用淘宝 App 扫描二维码登录',
             };
             return prev.pageModeLocked ? next : { ...next, displayMode: 'qr' as const };
@@ -770,7 +772,7 @@ export default function Accounts() {
               </button>
             </div>
 
-            <div className="p-6 overflow-y-auto">
+            <div className="p-6 overflow-y-auto flex-1 min-h-0">
               {loginState.status === 'connecting' && (
                 <div className="flex flex-col items-center justify-center py-12">
                   <Loader2 className="w-8 h-8 text-orange-500 animate-spin" />
@@ -787,11 +789,15 @@ export default function Accounts() {
 
               {(loginState.status === 'scanning' || loginState.screenshot) && (
                 <div className="flex flex-col items-center w-full">
-                  {loginState.displayMode === 'qr' && loginState.qrUrl ? (
+                  {loginState.displayMode === 'qr' && (loginState.qrUrl || loginState.qrImage) ? (
                     <>
                       <div className="w-full rounded-2xl border border-gray-200 bg-white p-6 md:p-8 flex flex-col items-center">
                         <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-gray-100">
-                          <QRCodeSVG value={loginState.qrUrl} size={220} includeMargin />
+                          {loginState.qrImage ? (
+                            <img src={loginState.qrImage} alt="Taobao QR Code" className="w-[220px] h-[220px] object-contain" />
+                          ) : (
+                            <QRCodeSVG value={loginState.qrUrl || ''} size={220} includeMargin />
+                          )}
                         </div>
                         <p className="mt-5 text-base font-medium text-gray-900">请使用淘宝 App 扫码登录</p>
                         <p className="mt-2 text-sm text-gray-500 text-center">
@@ -842,46 +848,6 @@ export default function Accounts() {
 	                      <p className="mt-4 text-sm text-gray-500 text-center">
 	                        {loginState.message || '请使用淘宝 App 扫描二维码，或在上方输入账号密码登录'}
 	                      </p>
-	                      {canRemoteControlLoginPage && (
-	                        <div className="mt-4 w-full rounded-xl border border-gray-200 bg-gray-50 p-4 space-y-3">
-	                          <div className="text-sm text-gray-700">
-	                            <span className="font-medium">远程控制已启用：</span>
-	                            点击截图可点页面，拖动截图可操作滑块；先点击输入框，再用下方文本发送到当前焦点。
-	                          </div>
-	                          <div className="flex flex-col gap-3 md:flex-row">
-	                            <input
-	                              value={loginControlText}
-	                              onChange={(e) => setLoginControlText(e.target.value)}
-	                              onKeyDown={handleLoginTextKeyDown}
-	                              placeholder="输入到当前焦点"
-	                              disabled={loginControlBusy}
-	                              className="flex-1 px-3 py-2 rounded-lg border border-gray-200 focus:outline-none focus:ring-2 focus:ring-orange-500 disabled:bg-gray-100"
-	                            />
-	                            <button
-	                              onClick={handleSendLoginText}
-	                              disabled={loginControlBusy || !loginControlText.trim()}
-	                              className="px-4 py-2 rounded-lg bg-gray-900 text-white text-sm font-medium disabled:opacity-50"
-	                            >
-	                              发送文本
-	                            </button>
-	                          </div>
-	                          <div className="flex flex-wrap gap-2">
-	                            {['Enter', 'Tab', 'Backspace', 'Escape'].map((key) => (
-	                              <button
-	                                key={key}
-	                                onClick={() => handleLoginQuickKey(key)}
-	                                disabled={loginControlBusy}
-	                                className="px-3 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 disabled:opacity-50"
-	                              >
-	                                {key}
-	                              </button>
-	                            ))}
-	                          </div>
-	                          {loginControlError && (
-	                            <div className="text-sm text-red-600">{loginControlError}</div>
-	                          )}
-	                        </div>
-	                      )}
 	                    </>
 	                  )}
 	                </div>
@@ -913,6 +879,46 @@ export default function Accounts() {
                 </div>
               )}
             </div>
+            {canRemoteControlLoginPage && (
+              <div className="border-t border-gray-200 bg-white/95 backdrop-blur p-4 flex-shrink-0">
+                <div className="w-full rounded-xl border border-gray-200 bg-gray-50 p-4 space-y-3">
+                  <div className="text-sm text-gray-700">
+                    <span className="font-medium">远程控制已启用：</span>
+                    点击截图可点页面，拖动截图可操作滑块；先点击输入框，再用下方文本发送到当前焦点。
+                  </div>
+                  <div className="flex flex-col gap-3 md:flex-row">
+                    <input
+                      value={loginControlText}
+                      onChange={(e) => setLoginControlText(e.target.value)}
+                      onKeyDown={handleLoginTextKeyDown}
+                      placeholder="输入到当前焦点"
+                      disabled={loginControlBusy}
+                      className="flex-1 px-3 py-2 rounded-lg border border-gray-200 focus:outline-none focus:ring-2 focus:ring-orange-500 disabled:bg-gray-100"
+                    />
+                    <button
+                      onClick={handleSendLoginText}
+                      disabled={loginControlBusy || !loginControlText.trim()}
+                      className="px-4 py-2 rounded-lg bg-gray-900 text-white text-sm font-medium disabled:opacity-50"
+                    >
+                      发送文本
+                    </button>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {['Enter', 'Tab', 'Backspace', 'Escape'].map((key) => (
+                      <button
+                        key={key}
+                        onClick={() => handleLoginQuickKey(key)}
+                        disabled={loginControlBusy}
+                        className="px-3 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 disabled:opacity-50"
+                      >
+                        {key}
+                      </button>
+                    ))}
+                  </div>
+                  {loginControlError && <div className="text-sm text-red-600">{loginControlError}</div>}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

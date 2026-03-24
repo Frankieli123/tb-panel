@@ -8,7 +8,7 @@ import { WebSocket } from 'ws';
 import { autoCartAdder } from './services/autoCartAdder.js';
 import { cartScraper } from './services/cartScraper.js';
 import { chromeLauncher } from './services/chromeLauncher.js';
-import { requestPauseForAddWithTimeout, resumeAdd } from './services/accountTaskControl.js';
+import { requestCancelForAdd, requestPauseForAddWithTimeout, resumeAdd } from './services/accountTaskControl.js';
 import { setHumanDelayScale } from './services/humanSimulator.js';
 import { sharedBrowserManager } from './services/sharedBrowserManager.js';
 import { AGENT_STATUS_FAVICON_SVG, AGENT_STATUS_HTML } from './ui/agentStatusPage.js';
@@ -50,7 +50,7 @@ type LocalStatus = {
 
 type LoginProgressEvent =
   | { type: 'screenshot'; image: string }
-  | { type: 'login_qr'; qrUrl: string }
+  | { type: 'login_qr'; qrUrl?: string; qrImage?: string }
   | { type: 'login_fallback'; reason: string }
   | { type: 'login_verify_required'; reason: string };
 
@@ -137,6 +137,34 @@ async function isQrUnavailable(page: Page): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function extractQrImage(page: Page): Promise<string | null> {
+  const canvasLocator = page.locator('#qrcode-img canvas, .qrcode-img canvas, .qrcode-login canvas').first();
+  const hasCanvas = await canvasLocator.isVisible({ timeout: 400 }).catch(() => false);
+  if (hasCanvas) {
+    const dataUrl = await canvasLocator
+      .evaluate((node) => {
+        try {
+          if (!(node instanceof HTMLCanvasElement)) return null;
+          return node.toDataURL('image/png');
+        } catch {
+          return null;
+        }
+      })
+      .catch(() => null);
+    if (typeof dataUrl === 'string' && dataUrl.startsWith('data:image/')) {
+      return dataUrl;
+    }
+  }
+
+  const qrLocator = page.locator('#qrcode-img, .qrcode-img, .qrcode-login').first();
+  const hasQr = await qrLocator.isVisible({ timeout: 400 }).catch(() => false);
+  if (!hasQr) return null;
+
+  const screenshot = await qrLocator.screenshot({ type: 'png', timeout: 2_000 }).catch(() => null as any);
+  if (!screenshot) return null;
+  return `data:image/png;base64,${Buffer.from(screenshot).toString('base64')}`;
 }
 
 async function needsManualVerification(page: Page, url: string): Promise<boolean> {
@@ -1005,6 +1033,20 @@ async function main(): Promise<void> {
           return;
         }
 
+        if (method === 'cancelAddForTask') {
+          const accountId = required('params.accountId', params.accountId as any);
+          const requested = requestCancelForAdd(accountId);
+          wsConn.send(
+            JSON.stringify({
+              type: 'rpc_result',
+              requestId,
+              ok: true,
+              result: { accountId, requested },
+            })
+          );
+          return;
+        }
+
         if (method === 'getBrowserStatus') {
           const sessions = sharedBrowserManager.listSessionSummaries();
           wsConn.send(
@@ -1137,6 +1179,7 @@ async function main(): Promise<void> {
             page = session.page;
             const qrState = {
               qrUrl: '',
+              qrImage: '',
               qrSent: false,
               fallbackSent: false,
               verifySent: false,
@@ -1153,6 +1196,23 @@ async function main(): Promise<void> {
               qrState.verifySent = true;
               emitLoginProgress(sendProgress, { type: 'login_verify_required', reason });
             };
+            const emitQr = async (payload: { qrUrl?: string; qrImage?: string }) => {
+              if (qrState.qrSent || qrState.fallbackSent) return;
+              const qrUrl = String(payload.qrUrl || '').trim();
+              let qrImage = String(payload.qrImage || '').trim();
+              if (!qrImage) {
+                qrImage = String((await extractQrImage(page!)) || '').trim();
+              }
+              if (!qrUrl && !qrImage) return;
+              qrState.qrUrl = qrUrl;
+              qrState.qrImage = qrImage;
+              qrState.qrSent = true;
+              emitLoginProgress(sendProgress, {
+                type: 'login_qr',
+                ...(qrUrl ? { qrUrl } : {}),
+                ...(qrImage ? { qrImage } : {}),
+              });
+            };
             handleQrResponse = async (response: Response) => {
               if (qrState.fallbackSent) return;
               const responseUrl = response.url();
@@ -1161,9 +1221,7 @@ async function main(): Promise<void> {
                 const payload = await response.json();
                 const qrUrl = String(payload?.content?.data?.codeContent || '').trim();
                 if (!qrUrl || qrState.qrSent) return;
-                qrState.qrUrl = qrUrl;
-                qrState.qrSent = true;
-                emitLoginProgress(sendProgress, { type: 'login_qr', qrUrl });
+                await emitQr({ qrUrl });
               } catch {}
             };
             page.on('response', handleQrResponse);
@@ -1180,6 +1238,7 @@ async function main(): Promise<void> {
             await page.goto(TAOBAO_LOGIN_URL, { waitUntil: 'domcontentloaded' });
             await waitForPageStable(page);
             await trySwitchToQrView(page);
+            await emitQr({});
 
             const startedAt = Date.now();
             while (Date.now() - startedAt < LOGIN_TIMEOUT_MS) {
@@ -1213,6 +1272,8 @@ async function main(): Promise<void> {
                 emitVerifyRequired('检测到验证码/安全验证，已切到完整页面；可直接在当前窗口远程操作，必要时再到 Agent 机器处理');
               } else if (!qrState.qrSent && Date.now() >= qrState.qrDeadlineAt) {
                 emitFallback('暂未获取到二维码，已切换为完整页面');
+              } else if (!qrState.qrSent) {
+                await emitQr({});
               }
 
               if (qrState.qrSent && !qrState.fallbackSent && (await isQrUnavailable(page))) {

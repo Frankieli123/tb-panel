@@ -5,6 +5,7 @@ export interface TaskProgress {
   jobId: string;
   title: string;
   status: 'pending' | 'running' | 'completed' | 'failed' | 'partial';
+  cancelling?: boolean;
   progress: {
     total: number;
     current: number;
@@ -24,6 +25,7 @@ interface TaskContextType {
   tasks: TaskProgress[];
   startTaskMonitoring: (jobId: string, title: string) => void;
   startBatchTaskMonitoring: (batchJobId: string, title: string) => void;
+  cancelTask: (jobId: string) => Promise<void>;
   dismissTask: (jobId: string) => void;
 }
 
@@ -32,6 +34,19 @@ const TaskContext = createContext<TaskContextType | null>(null);
 export function TaskProvider({ children }: { children: ReactNode }) {
   const [tasks, setTasks] = useState<TaskProgress[]>([]);
   const taskIntervalsRef = useRef<Map<string, number>>(new Map());
+
+  const appendTaskLog = useCallback((jobId: string, text: string) => {
+    setTasks((prev) =>
+      prev.map((task) => {
+        if (task.jobId !== jobId) return task;
+        if (task.logs[task.logs.length - 1] === text) return task;
+        return {
+          ...task,
+          logs: [...task.logs.slice(-199), text],
+        };
+      })
+    );
+  }, []);
 
   const startTaskMonitoring = useCallback((jobId: string, title: string) => {
     const newTask: TaskProgress = {
@@ -55,6 +70,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
               ? {
                   ...t,
                   status: status.status,
+                  cancelling: status.status === 'pending' || status.status === 'running' ? t.cancelling : false,
                   progress: status.progress,
                   logs: status.logs,
                 }
@@ -110,6 +126,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
               ? {
                   ...t,
                   status: status.status,
+                  cancelling: status.status === 'pending' || status.status === 'running' ? t.cancelling : false,
                   progress: {
                     total: status.progress.totalItems,
                     current: status.progress.completedItems,
@@ -142,6 +159,77 @@ export function TaskProvider({ children }: { children: ReactNode }) {
     taskIntervalsRef.current.set(batchJobId, intervalId);
   }, []);
 
+  const cancelTask = useCallback(
+    async (jobId: string) => {
+      setTasks((prev) =>
+        prev.map((task) =>
+          task.jobId === jobId
+            ? {
+                ...task,
+                cancelling: true,
+              }
+            : task
+        )
+      );
+      appendTaskLog(jobId, '正在发送取消请求...');
+
+      try {
+        const result = await api.cancelAddTask(jobId);
+
+        if (result.cancelled) {
+          const intervalId = taskIntervalsRef.current.get(jobId);
+          if (intervalId) {
+            clearInterval(intervalId);
+            taskIntervalsRef.current.delete(jobId);
+          }
+          setTasks((prev) =>
+            prev.map((task) =>
+              task.jobId === jobId
+                ? {
+                    ...task,
+                    status: 'failed',
+                    cancelling: false,
+                    logs: [...task.logs.slice(-199), '任务已取消'],
+                  }
+                : task
+            )
+          );
+          return;
+        }
+
+        if (result.cancelRequested) {
+          appendTaskLog(jobId, '取消请求已发送，等待任务停止...');
+          return;
+        }
+
+        setTasks((prev) =>
+          prev.map((task) =>
+            task.jobId === jobId
+              ? {
+                  ...task,
+                  cancelling: false,
+                }
+              : task
+          )
+        );
+        appendTaskLog(jobId, result.finished ? '任务已结束，无法取消' : '当前任务无法取消');
+      } catch (error) {
+        setTasks((prev) =>
+          prev.map((task) =>
+            task.jobId === jobId
+              ? {
+                  ...task,
+                  cancelling: false,
+                }
+              : task
+          )
+        );
+        appendTaskLog(jobId, error instanceof Error ? error.message : '取消任务失败');
+      }
+    },
+    [appendTaskLog]
+  );
+
   const dismissTask = useCallback((jobId: string) => {
     const intervalId = taskIntervalsRef.current.get(jobId);
     if (intervalId) {
@@ -152,7 +240,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <TaskContext.Provider value={{ tasks, startTaskMonitoring, startBatchTaskMonitoring, dismissTask }}>
+    <TaskContext.Provider value={{ tasks, startTaskMonitoring, startBatchTaskMonitoring, cancelTask, dismissTask }}>
       {children}
     </TaskContext.Provider>
   );

@@ -3,6 +3,8 @@ import { X, Loader2, ShoppingCart, CheckCircle, AlertTriangle, AlertCircle, Copy
 import { api } from '../services/api';
 import { TaobaoAccount } from '../types';
 
+const CART_SKU_HARD_LIMIT = 300;
+
 interface BatchAddProductModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -26,6 +28,10 @@ export default function BatchAddProductModal({ isOpen, onClose, onSuccess, onTas
 
   const [accounts, setAccounts] = useState<TaobaoAccount[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState('auto');
+  const selectedAccount = accounts.find((account) => account.id === selectedAccountId) ?? null;
+  const selectedAccountCartTotal = selectedAccount?.cartSkuTotal ?? null;
+  const selectedAccountCartFull =
+    typeof selectedAccountCartTotal === 'number' && selectedAccountCartTotal >= CART_SKU_HARD_LIMIT;
 
   useEffect(() => {
     if (!isOpen) return;
@@ -104,6 +110,13 @@ export default function BatchAddProductModal({ isOpen, onClose, onSuccess, onTas
 
     if (!selectedAccountId) {
       setError('请选择一个账号');
+      return;
+    }
+
+    if (selectedAccountCartFull && selectedAccount) {
+      setError(
+        `账号“${selectedAccount.name}”购物车 SKU 已满（${selectedAccountCartTotal}/${CART_SKU_HARD_LIMIT}），无法继续加购，请先清理购物车后再试`
+      );
       return;
     }
 
@@ -238,13 +251,24 @@ export default function BatchAddProductModal({ isOpen, onClose, onSuccess, onTas
               <option value="">请选择账号...</option>
               <option value="auto">自动分配（账号池）</option>
               {accounts.map((acc) => (
-                <option key={acc.id} value={acc.id}>
-                  {acc.name} ({acc.status})
+                <option
+                  key={acc.id}
+                  value={acc.id}
+                  disabled={typeof acc.cartSkuTotal === 'number' && acc.cartSkuTotal >= CART_SKU_HARD_LIMIT}
+                >
+                  {acc.name} ({acc.status}
+                  {typeof acc.cartSkuTotal === 'number' ? ` · 购物车 ${acc.cartSkuTotal}/${CART_SKU_HARD_LIMIT}` : ''}
+                  {typeof acc.cartSkuTotal === 'number' && acc.cartSkuTotal >= CART_SKU_HARD_LIMIT ? ' · 已满' : ''})
                 </option>
               ))}
             </select>
             {accounts.length === 0 && (
               <p className="mt-1 text-xs text-red-500">没有可用账号，请先添加并登录账号</p>
+            )}
+            {selectedAccountCartFull && selectedAccount && (
+              <p className="mt-1 text-xs text-red-500">
+                当前账号购物车 SKU 已满（{selectedAccountCartTotal}/{CART_SKU_HARD_LIMIT}），无法继续加购。
+              </p>
             )}
           </div>
 
@@ -283,7 +307,7 @@ export default function BatchAddProductModal({ isOpen, onClose, onSuccess, onTas
           <button
             type="submit"
             onClick={handleSubmit}
-            disabled={loading || stats.valid === 0 || !selectedAccountId || accounts.length === 0}
+            disabled={loading || stats.valid === 0 || !selectedAccountId || accounts.length === 0 || selectedAccountCartFull}
             className="flex-1 flex justify-center items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-white bg-gray-900 hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
           >
             {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : `添加 ${stats.valid} 个商品`}
