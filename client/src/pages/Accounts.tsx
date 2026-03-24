@@ -1,5 +1,6 @@
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { useEffect, useState, useRef, useCallback, type MouseEvent as ReactMouseEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { Plus, Cookie, Trash2, AlertTriangle, Play, Pause, QrCode, X, Loader2, Monitor, ShoppingCart, RefreshCw } from 'lucide-react';
+import { QRCodeSVG } from 'qrcode.react';
 import { api } from '../services/api';
 import { getLoginWsUrl } from '../services/api';
 import type { AgentConnection, TaobaoAccount } from '../types';
@@ -8,6 +9,10 @@ import AgentManager from '../components/AgentManager';
 interface LoginState {
   accountId: string;
   status: 'connecting' | 'started' | 'scanning' | 'success' | 'error';
+  mode?: 'local' | 'agent';
+  displayMode: 'qr' | 'page';
+  pageModeLocked?: boolean;
+  qrUrl?: string;
   screenshot?: string;
   message?: string;
 }
@@ -34,7 +39,12 @@ export default function Accounts() {
   const [loginState, setLoginState] = useState<LoginState | null>(null);
   const [screenshotState, setScreenshotState] = useState<ScreenshotState | null>(null);
   const [refreshingCartIds, setRefreshingCartIds] = useState<Set<string>>(new Set());
+  const [loginControlText, setLoginControlText] = useState('');
+  const [loginControlBusy, setLoginControlBusy] = useState(false);
+  const [loginControlError, setLoginControlError] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const loginImageRef = useRef<HTMLImageElement | null>(null);
+  const loginPointerStartRef = useRef<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
     loadAccounts();
@@ -49,6 +59,15 @@ export default function Accounts() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (!loginState) {
+      setLoginControlBusy(false);
+      setLoginControlError(null);
+      setLoginControlText('');
+      loginPointerStartRef.current = null;
+    }
+  }, [loginState]);
 
   const bindAgentToAccount = useCallback(async (accountId: string, agentId: string | null) => {
     const previousAgentId = accounts.find((a) => a.id === accountId)?.agentId ?? null;
@@ -84,13 +103,115 @@ export default function Accounts() {
     }
   };
 
+  const sendLoginControl = useCallback((payload: Record<string, unknown>) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || !loginState) return false;
+    if (loginState.mode !== 'agent' || loginState.displayMode !== 'page') return false;
+    setLoginControlBusy(true);
+    setLoginControlError(null);
+    wsRef.current.send(JSON.stringify({ type: 'login_control', accountId: loginState.accountId, ...payload }));
+    return true;
+  }, [loginState]);
+
+  const mapImageEventPoint = useCallback((event: ReactMouseEvent<HTMLImageElement>) => {
+    const img = loginImageRef.current ?? event.currentTarget;
+    if (!img) return null;
+    const rect = img.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    const naturalWidth = img.naturalWidth || img.width;
+    const naturalHeight = img.naturalHeight || img.height;
+    if (!naturalWidth || !naturalHeight) return null;
+
+    const naturalRatio = naturalWidth / naturalHeight;
+    const boxRatio = rect.width / rect.height;
+    let renderedWidth = rect.width;
+    let renderedHeight = rect.height;
+    let offsetX = 0;
+    let offsetY = 0;
+
+    if (boxRatio > naturalRatio) {
+      renderedWidth = rect.height * naturalRatio;
+      offsetX = (rect.width - renderedWidth) / 2;
+    } else if (boxRatio < naturalRatio) {
+      renderedHeight = rect.width / naturalRatio;
+      offsetY = (rect.height - renderedHeight) / 2;
+    }
+
+    const localX = event.clientX - rect.left - offsetX;
+    const localY = event.clientY - rect.top - offsetY;
+    if (localX < 0 || localY < 0 || localX > renderedWidth || localY > renderedHeight) return null;
+
+    return {
+      x: (localX * naturalWidth) / renderedWidth,
+      y: (localY * naturalHeight) / renderedHeight,
+    };
+  }, []);
+
+  const handleLoginImageMouseDown = useCallback((event: ReactMouseEvent<HTMLImageElement>) => {
+    if (event.button !== 0) return;
+    if (loginControlBusy) return;
+    const point = mapImageEventPoint(event);
+    loginPointerStartRef.current = point;
+  }, [loginControlBusy, mapImageEventPoint]);
+
+  const handleLoginImageMouseUp = useCallback((event: ReactMouseEvent<HTMLImageElement>) => {
+    if (event.button !== 0) return;
+    if (loginControlBusy) return;
+    const start = loginPointerStartRef.current;
+    loginPointerStartRef.current = null;
+    const end = mapImageEventPoint(event);
+    if (!start || !end) return;
+
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const moved = Math.hypot(dx, dy);
+
+    if (moved >= 12) {
+      void sendLoginControl({
+        action: 'drag',
+        fromX: Math.round(start.x),
+        fromY: Math.round(start.y),
+        toX: Math.round(end.x),
+        toY: Math.round(end.y),
+      });
+      return;
+    }
+
+    void sendLoginControl({
+      action: 'click',
+      x: Math.round(end.x),
+      y: Math.round(end.y),
+    });
+  }, [loginControlBusy, mapImageEventPoint, sendLoginControl]);
+
+  const handleSendLoginText = useCallback(() => {
+    const text = loginControlText;
+    if (!text.trim()) return;
+    if (sendLoginControl({ action: 'type', text })) {
+      setLoginControlText('');
+    }
+  }, [loginControlText, sendLoginControl]);
+
+  const handleLoginTextKeyDown = useCallback((event: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    handleSendLoginText();
+  }, [handleSendLoginText]);
+
+  const handleLoginQuickKey = useCallback((key: string) => {
+    void sendLoginControl({ action: 'key', key });
+  }, [sendLoginControl]);
+
   const startLogin = useCallback((accountId: string) => {
     // 关闭现有连接
     if (wsRef.current) {
       wsRef.current.close();
     }
 
-    setLoginState({ accountId, status: 'connecting' });
+    setLoginControlBusy(false);
+    setLoginControlError(null);
+    setLoginControlText('');
+    loginPointerStartRef.current = null;
+    setLoginState({ accountId, status: 'connecting', displayMode: 'page' });
 
     // 创建 WebSocket 连接
     const ws = new WebSocket(getLoginWsUrl());
@@ -116,7 +237,7 @@ export default function Accounts() {
       opened = true;
       window.clearTimeout(connectTimeout);
       setLoginState((prev) =>
-        prev && prev.accountId === accountId ? { ...prev, status: 'started' } : prev
+        prev && prev.accountId === accountId ? { ...prev, status: 'started', message: undefined } : prev
       );
       ws.send(JSON.stringify({ type: 'start_login', accountId }));
     };
@@ -126,12 +247,64 @@ export default function Accounts() {
 
       switch (data.type) {
         case 'login_started':
-          setLoginState(prev => prev ? { ...prev, status: 'started' } : null);
+          setLoginControlBusy(false);
+          setLoginControlError(null);
+          setLoginState(prev => prev ? {
+            ...prev,
+            status: 'started',
+            mode: data.mode === 'agent' || data.mode === 'local' ? data.mode : prev.mode,
+            message: undefined,
+          } : null);
+          break;
+        case 'login_qr':
+          setLoginState((prev) => {
+            if (!prev) return prev;
+            const next = {
+              ...prev,
+              status: 'scanning' as const,
+              qrUrl: data.qrUrl,
+              message: '请使用淘宝 App 扫描二维码登录',
+            };
+            return prev.pageModeLocked ? next : { ...next, displayMode: 'qr' as const };
+          });
+          break;
+        case 'login_fallback':
+          setLoginState((prev) =>
+            prev
+                ? {
+                    ...prev,
+                    status: 'scanning',
+                    displayMode: 'page',
+                    pageModeLocked: true,
+                    message: data.reason || '已切换为完整页面登录',
+                  }
+                : null
+          );
+          break;
+        case 'login_verify_required':
+          setLoginState((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  status: 'scanning',
+                  displayMode: 'page',
+                  pageModeLocked: true,
+                  message: data.reason || '检测到验证码/安全验证，已切到完整页面；可直接在当前窗口远程操作，必要时再到 Agent 机器处理',
+                }
+              : null
+          );
           break;
         case 'screenshot':
+          setLoginControlBusy(false);
+          setLoginControlError(null);
           setLoginState(prev => prev ? { ...prev, status: 'scanning', screenshot: data.image } : null);
           break;
+        case 'login_control_error':
+          setLoginControlBusy(false);
+          setLoginControlError(data.message || '远程控制失败');
+          break;
         case 'login_success':
+          setLoginControlBusy(false);
           setLoginState(prev => prev ? { ...prev, status: 'success', message: data.message } : null);
           loadAccounts();
           setTimeout(() => {
@@ -139,9 +312,11 @@ export default function Accounts() {
           }, 2000);
           break;
         case 'login_cancelled':
+          setLoginControlBusy(false);
           setLoginState(null);
           break;
         case 'error':
+          setLoginControlBusy(false);
           setLoginState(prev => prev ? { ...prev, status: 'error', message: data.message } : null);
           break;
       }
@@ -149,12 +324,14 @@ export default function Accounts() {
 
     ws.onerror = () => {
       window.clearTimeout(connectTimeout);
+      setLoginControlBusy(false);
       setLoginState(prev => prev ? { ...prev, status: 'error', message: '连接失败' } : null);
     };
 
     ws.onclose = (event) => {
       window.clearTimeout(connectTimeout);
       wsRef.current = null;
+      setLoginControlBusy(false);
 
       // 如果 WS 连接被拒绝/异常断开，避免 UI 一直停留在“连接中”转圈
       setLoginState((prev) => {
@@ -182,6 +359,10 @@ export default function Accounts() {
     }
     setLoginState(null);
   }, [loginState]);
+
+  const showFullLoginPage = useCallback(() => {
+    setLoginState((prev) => (prev ? { ...prev, displayMode: 'page', pageModeLocked: true } : prev));
+  }, []);
 
   const loadAccounts = async () => {
     setIsLoading(true);
@@ -302,6 +483,12 @@ export default function Accounts() {
   };
 
   const onlineAgentIds = new Set(agents.map((a) => a.agentId));
+  const canRemoteControlLoginPage =
+    !!loginState &&
+    loginState.mode === 'agent' &&
+    loginState.displayMode === 'page' &&
+    loginState.status === 'scanning' &&
+    !!loginState.screenshot;
 
   return (
     <div className="space-y-6">
@@ -318,8 +505,8 @@ export default function Accounts() {
         <div>
           <p className="font-medium">登录说明</p>
           <p className="mt-1 text-amber-700">
-            点击"登录"后，会弹出淘宝登录页面。您可以使用淘宝 App 扫描二维码，或直接输入账号密码登录。
-            登录成功后会自动保存状态。推荐使用小号登录以降低风险。
+            点击"登录"后，会启动淘宝登录流程。绑定 Agent 的账号会优先显示二维码供扫码，
+            异常时会自动切回完整页面。登录成功后会自动保存状态，推荐使用小号登录以降低风险。
           </p>
         </div>
       </div>
@@ -600,24 +787,104 @@ export default function Accounts() {
 
               {(loginState.status === 'scanning' || loginState.screenshot) && (
                 <div className="flex flex-col items-center w-full">
-                  <div className="relative bg-gray-50 rounded-xl overflow-hidden w-full flex items-center justify-center border border-gray-200 min-h-[300px] md:min-h-[500px]">
-                    {loginState.screenshot ? (
-                      <img
-                        src={`data:image/jpeg;base64,${loginState.screenshot}`}
-                        alt="Login Page"
-                        className="w-full h-auto object-contain max-h-[50vh] md:max-h-[700px]"
-                      />
-                    ) : (
-                      <div className="flex flex-col items-center justify-center text-gray-400 py-20">
-                        <Loader2 className="w-8 h-8 mb-2 animate-spin" />
-                        <span>等待画面...</span>
+                  {loginState.displayMode === 'qr' && loginState.qrUrl ? (
+                    <>
+                      <div className="w-full rounded-2xl border border-gray-200 bg-white p-6 md:p-8 flex flex-col items-center">
+                        <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-gray-100">
+                          <QRCodeSVG value={loginState.qrUrl} size={220} includeMargin />
+                        </div>
+                        <p className="mt-5 text-base font-medium text-gray-900">请使用淘宝 App 扫码登录</p>
+                        <p className="mt-2 text-sm text-gray-500 text-center">
+                          二维码来自当前 Agent 登录会话。若扫码页异常，可切换查看完整登录页面。
+                        </p>
+                        <button
+                          onClick={showFullLoginPage}
+                          className="mt-5 px-4 py-2 text-sm font-medium text-white bg-gray-900 hover:bg-gray-800 rounded-lg"
+                        >
+                          查看完整页面
+                        </button>
                       </div>
-                    )}
-                  </div>
-                  <p className="mt-4 text-sm text-gray-500 text-center">
-                    请使用淘宝 App 扫描二维码，或在上方输入账号密码登录
-                  </p>
-                </div>
+                      {loginState.message && (
+                        <p className="mt-4 text-sm text-gray-500 text-center">{loginState.message}</p>
+                      )}
+                    </>
+	                  ) : (
+	                    <>
+	                      <div className="relative bg-gray-50 rounded-xl overflow-hidden w-full flex items-center justify-center border border-gray-200 min-h-[300px] md:min-h-[500px]">
+	                        {loginState.screenshot ? (
+	                          <>
+	                            <img
+	                              ref={loginImageRef}
+	                              src={`data:image/jpeg;base64,${loginState.screenshot}`}
+	                              alt="Login Page"
+	                              onMouseDown={canRemoteControlLoginPage ? handleLoginImageMouseDown : undefined}
+	                              onMouseUp={canRemoteControlLoginPage ? handleLoginImageMouseUp : undefined}
+	                              className={`w-full h-auto object-contain max-h-[50vh] md:max-h-[700px] ${
+	                                canRemoteControlLoginPage ? 'cursor-crosshair select-none' : ''
+	                              }`}
+	                              draggable={false}
+	                            />
+	                            {canRemoteControlLoginPage && loginControlBusy && (
+	                              <div className="absolute inset-0 flex items-center justify-center bg-black/10 pointer-events-none">
+	                                <div className="px-3 py-1.5 rounded-full bg-black/70 text-white text-sm">
+	                                  正在发送操作...
+	                                </div>
+	                              </div>
+	                            )}
+	                          </>
+	                        ) : (
+	                          <div className="flex flex-col items-center justify-center text-gray-400 py-20">
+	                            <Loader2 className="w-8 h-8 mb-2 animate-spin" />
+	                            <span>等待画面...</span>
+	                          </div>
+	                        )}
+	                      </div>
+	                      <p className="mt-4 text-sm text-gray-500 text-center">
+	                        {loginState.message || '请使用淘宝 App 扫描二维码，或在上方输入账号密码登录'}
+	                      </p>
+	                      {canRemoteControlLoginPage && (
+	                        <div className="mt-4 w-full rounded-xl border border-gray-200 bg-gray-50 p-4 space-y-3">
+	                          <div className="text-sm text-gray-700">
+	                            <span className="font-medium">远程控制已启用：</span>
+	                            点击截图可点页面，拖动截图可操作滑块；先点击输入框，再用下方文本发送到当前焦点。
+	                          </div>
+	                          <div className="flex flex-col gap-3 md:flex-row">
+	                            <input
+	                              value={loginControlText}
+	                              onChange={(e) => setLoginControlText(e.target.value)}
+	                              onKeyDown={handleLoginTextKeyDown}
+	                              placeholder="输入到当前焦点"
+	                              disabled={loginControlBusy}
+	                              className="flex-1 px-3 py-2 rounded-lg border border-gray-200 focus:outline-none focus:ring-2 focus:ring-orange-500 disabled:bg-gray-100"
+	                            />
+	                            <button
+	                              onClick={handleSendLoginText}
+	                              disabled={loginControlBusy || !loginControlText.trim()}
+	                              className="px-4 py-2 rounded-lg bg-gray-900 text-white text-sm font-medium disabled:opacity-50"
+	                            >
+	                              发送文本
+	                            </button>
+	                          </div>
+	                          <div className="flex flex-wrap gap-2">
+	                            {['Enter', 'Tab', 'Backspace', 'Escape'].map((key) => (
+	                              <button
+	                                key={key}
+	                                onClick={() => handleLoginQuickKey(key)}
+	                                disabled={loginControlBusy}
+	                                className="px-3 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 disabled:opacity-50"
+	                              >
+	                                {key}
+	                              </button>
+	                            ))}
+	                          </div>
+	                          {loginControlError && (
+	                            <div className="text-sm text-red-600">{loginControlError}</div>
+	                          )}
+	                        </div>
+	                      )}
+	                    </>
+	                  )}
+	                </div>
               )}
 
               {loginState.status === 'success' && (

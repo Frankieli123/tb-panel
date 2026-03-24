@@ -63,6 +63,7 @@ internal sealed class TrayAppContext : ApplicationContext
     menu.Items.Add("启动/重启 Agent", null, (_, _) => RunCommand("start-agent.cmd"));
     menu.Items.Add("打开后台", null, (_, _) => OpenAdmin());
     menu.Items.Add("复制 AgentId", null, (_, _) => CopyAgentId());
+    menu.Items.Add("立即检查更新", null, (_, _) => _ = StartUpdateCheck(last, manual: true));
     menu.Items.Add(new ToolStripSeparator());
     menu.Items.Add("退出", null, (_, _) => ExitApp());
 
@@ -274,47 +275,103 @@ internal sealed class TrayAppContext : ApplicationContext
   {
     if (!IsTruthy(GetEnv("AGENT_AUTO_UPDATE", "1"))) return;
     if (DateTime.UtcNow < nextUpdateCheckUtc) return;
+    nextUpdateCheckUtc = DateTime.UtcNow.AddMinutes(1);
+    _ = StartUpdateCheck(status, manual: false);
+  }
 
-    nextUpdateCheckUtc = DateTime.UtcNow.AddHours(6).AddSeconds(Random.Shared.Next(0, 1200));
-
-    if (status == null) return;
-    var adminUrl = status.AdminUrl?.Trim() ?? "";
-
-    _ = Task.Run(async () =>
+  private async Task StartUpdateCheck(StatusSnapshot? status, bool manual)
+  {
+    if (!await updateLock.WaitAsync(0).ConfigureAwait(false))
     {
-      if (!await updateLock.WaitAsync(0).ConfigureAwait(false)) return;
-      try
-      {
-        var proxyPrefix = GetEnv("AGENT_UPDATE_PROXY_PREFIX", "");
-        var manifestUrl = GetEnv("AGENT_UPDATE_MANIFEST_URL", "");
+      if (manual) NotifyUser("更新检查正在进行中。");
+      return;
+    }
 
-        AgentUpdateManifest? latest = null;
-        if (!string.IsNullOrWhiteSpace(adminUrl))
-        {
-          latest = await TryFetchUpdateManifestFromServer(adminUrl, proxyPrefix).ConfigureAwait(false);
-        }
-        if (latest == null && !string.IsNullOrWhiteSpace(manifestUrl))
-        {
-          latest = await TryFetchUpdateManifestFromUrl(manifestUrl, proxyPrefix).ConfigureAwait(false);
-        }
-        if (latest == null) return;
-
-        var current = ReadCurrentVersion(AppContext.BaseDirectory);
-        if (current == null) return;
-        if (latest.VersionParsed == null) return;
-        if (latest.VersionParsed <= current) return;
-
-        await ApplyUpdateSilently(latest, current, proxyPrefix).ConfigureAwait(false);
-      }
-      catch (Exception ex)
+    try
+    {
+      if (manual) NotifyUser("正在检查更新...");
+      var outcome = await CheckForUpdatesAsync(status, manual).ConfigureAwait(false);
+      if (outcome != UpdateCheckOutcome.UpdateStarted)
       {
-        AppendUpdateLog($"update failed: {ex.Message}");
+        nextUpdateCheckUtc = GetNextUpdateCheckUtc(outcome == UpdateCheckOutcome.RetrySoon);
       }
-      finally
+    }
+    finally
+    {
+      updateLock.Release();
+    }
+  }
+
+  private async Task<UpdateCheckOutcome> CheckForUpdatesAsync(StatusSnapshot? status, bool manual)
+  {
+    try
+    {
+      var proxyPrefix = GetEnv("AGENT_UPDATE_PROXY_PREFIX", "");
+      var manifestUrl = GetEnv("AGENT_UPDATE_MANIFEST_URL", "");
+      var adminUrl = status?.AdminUrl?.Trim() ?? "";
+
+      AgentUpdateManifest? latest = null;
+      if (!string.IsNullOrWhiteSpace(adminUrl))
       {
-        updateLock.Release();
+        latest = await TryFetchUpdateManifestFromServer(adminUrl, proxyPrefix).ConfigureAwait(false);
       }
-    });
+      if (latest == null && !string.IsNullOrWhiteSpace(manifestUrl))
+      {
+        latest = await TryFetchUpdateManifestFromUrl(manifestUrl, proxyPrefix).ConfigureAwait(false);
+      }
+      if (latest == null)
+      {
+        var message = string.IsNullOrWhiteSpace(manifestUrl)
+          ? "未获取到更新信息，请先启动 Agent，或配置 AGENT_UPDATE_MANIFEST_URL。"
+          : "未获取到更新清单，将稍后重试。";
+        AppendUpdateLog($"update unavailable: {message}");
+        if (manual) NotifyUser(message);
+        return UpdateCheckOutcome.RetrySoon;
+      }
+
+      var current = ReadCurrentVersion(AppContext.BaseDirectory);
+      if (current == null)
+      {
+        const string message = "读取当前版本失败，将稍后重试。";
+        AppendUpdateLog("update unavailable: current version missing");
+        if (manual) NotifyUser(message, ToolTipIcon.Warning);
+        return UpdateCheckOutcome.RetrySoon;
+      }
+
+      if (latest.VersionParsed == null)
+      {
+        var message = $"更新清单版本无效：{latest.Version}";
+        AppendUpdateLog($"update unavailable: {message}");
+        if (manual) NotifyUser(message, ToolTipIcon.Warning);
+        return UpdateCheckOutcome.RetrySoon;
+      }
+
+      var asset = IsMsiInstall() ? latest.Msi ?? latest.Zip : latest.Zip;
+      if (asset == null)
+      {
+        const string message = "最新版本缺少可用安装包，将稍后重试。";
+        AppendUpdateLog($"update unavailable: {message}");
+        if (manual) NotifyUser(message, ToolTipIcon.Warning);
+        return UpdateCheckOutcome.RetrySoon;
+      }
+
+      if (latest.VersionParsed <= current)
+      {
+        AppendUpdateLog($"update check ok current={current} latest={latest.Version}");
+        if (manual) NotifyUser($"已是最新版本（{latest.Version}）。");
+        return UpdateCheckOutcome.NoUpdate;
+      }
+
+      if (manual) NotifyUser($"发现新版本 {latest.Version}，开始静默更新。");
+      await ApplyUpdateSilently(latest, current, proxyPrefix).ConfigureAwait(false);
+      return UpdateCheckOutcome.UpdateStarted;
+    }
+    catch (Exception ex)
+    {
+      AppendUpdateLog($"update failed: {ex.Message}");
+      if (manual) NotifyUser($"检查更新失败：{ex.Message}", ToolTipIcon.Error, 2600);
+      return UpdateCheckOutcome.RetrySoon;
+    }
   }
 
   private async Task ApplyUpdateSilently(AgentUpdateManifest latest, Version current, string proxyPrefix)
@@ -584,6 +641,25 @@ internal sealed class TrayAppContext : ApplicationContext
     catch { }
   }
 
+  private void NotifyUser(string message, ToolTipIcon icon = ToolTipIcon.Info, int timeoutMs = 1800)
+  {
+    uiContext.Post(_ =>
+    {
+      try
+      {
+        tray.ShowBalloonTip(timeoutMs, "Taobao Agent", message, icon);
+      }
+      catch { }
+    }, null);
+  }
+
+  private static DateTime GetNextUpdateCheckUtc(bool retrySoon)
+  {
+    return retrySoon
+      ? DateTime.UtcNow.AddMinutes(10).AddSeconds(Random.Shared.Next(0, 121))
+      : DateTime.UtcNow.AddHours(6).AddSeconds(Random.Shared.Next(0, 1201));
+  }
+
   private string GetEnv(string key, string fallback)
   {
     var env = Environment.GetEnvironmentVariable(key);
@@ -715,6 +791,13 @@ internal sealed class TrayAppContext : ApplicationContext
   }
 
   private sealed record StatusSnapshot(int Port, bool Connected, bool HasToken, string AgentId, string AdminUrl);
+
+  private enum UpdateCheckOutcome
+  {
+    UpdateStarted,
+    NoUpdate,
+    RetrySoon,
+  }
 
   private sealed record AgentUpdateAsset(string Url, string Sha256, long Size);
 

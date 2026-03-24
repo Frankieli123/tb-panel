@@ -44,6 +44,7 @@ type LoginSession =
     };
 
 type WsUser = { id: string; role: 'admin' | 'operator' };
+type AgentLoginControlAction = 'click' | 'type' | 'key' | 'drag';
 
 function isDevLocalOrigin(origin: string): boolean {
   return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
@@ -174,6 +175,8 @@ class LoginManager {
           const data = JSON.parse(message);
           if (data.type === 'start_login') {
             await this.startLoginSession(String(data.accountId || ''), ws, user);
+          } else if (data.type === 'login_control') {
+            await this.handleLoginControl(ws, data);
           } else if (data.type === 'cancel_login') {
             if (user.role === 'operator') {
               const acc = await prisma.taobaoAccount.findUnique({
@@ -251,6 +254,86 @@ class LoginManager {
       this.wss?.emit('connection', ws, req);
     });
     return true;
+  }
+
+  private async handleLoginControl(ws: WebSocket, data: any): Promise<void> {
+    const accountId = String(data?.accountId || '').trim();
+    const action = String(data?.action || '').trim() as AgentLoginControlAction;
+    const session = this.sessions.get(accountId);
+
+    const sendControlError = (message: string) => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'login_control_error', accountId, message }));
+      }
+    };
+
+    if (!accountId) {
+      sendControlError('缺少 accountId');
+      return;
+    }
+
+    if (!session || session.ws !== ws) {
+      sendControlError('当前账号没有活跃登录会话');
+      return;
+    }
+
+    if (session.mode !== 'agent' || session.cancelled) {
+      sendControlError('当前登录会话不支持远程控制');
+      return;
+    }
+
+    const payload: Record<string, unknown> = { accountId, action };
+
+    try {
+      if (action === 'click') {
+        const x = Number(data?.x);
+        const y = Number(data?.y);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) {
+          throw new Error('点击坐标无效');
+        }
+        payload.x = x;
+        payload.y = y;
+      } else if (action === 'type') {
+        const text = String(data?.text || '');
+        if (!text) throw new Error('输入内容不能为空');
+        payload.text = text.slice(0, 500);
+      } else if (action === 'key') {
+        const key = String(data?.key || '').trim();
+        if (!key) throw new Error('按键不能为空');
+        payload.key = key.slice(0, 64);
+      } else if (action === 'drag') {
+        const fromX = Number(data?.fromX);
+        const fromY = Number(data?.fromY);
+        const toX = Number(data?.toX);
+        const toY = Number(data?.toY);
+        if (![fromX, fromY, toX, toY].every((v) => Number.isFinite(v))) {
+          throw new Error('拖动坐标无效');
+        }
+        payload.fromX = fromX;
+        payload.fromY = fromY;
+        payload.toX = toX;
+        payload.toY = toY;
+      } else {
+        throw new Error('不支持的控制动作');
+      }
+
+      const result = await agentHub.call<any>(
+        session.agentId,
+        'controlLoginPage',
+        payload,
+        { timeoutMs: 20_000 }
+      );
+
+      const current = this.sessions.get(accountId);
+      if (current !== session || current.mode !== 'agent' || current.cancelled) return;
+
+      if (ws.readyState === WebSocket.OPEN && typeof result?.image === 'string' && result.image) {
+        ws.send(JSON.stringify({ type: 'screenshot', accountId, image: result.image }));
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      sendControlError(message);
+    }
   }
 
   async startLoginSession(accountId: string, ws: WebSocket, user: WsUser): Promise<void> {
@@ -338,7 +421,7 @@ class LoginManager {
       };
 
       this.sessions.set(accountId, session);
-      ws.send(JSON.stringify({ type: 'login_started', accountId }));
+      ws.send(JSON.stringify({ type: 'login_started', accountId, mode: 'local' }));
 
       // 开始定时截图
       session.intervalId = setInterval(() => {
@@ -476,7 +559,7 @@ class LoginManager {
 
     const session: LoginSession = { mode: 'agent', accountId, agentId, ws, cancelled: false };
     this.sessions.set(accountId, session);
-    ws.send(JSON.stringify({ type: 'login_started', accountId }));
+    ws.send(JSON.stringify({ type: 'login_started', accountId, mode: 'agent' }));
 
     void (async () => {
       try {
@@ -502,6 +585,27 @@ class LoginManager {
               if (evt?.type === 'screenshot' && typeof evt?.image === 'string') {
                 if (ws.readyState === WebSocket.OPEN) {
                   ws.send(JSON.stringify({ type: 'screenshot', accountId, image: evt.image }));
+                }
+                return;
+              }
+
+              if (evt?.type === 'login_qr' && typeof evt?.qrUrl === 'string') {
+                if (ws.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify({ type: 'login_qr', accountId, qrUrl: evt.qrUrl }));
+                }
+                return;
+              }
+
+              if (evt?.type === 'login_fallback' && typeof evt?.reason === 'string') {
+                if (ws.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify({ type: 'login_fallback', accountId, reason: evt.reason }));
+                }
+                return;
+              }
+
+              if (evt?.type === 'login_verify_required' && typeof evt?.reason === 'string') {
+                if (ws.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify({ type: 'login_verify_required', accountId, reason: evt.reason }));
                 }
               }
             },

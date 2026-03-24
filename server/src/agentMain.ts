@@ -3,6 +3,7 @@ import fs from 'fs/promises';
 import http from 'node:http';
 import os from 'os';
 import path from 'path';
+import type { Page, Response } from 'playwright';
 import { WebSocket } from 'ws';
 import { autoCartAdder } from './services/autoCartAdder.js';
 import { cartScraper } from './services/cartScraper.js';
@@ -15,6 +16,11 @@ import { AGENT_STATUS_FAVICON_SVG, AGENT_STATUS_HTML } from './ui/agentStatusPag
 const TAOBAO_LOGIN_URL = 'https://login.taobao.com/member/login.jhtml';
 const LOGIN_SCREENSHOT_INTERVAL_MS = 1500;
 const LOGIN_TIMEOUT_MS = 10 * 60 * 1000;
+const LOGIN_QR_WAIT_TIMEOUT_MS = 8_000;
+const LOGIN_QR_API_PATH = '/havanaone/loginLegacy/qrCode/generate.do';
+const LOGIN_QR_EXPIRED_PATTERN = /二维码已失效|请刷新二维码后重新扫码|二维码过期|二维码异常/i;
+const LOGIN_RISK_URL_PATTERN = /survey\.taobao\.com|sec\.taobao\.com|captcha|verify|risk|punish|baxia/i;
+const LOGIN_VERIFY_TEXT_PATTERN = /验证码|安全验证|请完成验证|请进行验证|请拖动滑块|短信验证|人脸验证|刷脸验证/i;
 
 type RpcMessage = {
   type: 'rpc';
@@ -42,6 +48,12 @@ type LocalStatus = {
   logs: string[];
 };
 
+type LoginProgressEvent =
+  | { type: 'screenshot'; image: string }
+  | { type: 'login_qr'; qrUrl: string }
+  | { type: 'login_fallback'; reason: string }
+  | { type: 'login_verify_required'; reason: string };
+
 function checkLoginByCookies(cookies: Array<{ name: string; domain: string }>): boolean {
   const authCookieNames = ['_m_h5_tk', '_m_h5_tk_enc', 'login', 'munb', 'lgc', 'tracknick'];
   const taobaoDomains = ['.taobao.com', '.tmall.com', '.alicdn.com'];
@@ -58,6 +70,84 @@ async function waitForPageStable(page: any): Promise<void> {
     await page.waitForLoadState?.('networkidle', { timeout: 5000 }).catch(() => {});
     await page.waitForTimeout?.(500).catch(() => {});
   } catch {}
+}
+
+function emitLoginProgress(
+  sendProgress: (progress: { total: number; current: number; success: number; failed: number }, log?: string) => void,
+  event: LoginProgressEvent
+): void {
+  sendProgress({ total: 1, current: 0, success: 0, failed: 0 }, JSON.stringify(event));
+}
+
+function isTaobaoLoginPage(url: string): boolean {
+  return /^https?:\/\/login\.(taobao|tmall)\.com/i.test(String(url || ''));
+}
+
+function isSurveyPage(url: string): boolean {
+  return /^https?:\/\/survey\.taobao\.com/i.test(String(url || ''));
+}
+
+function isRiskPage(url: string): boolean {
+  return LOGIN_RISK_URL_PATTERN.test(String(url || ''));
+}
+
+async function trySwitchToQrView(page: Page): Promise<void> {
+  const switchedByEvent = await page
+    .evaluate(() => {
+      const pub = (window as any)?.events?.publish;
+      if (typeof pub !== 'function') return false;
+      try {
+        pub('changeView', 'qrcode');
+        return true;
+      } catch {
+        return false;
+      }
+    })
+    .catch(() => false);
+  if (switchedByEvent) {
+    await page.waitForTimeout(400).catch(() => {});
+    return;
+  }
+
+  const selectors = [
+    'text=扫码登录',
+    'text=手机扫码登录',
+    'text=二维码登录',
+    '.qrcode-login-tab-item',
+    '.qrcode-login',
+    '[class*="qrcode"][role="button"]',
+  ];
+  for (const selector of selectors) {
+    try {
+      const locator = page.locator(selector).first();
+      const visible = await locator.isVisible({ timeout: 600 }).catch(() => false);
+      if (!visible) continue;
+      await locator.click({ timeout: 1_000 });
+      await page.waitForTimeout(400).catch(() => {});
+      return;
+    } catch {}
+  }
+}
+
+async function isQrUnavailable(page: Page): Promise<boolean> {
+  try {
+    const bodyText = await page.locator('body').innerText({ timeout: 1_000 });
+    if (/扫描成功|请在手机上确认登录/i.test(bodyText)) return false;
+    return LOGIN_QR_EXPIRED_PATTERN.test(bodyText);
+  } catch {
+    return false;
+  }
+}
+
+async function needsManualVerification(page: Page, url: string): Promise<boolean> {
+  if (isRiskPage(url)) return true;
+  try {
+    const bodyText = await page.locator('body').innerText({ timeout: 1_000 });
+    if (/扫描成功|请在手机上确认登录|请使用淘宝 App 扫码登录/i.test(bodyText)) return false;
+    return LOGIN_VERIFY_TEXT_PATTERN.test(bodyText);
+  } catch {
+    return false;
+  }
 }
 
 function getArgValue(flag: string): string | null {
@@ -88,6 +178,34 @@ function required(name: string, value: string | undefined | null): string {
   const v = String(value || '').trim();
   if (!v) throw new Error(`Missing required ${name}`);
   return v;
+}
+
+function requiredNumber(name: string, value: unknown): number {
+  const num = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(num)) throw new Error(`Invalid ${name}`);
+  return num;
+}
+
+function clampPoint(value: number, max: number): number {
+  if (!Number.isFinite(value)) return 0;
+  if (!Number.isFinite(max) || max <= 1) return Math.max(0, Math.round(value));
+  return Math.max(0, Math.min(Math.round(value), Math.max(0, Math.floor(max - 1))));
+}
+
+async function capturePageImage(page: Page): Promise<string> {
+  let screenshot = await page
+    .screenshot({ type: 'jpeg', quality: 85, timeout: 15000 })
+    .catch(() => null as any);
+  if (!screenshot) {
+    await waitForPageStable(page);
+    screenshot = await page
+      .screenshot({ type: 'jpeg', quality: 85, timeout: 15000 })
+      .catch(() => null as any);
+  }
+  if (!screenshot) {
+    throw new Error('Screenshot failed');
+  }
+  return Buffer.from(screenshot).toString('base64');
 }
 
 function getAgentStoreDir(): string {
@@ -686,7 +804,7 @@ async function main(): Promise<void> {
           agentId,
           name: process.env.AGENT_NAME || undefined,
           version: agentVersion,
-          capabilities: { cart: true, addCart: true, browserStatus: true, browserScreenshot: true },
+          capabilities: { cart: true, addCart: true, browserStatus: true, browserScreenshot: true, loginControl: true },
         })
       );
     });
@@ -916,12 +1034,7 @@ async function main(): Promise<void> {
             throw new Error('当前账号没有可截图任务（浏览器页面已关闭）');
           }
 
-          const screenshot = await session.page
-            .screenshot({ type: 'jpeg', quality: 85, timeout: 15000 })
-            .catch(() => null as any);
-          if (!screenshot) {
-            throw new Error('Screenshot failed');
-          }
+          const image = await capturePageImage(session.page);
 
           wsConn.send(
             JSON.stringify({
@@ -932,7 +1045,77 @@ async function main(): Promise<void> {
                 agentId,
                 accountId,
                 now: Date.now(),
-                image: Buffer.from(screenshot).toString('base64'),
+                image,
+              },
+            })
+          );
+          return;
+        }
+
+        if (method === 'controlLoginPage') {
+          const accountId = required('params.accountId', params.accountId as any);
+          const action = required('params.action', params.action as any);
+          const session = sharedBrowserManager.getSession(accountId);
+          if (!session || !loginControllers.has(accountId)) {
+            throw new Error('当前账号没有活跃登录会话');
+          }
+          if (session.page.isClosed()) {
+            throw new Error('当前账号登录页面已关闭');
+          }
+
+          const viewport = session.page.viewportSize() || { width: 1920, height: 1080 };
+          const applyPoint = (x: number, y: number) => ({
+            x: clampPoint(x, viewport.width),
+            y: clampPoint(y, viewport.height),
+          });
+
+          if (action === 'click') {
+            const { x, y } = applyPoint(
+              requiredNumber('params.x', (params as any).x),
+              requiredNumber('params.y', (params as any).y)
+            );
+            await session.page.mouse.click(x, y, { delay: 30 });
+          } else if (action === 'type') {
+            const text = String((params as any).text || '');
+            if (!text) throw new Error('输入内容不能为空');
+            await session.page.keyboard.type(text, { delay: 20 });
+          } else if (action === 'key') {
+            const key = required('params.key', (params as any).key as any);
+            await session.page.keyboard.press(key);
+          } else if (action === 'drag') {
+            const from = applyPoint(
+              requiredNumber('params.fromX', (params as any).fromX),
+              requiredNumber('params.fromY', (params as any).fromY)
+            );
+            const to = applyPoint(
+              requiredNumber('params.toX', (params as any).toX),
+              requiredNumber('params.toY', (params as any).toY)
+            );
+            await session.page.mouse.move(from.x, from.y, { steps: 8 }).catch(() => {});
+            await session.page.mouse.down();
+            await session.page.waitForTimeout(80).catch(() => {});
+            await session.page.mouse.move(to.x, to.y, { steps: 20 });
+            await session.page.waitForTimeout(120).catch(() => {});
+            await session.page.mouse.up();
+          } else {
+            throw new Error(`Unsupported control action: ${action}`);
+          }
+
+          sharedBrowserManager.updateLastUsed(accountId);
+          await session.page.waitForTimeout(action === 'type' ? 120 : 350).catch(() => {});
+
+          const image = await capturePageImage(session.page);
+          wsConn.send(
+            JSON.stringify({
+              type: 'rpc_result',
+              requestId,
+              ok: true,
+              result: {
+                agentId,
+                accountId,
+                action,
+                now: Date.now(),
+                image,
               },
             })
           );
@@ -945,10 +1128,45 @@ async function main(): Promise<void> {
 
           const ctrl = new AbortController();
           loginControllers.set(accountId, ctrl);
+          let page: Page | null = null;
+          let handleQrResponse: ((response: Response) => Promise<void>) | null = null;
 
           try {
             await sharedBrowserManager.disposeSession(accountId).catch(() => {});
             const session = await sharedBrowserManager.getOrCreateSession(accountId);
+            page = session.page;
+            const qrState = {
+              qrUrl: '',
+              qrSent: false,
+              fallbackSent: false,
+              verifySent: false,
+              surveyRecovered: false,
+              qrDeadlineAt: Date.now() + LOGIN_QR_WAIT_TIMEOUT_MS,
+            };
+            const emitFallback = (reason: string) => {
+              if (qrState.fallbackSent) return;
+              qrState.fallbackSent = true;
+              emitLoginProgress(sendProgress, { type: 'login_fallback', reason });
+            };
+            const emitVerifyRequired = (reason: string) => {
+              if (qrState.verifySent) return;
+              qrState.verifySent = true;
+              emitLoginProgress(sendProgress, { type: 'login_verify_required', reason });
+            };
+            handleQrResponse = async (response: Response) => {
+              if (qrState.fallbackSent) return;
+              const responseUrl = response.url();
+              if (!responseUrl.includes(LOGIN_QR_API_PATH)) return;
+              try {
+                const payload = await response.json();
+                const qrUrl = String(payload?.content?.data?.codeContent || '').trim();
+                if (!qrUrl || qrState.qrSent) return;
+                qrState.qrUrl = qrUrl;
+                qrState.qrSent = true;
+                emitLoginProgress(sendProgress, { type: 'login_qr', qrUrl });
+              } catch {}
+            };
+            page.on('response', handleQrResponse);
 
             try {
               await session.context.addInitScript(`
@@ -959,27 +1177,18 @@ async function main(): Promise<void> {
               `);
             } catch {}
 
-            await session.page.goto(TAOBAO_LOGIN_URL, { waitUntil: 'domcontentloaded' });
-            await waitForPageStable(session.page);
+            await page.goto(TAOBAO_LOGIN_URL, { waitUntil: 'domcontentloaded' });
+            await waitForPageStable(page);
+            await trySwitchToQrView(page);
 
             const startedAt = Date.now();
             while (Date.now() - startedAt < LOGIN_TIMEOUT_MS) {
               if (ctrl.signal.aborted) throw new Error('Login cancelled');
-              if (session.page.isClosed()) throw new Error('Login page closed');
+              if (page.isClosed()) throw new Error('Login page closed');
 
-              const screenshot = await session.page
-                .screenshot({ type: 'jpeg', quality: 85, timeout: 15000 })
-                .catch(() => null as any);
+              const currentUrl = page.url();
+              const isLoginPage = isTaobaoLoginPage(currentUrl);
 
-              if (screenshot) {
-                sendProgress(
-                  { total: 1, current: 0, success: 0, failed: 0 },
-                  JSON.stringify({ type: 'screenshot', image: Buffer.from(screenshot).toString('base64') })
-                );
-              }
-
-              const currentUrl = session.page.url();
-              const isLoginPage = currentUrl.includes('login.taobao.com') || currentUrl.includes('login.tmall.com');
               if (!isLoginPage) {
                 const cookies = await session.context.cookies().catch(() => [] as any[]);
                 if (checkLoginByCookies(cookies as any)) {
@@ -987,9 +1196,38 @@ async function main(): Promise<void> {
                   wsConn.send(JSON.stringify({ type: 'rpc_result', requestId, ok: true, result: { cookies: cookiesJson } }));
                   return;
                 }
+
+                if (isSurveyPage(currentUrl) && !qrState.qrSent && !qrState.surveyRecovered) {
+                  qrState.surveyRecovered = true;
+                  await page.goto(TAOBAO_LOGIN_URL, { waitUntil: 'domcontentloaded' }).catch(() => {});
+                  await waitForPageStable(page);
+                  await trySwitchToQrView(page);
+                  qrState.qrDeadlineAt = Date.now() + LOGIN_QR_WAIT_TIMEOUT_MS;
+                  continue;
+                }
+
+                if (await needsManualVerification(page, currentUrl)) {
+                  emitVerifyRequired('检测到验证码/安全验证，已切到完整页面；可直接在当前窗口远程操作，必要时再到 Agent 机器处理');
+                }
+              } else if (await needsManualVerification(page, currentUrl)) {
+                emitVerifyRequired('检测到验证码/安全验证，已切到完整页面；可直接在当前窗口远程操作，必要时再到 Agent 机器处理');
+              } else if (!qrState.qrSent && Date.now() >= qrState.qrDeadlineAt) {
+                emitFallback('暂未获取到二维码，已切换为完整页面');
               }
 
-              await session.page.waitForTimeout(LOGIN_SCREENSHOT_INTERVAL_MS).catch(() => {});
+              if (qrState.qrSent && !qrState.fallbackSent && (await isQrUnavailable(page))) {
+                emitFallback('二维码已失效，已切换为完整页面');
+              }
+
+              const screenshot = await page
+                .screenshot({ type: 'jpeg', quality: 85, timeout: 15000 })
+                .catch(() => null as any);
+
+              if (screenshot) {
+                emitLoginProgress(sendProgress, { type: 'screenshot', image: Buffer.from(screenshot).toString('base64') });
+              }
+
+              await page.waitForTimeout(LOGIN_SCREENSHOT_INTERVAL_MS).catch(() => {});
             }
 
             throw new Error('Login timeout');
@@ -997,6 +1235,11 @@ async function main(): Promise<void> {
             if (loginControllers.get(accountId) === ctrl) {
               loginControllers.delete(accountId);
             }
+            try {
+              if (page && handleQrResponse) {
+                page.off('response', handleQrResponse);
+              }
+            } catch {}
             await sharedBrowserManager.disposeSession(accountId).catch(() => {});
           }
         }

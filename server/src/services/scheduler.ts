@@ -384,6 +384,21 @@ class SchedulerService {
     throw new Error(`No account available: cart SKU limit reached (>=${CART_SKU_SOFT_LIMIT})`);
   }
 
+  private isRunnableAccountStatus(status: AccountStatus | null | undefined): boolean {
+    return status === AccountStatus.IDLE || status === AccountStatus.RUNNING;
+  }
+
+  private getAccountTaskStopReason(
+    account: { isActive?: boolean | null; status?: AccountStatus | null } | null | undefined
+  ): string | null {
+    if (!account) return '账号不存在';
+    if (account.isActive === false) return '账号已停用';
+    if (!this.isRunnableAccountStatus(account.status ?? null)) {
+      return `账号状态=${String(account.status || 'UNKNOWN')}`;
+    }
+    return null;
+  }
+
   async start(): Promise<void> {
     if (this.isRunning) return;
 
@@ -649,11 +664,41 @@ class SchedulerService {
 
       const account = await prisma.taobaoAccount.findUnique({
         where: { id: accountId },
-        select: { id: true, name: true, cookies: true, agentId: true, userId: true, status: true, errorCount: true }
+        select: {
+          id: true,
+          name: true,
+          cookies: true,
+          agentId: true,
+          userId: true,
+          isActive: true,
+          status: true,
+          errorCount: true,
+        }
       });
 
+      const stopReason = this.getAccountTaskStopReason(account);
+      if (stopReason) {
+        const message = `[Scheduler] 跳过购物车抓价 accountId=${accountId}: ${stopReason}`;
+        console.log(message);
+        await job.log(message).catch(() => {});
+        return { success: true, updated: 0, failed: 0, missing: 0 };
+      }
       if (!account) {
         throw new Error('Account not found');
+      }
+
+      const activeCartProductCount = await prisma.product.count({
+        where: {
+          ownerAccountId: accountId,
+          monitorMode: 'CART',
+          isActive: true,
+        },
+      });
+      if (activeCartProductCount <= 0) {
+        const message = `[Scheduler] 跳过购物车抓价 accountId=${accountId}: 无有效监控商品`;
+        console.log(message);
+        await job.log(message).catch(() => {});
+        return { success: true, updated: 0, failed: 0, missing: 0 };
       }
 
       const agentIdToUse = await this.resolveAgentIdForAccount(account, null);
@@ -1101,9 +1146,16 @@ class SchedulerService {
 
     const account = await prisma.taobaoAccount.findUnique({
       where: { id: accountId },
-      select: { id: true, cookies: true, agentId: true, userId: true }
+      select: { id: true, name: true, cookies: true, agentId: true, userId: true, isActive: true, status: true }
     });
 
+    const stopReason = this.getAccountTaskStopReason(account);
+    if (stopReason) {
+      const message = `[Scheduler] 跳过购物车删除 jobId=${jobIdText} accountId=${accountId} taobaoId=${taobaoId}: ${stopReason}`;
+      console.log(message);
+      await job.log(message).catch(() => {});
+      return { success: true, taobaoId, removed: 0 };
+    }
     if (!account) {
       throw new Error('Account not found');
     }
@@ -1220,7 +1272,11 @@ class SchedulerService {
     let accountId = requestedAccountId;
     if (useAccountPool) {
       const poolAccounts = await prisma.taobaoAccount.findMany({
-        where: { isActive: true, ...(ownerUserId ? { userId: ownerUserId } : {}) },
+        where: {
+          isActive: true,
+          status: { in: [AccountStatus.IDLE, AccountStatus.RUNNING] },
+          ...(ownerUserId ? { userId: ownerUserId } : {}),
+        },
         select: { id: true, agentId: true, userId: true },
         orderBy: { createdAt: 'asc' },
       });
@@ -1281,11 +1337,15 @@ class SchedulerService {
 
     const account = await prisma.taobaoAccount.findUnique({
       where: { id: accountId },
-      select: { id: true, name: true, cookies: true, agentId: true, userId: true, isActive: true },
+      select: { id: true, name: true, cookies: true, agentId: true, userId: true, isActive: true, status: true },
     });
 
-    if (!account || !account.isActive) {
-      throw new Error('Account not found or inactive');
+    const stopReason = this.getAccountTaskStopReason(account);
+    if (stopReason) {
+      throw new Error(`Account unavailable: ${stopReason}`);
+    }
+    if (!account) {
+      throw new Error('Account not found');
     }
 
     const agentIdToUse = await this.resolveAgentIdForAccount(account, ownerUserId);
@@ -1624,8 +1684,12 @@ class SchedulerService {
     } = params;
 
     const poolAccounts = await prisma.taobaoAccount.findMany({
-      where: { isActive: true, ...(ownerUserId ? { userId: ownerUserId } : {}) },
-      select: { id: true, name: true, cookies: true, agentId: true, userId: true, isActive: true },
+      where: {
+        isActive: true,
+        status: { in: [AccountStatus.IDLE, AccountStatus.RUNNING] },
+        ...(ownerUserId ? { userId: ownerUserId } : {}),
+      },
+      select: { id: true, name: true, cookies: true, agentId: true, userId: true, isActive: true, status: true },
       orderBy: { createdAt: 'asc' },
     });
 
@@ -1748,8 +1812,12 @@ class SchedulerService {
 
       const itemAccountId = this.pickAccountIdFromPool(selectablePoolAccountIds, preferredAccountId);
       const account = poolById.get(itemAccountId) ?? null;
-      if (!account || !account.isActive) {
-        throw new Error(`Account not found or inactive: ${itemAccountId}`);
+      const stopReason = this.getAccountTaskStopReason(account);
+      if (stopReason) {
+        throw new Error(`Account unavailable: ${stopReason}`);
+      }
+      if (!account) {
+        throw new Error(`Account not found: ${itemAccountId}`);
       }
 
       itemStatus.accountId = itemAccountId;
@@ -1916,7 +1984,8 @@ class SchedulerService {
     for (const [accountId, entries] of pendingSnapshotsByAccountId.entries()) {
       if (!entries || entries.length === 0) continue;
       const account = poolById.get(accountId) ?? null;
-      if (!account || !account.isActive) continue;
+      if (this.getAccountTaskStopReason(account)) continue;
+      if (!account) continue;
 
       await job.log(`accountId=${accountId} 批量加购加购阶段完成，开始刷新购物车一次性获取价格...`);
 
@@ -2060,11 +2129,15 @@ class SchedulerService {
     const accountId = requestedAccountId;
     const account = await prisma.taobaoAccount.findUnique({
       where: { id: accountId },
-      select: { id: true, name: true, cookies: true, agentId: true, userId: true, isActive: true },
+      select: { id: true, name: true, cookies: true, agentId: true, userId: true, isActive: true, status: true },
     });
 
-    if (!account || !account.isActive) {
-      throw new Error('Account not found or inactive');
+    const stopReason = this.getAccountTaskStopReason(account);
+    if (stopReason) {
+      throw new Error(`Account unavailable: ${stopReason}`);
+    }
+    if (!account) {
+      throw new Error('Account not found');
     }
 
     const agentIdToUse = await this.resolveAgentIdForAccount(account, ownerUserId);
