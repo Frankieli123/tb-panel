@@ -357,92 +357,18 @@ class LoginManager {
 
     console.log(`[LoginManager] 开始登录会话 account=${account.name} accountId=${accountId}`);
 
-    try {
-      // 不使用 remote-debugging-port：部分 Windows/服务器环境可能因端口保留/权限导致 Chrome 启动异常，
-      // 且本登录流程不需要 CDP 调试端口。
-      let browser: Browser;
-      try {
-        browser = await withTimeout(
-          chromium.launch({
-            headless: false,
-            channel: 'chrome', // 优先使用系统安装的 Chrome
-            args: [
-              '--disable-blink-features=AutomationControlled',
-              '--disable-infobars',
-              '--no-first-run',
-              '--no-default-browser-check',
-            ],
-          }),
-          25_000,
-          'launch chrome'
-        );
-      } catch {
-        // 回退到 Playwright 自带的 Chromium
-        browser = await withTimeout(
-          chromium.launch({
-            headless: false,
-            args: [
-              '--disable-blink-features=AutomationControlled',
-              '--disable-infobars',
-            ],
-          }),
-          25_000,
-          'launch chromium'
-        );
-      }
-
-      const context = await browser.newContext(DESKTOP_DEVICE);
-
-      // 注入反检测脚本
-      await context.addInitScript(`
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-        Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] });
-        window.chrome = { runtime: {} };
-        delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
-        delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
-        delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
-      `);
-
-      const page = await context.newPage();
-
-      await withTimeout(page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded' }), 30_000, 'goto login page');
-      await waitForPageStable(page);
-
-      const session: LoginSession = {
-        mode: 'local',
-        accountId,
-        browser,
-        context,
-        page,
-        ws,
-        intervalId: null,
-        isCapturing: false,
-      };
-
-      this.sessions.set(accountId, session);
-      ws.send(JSON.stringify({ type: 'login_started', accountId, mode: 'local' }));
-
-      // 开始定时截图
-      session.intervalId = setInterval(() => {
-        this.captureAndCheck(session);
-      }, SCREENSHOT_INTERVAL_MS);
-
-      // 立即执行一次
-      await this.captureAndCheck(session);
-
-    } catch (error) {
-      const started = await this.startLoginViaAgent({ accountId, account, ws, user });
-      if (started) return;
-
-      console.error('[LoginManager] 启动登录会话失败:', error);
-      const raw = error instanceof Error ? error.message : String(error);
-      const hint =
-        raw.includes('Executable') && raw.includes('doesn') && raw.includes('exist')
-          ? 'Playwright 浏览器未安装：请在服务器执行 `npx playwright install chromium`，或先连接 Windows Agent 并为账号绑定/设置默认 Agent 后重试。'
-          : raw;
-      ws.send(JSON.stringify({ type: 'error', message: hint }));
+    const startedViaAgent = await this.startLoginViaAgent({ accountId, account, ws, user }).catch((error) => {
+      console.warn(`[LoginManager] Agent 登录预启动失败 accountId=${accountId}:`, error);
+      return false;
+    });
+    if (startedViaAgent) {
+      return;
     }
+
+    ws.send(JSON.stringify({
+      type: 'error',
+      message: '未找到可用在线 Agent，登录已禁用本地回退；请先绑定并连接 Agent 后重试。',
+    }));
   }
 
   private async captureAndCheck(session: Extract<LoginSession, { mode: 'local' }>): Promise<void> {

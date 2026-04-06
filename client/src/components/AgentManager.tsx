@@ -162,6 +162,11 @@ export default function AgentManager({ agents, isLoading, error, onRefresh }: Ag
     setBrowserStatus({ loading: false, data: null, error: null });
   };
 
+  const formatTime = (timestamp?: number | null) => {
+    if (!timestamp || timestamp <= 0) return '未记录';
+    return new Date(timestamp).toLocaleTimeString();
+  };
+
   return (
     <div className="space-y-4">
       {/* Header */}
@@ -374,6 +379,39 @@ export default function AgentManager({ agents, isLoading, error, onRefresh }: Ag
                               title={session.url || ''}
                             >
                               {session.url || '(空URL)'}
+                            </div>
+                            {session.detailUrl ? (
+                              <div
+                                className="mt-1 text-gray-400 truncate text-[11px] font-mono pl-1 border-l-2 border-orange-100"
+                                title={session.detailUrl}
+                              >
+                                详情页: {session.detailUrl}
+                              </div>
+                            ) : null}
+                            <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-2">
+                              <div className="rounded-md bg-white border border-gray-200 px-2 py-1">
+                                <div className="text-[10px] text-gray-400">购物车刷新</div>
+                                <div className="font-semibold text-gray-700">{session.cartReloadCount ?? 0}</div>
+                              </div>
+                              <div className="rounded-md bg-white border border-gray-200 px-2 py-1">
+                                <div className="text-[10px] text-gray-400">整车扫描</div>
+                                <div className="font-semibold text-gray-700">{session.fullCartScanCount ?? 0}</div>
+                              </div>
+                              <div className="rounded-md bg-white border border-gray-200 px-2 py-1">
+                                <div className="text-[10px] text-gray-400">详情页新开</div>
+                                <div className="font-semibold text-gray-700">{session.detailPageOpenCount ?? 0}</div>
+                              </div>
+                              <div
+                                className="rounded-md bg-white border border-gray-200 px-2 py-1"
+                                title={
+                                  session.lastCartRefreshAt && session.lastCartRefreshAt > 0
+                                    ? new Date(session.lastCartRefreshAt).toLocaleString()
+                                    : '未记录'
+                                }
+                              >
+                                <div className="text-[10px] text-gray-400">最近刷新</div>
+                                <div className="font-semibold text-gray-700">{formatTime(session.lastCartRefreshAt)}</div>
+                              </div>
                             </div>
                           </div>
                         ))}

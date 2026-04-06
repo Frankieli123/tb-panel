@@ -85,6 +85,11 @@ export interface BrowserSession {
   lastUsedAt: number;
   pageClosed: boolean;
   url: string | null;
+  detailUrl?: string | null;
+  lastCartRefreshAt?: number;
+  cartReloadCount?: number;
+  fullCartScanCount?: number;
+  detailPageOpenCount?: number;
 }
 
 export interface BrowserStatus {

@@ -24,10 +24,16 @@ export const taskQueueWorkerConnection = new IORedis(config.redis.url, {
   maxRetriesPerRequest: null,
 });
 
+// QueueEvents also requires a blocking-capable Redis connection.
+export const taskQueueEventsConnection = new IORedis(config.redis.url, {
+  maxRetriesPerRequest: null,
+});
+
 attachRedisDebugLogs('queue:producer', taskQueueProducerConnection);
 attachRedisDebugLogs('queue:worker', taskQueueWorkerConnection);
+attachRedisDebugLogs('queue:events', taskQueueEventsConnection);
 
 export const taskQueue = new Queue('scrape-tasks', { connection: taskQueueProducerConnection });
 
 // Used by controllers that want to await job completion (e.g. manual cart scrape).
-export const taskQueueEvents = new QueueEvents('scrape-tasks', { connection: taskQueueProducerConnection });
+export const taskQueueEvents = new QueueEvents('scrape-tasks', { connection: taskQueueEventsConnection });

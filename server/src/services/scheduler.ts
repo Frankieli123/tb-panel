@@ -10,6 +10,7 @@ import { notificationService } from './notification.js';
 import { randomDelay, sleep, calculatePriceDrop, encryptCookies } from '../utils/helpers.js';
 import { taskQueue, taskQueueWorkerConnection } from './taskQueue.js';
 import { getCartSkuStats, setCartSkuStats } from './cartSkuStats.js';
+import { buildCartSkuSnapshot, cloneCartSkuSnapshot, mergeSuccessfulSkuResults } from './cartSnapshot.js';
 
 const prisma = new PrismaClient();
 
@@ -335,6 +336,61 @@ class SchedulerService {
     if (typeof total === 'number' && total >= CART_SKU_HARD_LIMIT) {
       throw new Error(this.getCartSkuHardLimitMessage(total));
     }
+  }
+
+  private async loadExistingCartSkuSnapshot(params: {
+    accountId: string;
+    cookies: string;
+    agentIdToUse: string | null;
+    expectedTaobaoIds?: string[];
+    humanDelayScale?: number;
+  }): Promise<Map<string, Set<string>>> {
+    const { accountId, cookies, agentIdToUse, expectedTaobaoIds, humanDelayScale } = params;
+
+    let cart: any = null;
+    try {
+      cart =
+        agentIdToUse && agentHub.isConnected(agentIdToUse)
+          ? await agentHub.call<any>(
+              agentIdToUse,
+              'scrapeCart',
+              { accountId, cookies, delayScale: humanDelayScale, expectedTaobaoIds, maxAgeMs: 25_000 },
+              { timeoutMs: 10 * 60 * 1000 }
+            )
+          : await cartScraper.scrapeCart(accountId, cookies, { expectedTaobaoIds, maxAgeMs: 25_000 });
+    } catch {
+      cart = null;
+    }
+
+    if (cart?.success && Array.isArray(cart?.products)) {
+      try {
+        const cartSkuLoaded = cart.products.length;
+        const cartSkuTotalRaw = (cart as any)?.uiTotalCount;
+        const cartSkuTotal =
+          typeof cartSkuTotalRaw === 'number' && Number.isFinite(cartSkuTotalRaw) ? cartSkuTotalRaw : null;
+        setCartSkuStats(accountId, { cartSkuTotal, cartSkuLoaded });
+      } catch {}
+      return buildCartSkuSnapshot(cart.products);
+    }
+
+    return new Map();
+  }
+
+  private mergeAddResultIntoCartSnapshot(
+    snapshot: Map<string, Set<string>>,
+    taobaoId: string,
+    addResult: { results?: Array<{ success?: unknown; skuId?: unknown; skuProperties?: unknown }>; cartProducts?: any[] }
+  ): Map<string, Set<string>> {
+    const next = cloneCartSkuSnapshot(snapshot);
+    if (Array.isArray(addResult?.cartProducts) && addResult.cartProducts.length > 0) {
+      return buildCartSkuSnapshot(
+        addResult.cartProducts.filter((item: any) => String(item?.taobaoId || '').trim() === String(taobaoId || '').trim()),
+        next
+      );
+    }
+
+    mergeSuccessfulSkuResults(next, taobaoId, Array.isArray(addResult?.results) ? addResult.results : []);
+    return next;
   }
 
   private async abortBatchAddJob(
@@ -715,8 +771,19 @@ class SchedulerService {
   private async processCartScrapeJob(job: Job): Promise<{ success: boolean; updated: number; failed: number; missing: number }> {
     const { accountId, productCount } = job.data;
     const jobIdText = toJobIdText(job.id);
+    const setScrapeProgress = async (step: string, extra?: Record<string, unknown>) => {
+      await job
+        .updateProgress({
+          step,
+          accountId,
+          productCount: Math.max(0, Number(productCount) || 0),
+          ...(extra ?? {}),
+        })
+        .catch(() => {});
+    };
 
     try {
+      await setScrapeProgress('starting');
       const scraperConfig = await (prisma as any).scraperConfig.findFirst({ orderBy: { updatedAt: 'desc' } });
       const force = Boolean((job.data as any)?.force);
       if (!force && this.isWithinQuietHours(new Date(), scraperConfig)) {
@@ -832,12 +899,23 @@ class SchedulerService {
           return agentHub.call<any>(
             agentIdToUse,
             'scrapeCart',
-            { accountId, cookies: account.cookies, delayScale: humanDelayScale, expectedTaobaoIds },
+            {
+              accountId,
+              cookies: account.cookies,
+              delayScale: humanDelayScale,
+              expectedTaobaoIds,
+              forceReload: force,
+              maxAgeMs: force ? 0 : 25_000,
+            },
             { timeoutMs: 10 * 60 * 1000 }
           );
         }
 
-        return cartScraper.scrapeCart(accountId, account.cookies, { expectedTaobaoIds });
+        return cartScraper.scrapeCart(accountId, account.cookies, {
+          expectedTaobaoIds,
+          forceReload: force,
+          maxAgeMs: force ? 0 : 25_000,
+        });
       };
 
       let scrapeThrown: any = null;
@@ -867,6 +945,7 @@ class SchedulerService {
       }
 
       try {
+        await setScrapeProgress('scraping_cart', { expectedItems: expectedDistinctTaobaoIds });
         cart = await safeScrapeCart();
         bestDistinct = distinctCount(cart);
 
@@ -1116,6 +1195,7 @@ class SchedulerService {
           }
 
           if (underfilled.length > 0) {
+            await setScrapeProgress('refilling_missing_skus', { underfilled: underfilled.length });
             await job.log(`检测到 ${underfilled.length} 个商品SKU不足，开始补齐...`);
             console.log(
               `[Scheduler] SKU不足，触发补齐 accountId=${accountId} items=${underfilled
@@ -1126,13 +1206,14 @@ class SchedulerService {
             for (const item of underfilled) {
               await job.log(`补齐 taobaoId=${item.taobaoId} current=${item.current} target=${item.target}`);
                   const addResult = agentIdToUse && agentHub.isConnected(agentIdToUse)
-                ? await agentHub.call<any>(
+                  ? await agentHub.call<any>(
                     agentIdToUse,
                     'addAllSkusToCart',
                     {
                       accountId,
                       taobaoId: item.taobaoId,
                       cookies: account.cookies,
+                      refreshCartAfterAdd: false,
                       delayScale: humanDelayScale,
                       skuDelayMinMs: cartAddSkuDelayMinMs,
                       skuDelayMaxMs: cartAddSkuDelayMaxMs,
@@ -1147,6 +1228,7 @@ class SchedulerService {
                     headless: true,
                     skuLimit: item.target,
                     skuDelayMs: { min: cartAddSkuDelayMinMs, max: cartAddSkuDelayMaxMs },
+                    refreshCartAfterAdd: false,
                   });
 
               const done = `${(addResult as any)?.successCount ?? 0}/${(addResult as any)?.totalSkus ?? 0}`;
@@ -1189,6 +1271,7 @@ class SchedulerService {
         }
       }
 
+      await setScrapeProgress('updating_prices');
       const result = await cartScraper.updatePricesFromCart(accountId, account.cookies, { cartResult: cart });
 
       console.log(
@@ -1202,6 +1285,12 @@ class SchedulerService {
         })
         .catch(() => {});
 
+      await setScrapeProgress('completed', {
+        updated: result.updated,
+        failed: result.failed,
+        missing: result.missing,
+      });
+
       return {
         success: true,
         updated: result.updated,
@@ -1209,6 +1298,13 @@ class SchedulerService {
         missing: result.missing
       };
     } catch (error) {
+      await job
+        .updateProgress({
+          step: 'failed',
+          accountId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+        .catch(() => {});
       console.error(`[Scheduler] 购物车抓价失败 accountId=${accountId}:`, error);
       throw error;
     }
@@ -1630,28 +1726,24 @@ class SchedulerService {
     if (matched.length === 0) {
       await job.log('cartProducts 为空，尝试 scrapeCart...');
       let lastCartError: string | null = null;
-      for (let i = 0; i < 3; i++) {
-        this.assertCartAddJobNotCancelled(job);
-        const cart = agentIdToUse
-          ? await agentHub.call<any>(
-              agentIdToUse,
-              'scrapeCart',
-              { accountId, cookies: account.cookies, delayScale: humanDelayScale, expectedTaobaoIds: [taobaoId] },
-              { timeoutMs: 10 * 60 * 1000 }
-            )
-          : await cartScraper.scrapeCart(accountId, account.cookies, { expectedTaobaoIds: [taobaoId] });
+      this.assertCartAddJobNotCancelled(job);
+      const cart = agentIdToUse
+        ? await agentHub.call<any>(
+            agentIdToUse,
+            'scrapeCart',
+            { accountId, cookies: account.cookies, delayScale: humanDelayScale, expectedTaobaoIds: [taobaoId], maxAgeMs: 10_000 },
+            { timeoutMs: 10 * 60 * 1000 }
+          )
+        : await cartScraper.scrapeCart(accountId, account.cookies, { expectedTaobaoIds: [taobaoId], maxAgeMs: 10_000 });
 
-        if (!cart.success) {
-          lastCartError = cart.error || 'scrapeCart failed';
-        } else {
-          let items = cart.products.filter((p: any) => String(p.taobaoId) === String(taobaoId));
-          if (wantedNumericSkuIds.size > 0) {
-            items = items.filter((p: any) => wantedNumericSkuIds.has(String(p.skuId)));
-          }
-          matched = items;
-          if (matched.length > 0) break;
+      if (!cart.success) {
+        lastCartError = cart.error || 'scrapeCart failed';
+      } else {
+        let items = cart.products.filter((p: any) => String(p.taobaoId) === String(taobaoId));
+        if (wantedNumericSkuIds.size > 0) {
+          items = items.filter((p: any) => wantedNumericSkuIds.has(String(p.skuId)));
         }
-        await sleep(1500);
+        matched = items;
       }
 
       if (matched.length === 0) {
@@ -1866,6 +1958,7 @@ class SchedulerService {
 
     let performedAdd = 0;
     const pendingSnapshotsByAccountId = new Map<string, PendingCartInitialSnapshot[]>();
+    const existingCartSkusByAccountId = new Map<string, Map<string, Set<string>>>();
     let lastBatchUpdateAt = 0;
 
     const flushBatchProgress = (force = false) => {
@@ -1873,6 +1966,20 @@ class SchedulerService {
       if (!force && now - lastBatchUpdateAt < 250) return;
       lastBatchUpdateAt = now;
       void job.updateProgress(status).catch(() => {});
+    };
+
+    const ensureExistingCartSkus = async (accountId: string, account: any, agentIdToUse: string | null): Promise<Map<string, Set<string>>> => {
+      const existing = existingCartSkusByAccountId.get(accountId);
+      if (existing) return existing;
+      const snapshot = await this.loadExistingCartSkuSnapshot({
+        accountId,
+        cookies: account.cookies,
+        agentIdToUse,
+        humanDelayScale,
+      });
+      existingCartSkusByAccountId.set(accountId, snapshot);
+      await job.log(`[snapshot] accountId=${accountId} 已预抓取购物车快照：${snapshot.size} 个商品键`);
+      return snapshot;
     };
 
     for (let i = 0; i < items.length; i++) {
@@ -1936,6 +2043,7 @@ class SchedulerService {
       itemStatus.accountName = account.name || undefined;
 
       const agentIdToUse = await getAgentIdToUse(itemAccountId);
+      const existingCartSkus = await ensureExistingCartSkus(itemAccountId, account, agentIdToUse);
       itemStatus.agentId = agentIdToUse;
       try {
         this.assertCartSkuNotFull(itemAccountId);
@@ -2005,6 +2113,7 @@ class SchedulerService {
                 taobaoId: item.taobaoId,
                 cookies: account.cookies,
                 refreshCartAfterAdd: false,
+                existingCartSkus: Object.fromEntries(Array.from(existingCartSkus.entries()).map(([k, v]) => [k, Array.from(v)])),
                 delayScale: humanDelayScale,
                 skuDelayMinMs: cartAddSkuDelayMinMs,
                 skuDelayMaxMs: cartAddSkuDelayMaxMs,
@@ -2018,6 +2127,7 @@ class SchedulerService {
           : await autoCartAdder.addAllSkusToCart(itemAccountId, item.taobaoId, account.cookies, {
               headless: false,
               onProgress,
+              existingCartSkus,
               skuLimit: cartAddSkuLimit,
               skuDelayMs: { min: cartAddSkuDelayMinMs, max: cartAddSkuDelayMaxMs },
               refreshCartAfterAdd: false,
@@ -2025,6 +2135,7 @@ class SchedulerService {
 
         performedAdd++;
         this.assertCartAddJobNotCancelled(job);
+        existingCartSkusByAccountId.set(itemAccountId, this.mergeAddResultIntoCartSnapshot(existingCartSkus, itemTaobaoId, result));
 
         try {
           const uiTotalCountRaw = (result as any)?.uiTotalCount;
@@ -2333,7 +2444,14 @@ class SchedulerService {
       }
     }
 
-    let existingCartSkus: Map<string, Set<string>> = new Map();
+    let existingCartSkus = await this.loadExistingCartSkuSnapshot({
+      accountId,
+      cookies: account.cookies,
+      agentIdToUse,
+      expectedTaobaoIds: batchTaobaoIds,
+      humanDelayScale,
+    });
+    await job.log(`已预抓取购物车快照：${existingCartSkus.size} 个商品键`);
     let performedAgentAdd = 0;
     const pendingSnapshots: PendingCartInitialSnapshot[] = [];
     let lastBatchUpdateAt = 0;
@@ -2472,6 +2590,7 @@ class SchedulerService {
             });
         performedAgentAdd++;
         this.assertCartAddJobNotCancelled(job);
+        existingCartSkus = this.mergeAddResultIntoCartSnapshot(existingCartSkus, itemTaobaoId, result);
 
         try {
           const uiTotalCountRaw = (result as any)?.uiTotalCount;

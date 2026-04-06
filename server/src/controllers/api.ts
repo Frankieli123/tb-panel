@@ -7,12 +7,13 @@ import { notificationService } from '../services/notification.js';
 import { agentHub } from '../services/agentHub.js';
 import { agentAuthService } from '../services/agentAuth.js';
 import { getCartSkuStats } from '../services/cartSkuStats.js';
+import { findExistingCartScrapeJob } from '../services/cartScrapeJobLookup.js';
 import { config } from '../config/index.js';
 import createAuthRouter from './auth.js';
 import { getCookieValue } from '../auth/session.js';
 import { SESSION_COOKIE_NAME } from '../auth/cookies.js';
 import { requireAdmin, requireCsrf, requireSession, systemAuth } from '../middlewares/systemAuth.js';
-import { buildVisibleAccountsWhere, buildVisibleProductsWhere, getSessionUserId } from '../auth/access.js';
+import { buildVisibleAccountsWhere, buildVisibleProductsWhere, getRequestScope, getSessionUserId } from '../auth/access.js';
 import { z } from 'zod';
 
 const prisma = new PrismaClient();
@@ -429,13 +430,20 @@ router.post('/products/:id/refresh', async (req: Request, res: Response) => {
         return res.status(404).json({ success: false, error: 'Account not found' });
       }
 
+      const existingJob = await findExistingCartScrapeJob(account.id);
+      if (existingJob) {
+        return res.json({ success: true, data: { queued: true, jobId: String(existingJob.id) } });
+      }
+
       const bucket = Math.floor(Date.now() / 15000);
       const jobId = `cart_scrape_manual_${account.id}_${bucket}`;
+      const scope = getRequestScope(req);
+      const ownerUserId = scope.kind === 'user' ? scope.userId : null;
 
       try {
         await taskQueue.add(
           'cart-scrape',
-          { accountId: account.id, force: true, source: 'manual_refresh', productId: product.id },
+          { accountId: account.id, force: true, source: 'manual_refresh', productId: product.id, ownerUserId },
           {
             jobId,
             priority: 0,

@@ -5,6 +5,7 @@ import { taskQueue, taskQueueEvents } from '../services/taskQueue.js';
 import { agentHub } from '../services/agentHub.js';
 import { requestCancelForAdd } from '../services/accountTaskControl.js';
 import { schedulerService } from '../services/scheduler.js';
+import { findExistingCartScrapeJob } from '../services/cartScrapeJobLookup.js';
 import { extractTaobaoId } from '../utils/helpers.js';
 import { systemAuth, requireCsrf } from '../middlewares/systemAuth.js';
 import { buildVisibleAccountsWhere, getRequestScope } from '../auth/access.js';
@@ -33,6 +34,7 @@ const batchAddCartModeSchema = z.object({
 
 type AddProgressStatus = 'pending' | 'running' | 'completed' | 'failed';
 type BatchProgressStatus = 'pending' | 'running' | 'completed' | 'failed' | 'partial';
+type CartScrapeProgressStatus = 'pending' | 'running' | 'completed' | 'failed';
 
 function toFiniteNumber(input: unknown, fallback = 0): number {
   const value = typeof input === 'number' ? input : Number(input);
@@ -64,6 +66,13 @@ function mapBatchJobState(state: string, progressStatus?: unknown): BatchProgres
     return 'completed';
   }
   if (state === 'active') return 'running';
+  return 'pending';
+}
+
+function mapCartScrapeJobState(state: string): CartScrapeProgressStatus {
+  if (state === 'active') return 'running';
+  if (state === 'completed') return 'completed';
+  if (state === 'failed') return 'failed';
   return 'pending';
 }
 
@@ -213,7 +222,16 @@ router.get('/products/add-progress/:jobId', async (req: Request, res: Response) 
     const scope = getRequestScope(req);
     const ownerUserId = (job.data as any)?.ownerUserId ?? null;
     if (scope.kind === 'user' && ownerUserId !== scope.userId) {
-      return res.status(404).json({ success: false, error: 'Job not found' });
+      const accountId = String((job.data as any)?.accountId || '').trim();
+      const visibleAccount = accountId
+        ? await prisma.taobaoAccount.findFirst({
+            where: { id: accountId, ...buildVisibleAccountsWhere(req) },
+            select: { id: true },
+          })
+        : null;
+      if (!visibleAccount) {
+        return res.status(404).json({ success: false, error: 'Job not found' });
+      }
     }
 
     const state = await job.getState();
@@ -436,10 +454,12 @@ router.post('/cart/scrape/:accountId', async (req: Request, res: Response) => {
       return res.status(404).json({ success: false, error: 'Account not found' });
     }
 
+    const scope = getRequestScope(req);
+    const ownerUserId = scope.kind === 'user' ? scope.userId : null;
     const jobId = `cart_scrape_manual_${accountId}_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
     const job = await taskQueue.add(
       'cart-scrape',
-      { accountId, force: true, source: 'manual_cart_scrape' },
+      { accountId, force: true, source: 'manual_cart_scrape', ownerUserId },
       {
         jobId,
         priority: 0,
@@ -481,13 +501,20 @@ router.post('/cart/scrape/:accountId/queue', async (req: Request, res: Response)
       return res.status(404).json({ success: false, error: 'Account not found' });
     }
 
+    const existingJob = await findExistingCartScrapeJob(accountId);
+    if (existingJob) {
+      return res.json({ success: true, data: { queued: true, jobId: String(existingJob.id) } });
+    }
+
     const bucket = Math.floor(Date.now() / 15000);
     const jobId = `cart_scrape_manual_${accountId}_${bucket}`;
+    const scope = getRequestScope(req);
+    const ownerUserId = scope.kind === 'user' ? scope.userId : null;
 
     try {
       await taskQueue.add(
         'cart-scrape',
-        { accountId, force: true, source: 'manual_cart_scrape_queue' },
+        { accountId, force: true, source: 'manual_cart_scrape_queue', ownerUserId },
         {
           jobId,
           priority: 0,
@@ -503,6 +530,56 @@ router.post('/cart/scrape/:accountId/queue', async (req: Request, res: Response)
     }
 
     res.json({ success: true, data: { queued: true, jobId } });
+  } catch (error) {
+    res.status(500).json({ success: false, error: String(error) });
+  }
+});
+
+router.get('/cart/scrape-progress/:jobId', async (req: Request, res: Response) => {
+  try {
+    const { jobId } = req.params;
+    const job = await taskQueue.getJob(jobId);
+    if (!job || String(job.name || '') !== 'cart-scrape') {
+      return res.status(404).json({ success: false, error: 'Job not found' });
+    }
+
+    const scope = getRequestScope(req);
+    const ownerUserId = (job.data as any)?.ownerUserId ?? null;
+    if (scope.kind === 'user' && ownerUserId !== scope.userId) {
+      const accountId = String((job.data as any)?.accountId || '').trim();
+      const visibleAccount = accountId
+        ? await prisma.taobaoAccount.findFirst({
+            where: { id: accountId, ...buildVisibleAccountsWhere(req) },
+            select: { id: true },
+          })
+        : null;
+      if (!visibleAccount) {
+        return res.status(404).json({ success: false, error: 'Job not found' });
+      }
+    }
+
+    const state = await job.getState();
+    const status = mapCartScrapeJobState(state);
+    const progress = (job.progress as any) ?? null;
+    const result = (job.returnvalue as any) ?? null;
+    const { logs } = await taskQueue.getJobLogs(jobId, 0, -1);
+
+    res.json({
+      success: true,
+      data: {
+        status,
+        progress,
+        result:
+          status === 'completed' && result
+            ? {
+                updated: Math.max(0, toFiniteNumber(result?.updated, 0)),
+                failed: Math.max(0, toFiniteNumber(result?.failed, 0)),
+                missing: Math.max(0, toFiniteNumber(result?.missing, 0)),
+              }
+            : null,
+        logs: logs.length > 0 ? logs : status === 'pending' ? ['任务已入队，等待执行...'] : [],
+      },
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: String(error) });
   }

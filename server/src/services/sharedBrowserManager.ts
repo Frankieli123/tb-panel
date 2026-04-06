@@ -3,14 +3,21 @@ import { createHash } from 'crypto';
 import { chromeLauncher } from './chromeLauncher.js';
 import { HumanSimulator } from './humanSimulator.js';
 import { decryptCookies } from '../utils/helpers.js';
+import type { CartSkuSnapshot } from './cartSnapshot.js';
 
 export interface BrowserSession {
   context: BrowserContext;
   page: Page;
+  detailPage?: Page | null;
   human: HumanSimulator;
   accountId: string;
   cookieSig: string;
   lastUsedAt: number;
+  lastCartRefreshAt?: number;
+  lastCartSnapshot?: CartSkuSnapshot | null;
+  cartReloadCount: number;
+  fullCartScanCount: number;
+  detailPageOpenCount: number;
 }
 
 class SharedBrowserManager {
@@ -74,6 +81,9 @@ class SharedBrowserManager {
           console.log(`[SharedBrowser] Cookie 已变化 accountId=${accountId}，重建中`);
           await this.disposeSession(accountId);
         } else {
+          if (existing.detailPage?.isClosed()) {
+            existing.detailPage = null;
+          }
           existing.lastUsedAt = Date.now();
           console.log(`[SharedBrowser] 复用会话 accountId=${accountId}`);
           return existing;
@@ -107,10 +117,16 @@ class SharedBrowserManager {
       const session: BrowserSession = {
         context,
         page,
+        detailPage: null,
         human,
         accountId,
         cookieSig: sig,
         lastUsedAt: Date.now(),
+        lastCartRefreshAt: 0,
+        lastCartSnapshot: null,
+        cartReloadCount: 0,
+        fullCartScanCount: 0,
+        detailPageOpenCount: 0,
       };
 
       this.sessions.set(accountId, session);
@@ -127,6 +143,11 @@ class SharedBrowserManager {
       await session.page.close().catch(() => {});
     } catch {}
     try {
+      if (session.detailPage && session.detailPage !== session.page && !session.detailPage.isClosed()) {
+        await session.detailPage.close().catch(() => {});
+      }
+    } catch {}
+    try {
       await session.context.close().catch(() => {});
     } catch {}
 
@@ -141,15 +162,33 @@ class SharedBrowserManager {
     return this.sessions.get(accountId);
   }
 
-  listSessionSummaries(): Array<{ accountId: string; lastUsedAt: number; pageClosed: boolean; url: string | null }> {
+  listSessionSummaries(): Array<{
+    accountId: string;
+    lastUsedAt: number;
+    pageClosed: boolean;
+    url: string | null;
+    detailUrl: string | null;
+    lastCartRefreshAt: number;
+    cartReloadCount: number;
+    fullCartScanCount: number;
+    detailPageOpenCount: number;
+  }> {
     return Array.from(this.sessions.values()).map((session) => {
       const pageClosed = session.page.isClosed();
       let url: string | null = null;
+      let detailUrl: string | null = null;
       if (!pageClosed) {
         try {
           url = session.page.url();
         } catch {
           url = null;
+        }
+      }
+      if (session.detailPage && !session.detailPage.isClosed()) {
+        try {
+          detailUrl = session.detailPage.url();
+        } catch {
+          detailUrl = null;
         }
       }
 
@@ -158,6 +197,11 @@ class SharedBrowserManager {
         lastUsedAt: session.lastUsedAt,
         pageClosed,
         url,
+        detailUrl,
+        lastCartRefreshAt: Math.max(0, Math.floor(session.lastCartRefreshAt ?? 0)),
+        cartReloadCount: Math.max(0, Math.floor(session.cartReloadCount ?? 0)),
+        fullCartScanCount: Math.max(0, Math.floor(session.fullCartScanCount ?? 0)),
+        detailPageOpenCount: Math.max(0, Math.floor(session.detailPageOpenCount ?? 0)),
       };
     });
   }

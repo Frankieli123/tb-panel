@@ -21,6 +21,20 @@ const LOGIN_QR_API_PATH = '/havanaone/loginLegacy/qrCode/generate.do';
 const LOGIN_QR_EXPIRED_PATTERN = /二维码已失效|请刷新二维码后重新扫码|二维码过期|二维码异常/i;
 const LOGIN_RISK_URL_PATTERN = /survey\.taobao\.com|sec\.taobao\.com|captcha|verify|risk|punish|baxia/i;
 const LOGIN_VERIFY_TEXT_PATTERN = /验证码|安全验证|请完成验证|请进行验证|请拖动滑块|短信验证|人脸验证|刷脸验证/i;
+const LOGIN_VERIFY_SELECTOR_LIST = [
+  '#nc_1_n1z',
+  '#nc_1_wrapper',
+  '.nc-container',
+  '.J_MIDDLEWARE_FRAME_WIDGET',
+  '#baxia-dialog-content',
+  '.baxia-dialog',
+  '.sufei-dialog',
+  'iframe[src*="captcha"]',
+  'iframe[src*="verify"]',
+  'iframe[src*="risk"]',
+  'iframe[src*="punish"]',
+  'iframe[src*="baxia"]',
+];
 
 type RpcMessage = {
   type: 'rpc';
@@ -167,8 +181,42 @@ async function extractQrImage(page: Page): Promise<string | null> {
   return `data:image/png;base64,${Buffer.from(screenshot).toString('base64')}`;
 }
 
+async function hasManualVerificationMarker(page: Page): Promise<boolean> {
+  try {
+    const hit = await page
+      .evaluate(({ selectors, textPattern }: { selectors: string[]; textPattern: string }) => {
+        const hasSelector = selectors.some((selector: string) => {
+          try {
+            return Boolean(document.querySelector(selector));
+          } catch {
+            return false;
+          }
+        });
+        if (hasSelector) return true;
+
+        const bodyText = document.body?.innerText || '';
+        return new RegExp(textPattern, 'i').test(bodyText);
+      }, { selectors: LOGIN_VERIFY_SELECTOR_LIST, textPattern: LOGIN_VERIFY_TEXT_PATTERN.source })
+      .catch(() => false);
+    if (hit) return true;
+  } catch {}
+
+  for (const frame of page.frames()) {
+    try {
+      const frameUrl = String(frame.url() || '');
+      if (frameUrl && LOGIN_RISK_URL_PATTERN.test(frameUrl)) return true;
+
+      const bodyText = await frame.locator('body').innerText({ timeout: 400 }).catch(() => '');
+      if (bodyText && LOGIN_VERIFY_TEXT_PATTERN.test(bodyText)) return true;
+    } catch {}
+  }
+
+  return false;
+}
+
 async function needsManualVerification(page: Page, url: string): Promise<boolean> {
   if (isRiskPage(url)) return true;
+  if (await hasManualVerificationMarker(page)) return true;
   try {
     const bodyText = await page.locator('body').innerText({ timeout: 1_000 });
     if (/扫描成功|请在手机上确认登录|请使用淘宝 App 扫码登录/i.test(bodyText)) return false;
@@ -974,6 +1022,13 @@ async function main(): Promise<void> {
           const expectedTaobaoIds = Array.isArray((params as any).expectedTaobaoIds)
             ? (params as any).expectedTaobaoIds.map((x: any) => String(x || '').trim()).filter(Boolean)
             : undefined;
+          const maxAgeMsRaw = Number((params as any).maxAgeMs);
+          const maxAgeMs = Number.isFinite(maxAgeMsRaw) ? Math.max(0, Math.floor(maxAgeMsRaw)) : undefined;
+          const forceReloadRaw = (params as any).forceReload;
+          const forceReload =
+            forceReloadRaw === true ||
+            forceReloadRaw === 1 ||
+            String(forceReloadRaw).toLowerCase() === 'true';
           const delayScaleRaw =
             typeof (params as any).delayScale === 'number'
               ? (params as any).delayScale
@@ -981,7 +1036,7 @@ async function main(): Promise<void> {
           if (Number.isFinite(delayScaleRaw) && delayScaleRaw > 0) {
             setHumanDelayScale(delayScaleRaw);
           }
-          const result = await cartScraper.scrapeCart(accountId, cookies, { expectedTaobaoIds });
+          const result = await cartScraper.scrapeCart(accountId, cookies, { expectedTaobaoIds, maxAgeMs, forceReload });
           wsConn.send(JSON.stringify({ type: 'rpc_result', requestId, ok: true, result }));
           return;
         }

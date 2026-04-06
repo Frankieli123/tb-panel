@@ -44,12 +44,14 @@ export default function Accounts() {
   const [loginControlBusy, setLoginControlBusy] = useState(false);
   const [loginControlError, setLoginControlError] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const cartRefreshPollersRef = useRef<Map<string, number>>(new Map());
+  const cartRefreshJobIdsRef = useRef<Map<string, string>>(new Map());
   const loginImageRef = useRef<HTMLImageElement | null>(null);
   const loginPointerStartRef = useRef<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
-    loadAccounts();
-    loadAgents();
+    void loadAccounts();
+    void loadAgents();
   }, []);
 
   // 清理 WebSocket 连接
@@ -58,6 +60,11 @@ export default function Accounts() {
       if (wsRef.current) {
         wsRef.current.close();
       }
+      for (const timer of cartRefreshPollersRef.current.values()) {
+        window.clearTimeout(timer);
+      }
+      cartRefreshPollersRef.current.clear();
+      cartRefreshJobIdsRef.current.clear();
     };
   }, []);
 
@@ -366,7 +373,7 @@ export default function Accounts() {
     setLoginState((prev) => (prev ? { ...prev, displayMode: 'page', pageModeLocked: true } : prev));
   }, []);
 
-  const loadAccounts = async () => {
+  const loadAccounts = useCallback(async () => {
     setIsLoading(true);
     try {
       const data = await api.getAccounts();
@@ -376,9 +383,9 @@ export default function Accounts() {
     } finally {
       setIsLoading(false);
     }
-  };
+  }, []);
 
-  const loadAgents = async () => {
+  const loadAgents = useCallback(async () => {
     setAgentsLoading(true);
     setAgentsError(null);
     try {
@@ -390,7 +397,72 @@ export default function Accounts() {
     } finally {
       setAgentsLoading(false);
     }
-  };
+  }, []);
+
+  const clearCartRefreshPolling = useCallback((accountId: string) => {
+    const timer = cartRefreshPollersRef.current.get(accountId);
+    if (timer) {
+      window.clearTimeout(timer);
+      cartRefreshPollersRef.current.delete(accountId);
+    }
+    cartRefreshJobIdsRef.current.delete(accountId);
+    setRefreshingCartIds((prev) => {
+      if (!prev.has(accountId)) return prev;
+      const next = new Set(prev);
+      next.delete(accountId);
+      return next;
+    });
+  }, []);
+
+  const pollCartRefreshJob = useCallback(
+    async (accountId: string, jobId: string, failureCount = 0) => {
+      cartRefreshJobIdsRef.current.set(accountId, jobId);
+      try {
+        const data = await api.getCartScrapeProgress(jobId);
+        if (cartRefreshJobIdsRef.current.get(accountId) !== jobId) {
+          return;
+        }
+        const active = data.status === 'pending' || data.status === 'running';
+        if (active) {
+          const delay = failureCount > 0 ? Math.min(10_000, 2_000 * (failureCount + 1)) : 2_000;
+          const timer = window.setTimeout(() => {
+            void pollCartRefreshJob(accountId, jobId, 0);
+          }, delay);
+          cartRefreshPollersRef.current.set(accountId, timer);
+          return;
+        }
+
+        await loadAccounts();
+        if (cartRefreshJobIdsRef.current.get(accountId) !== jobId) {
+          return;
+        }
+        clearCartRefreshPolling(accountId);
+
+        if (data.status === 'failed') {
+          const message = data.logs[data.logs.length - 1] || '购物车刷新失败';
+          alert(`刷新失败：${message}`);
+        }
+      } catch (error) {
+        if (cartRefreshJobIdsRef.current.get(accountId) !== jobId) {
+          return;
+        }
+        const nextFailureCount = failureCount + 1;
+        if (nextFailureCount >= 5) {
+          console.error('Failed to poll cart refresh progress:', error);
+          clearCartRefreshPolling(accountId);
+          alert(`刷新失败：${error instanceof Error ? error.message : String(error)}`);
+          return;
+        }
+
+        const delay = Math.min(10_000, 2_000 * nextFailureCount);
+        const timer = window.setTimeout(() => {
+          void pollCartRefreshJob(accountId, jobId, nextFailureCount);
+        }, delay);
+        cartRefreshPollersRef.current.set(accountId, timer);
+      }
+    },
+    [clearCartRefreshPolling, loadAccounts]
+  );
 
   const handleRefreshCart = async (accountId: string) => {
     setRefreshingCartIds((prev) => {
@@ -400,18 +472,16 @@ export default function Accounts() {
     });
 
     try {
-      await api.queueCartScrape(accountId);
-      await new Promise((resolve) => setTimeout(resolve, 3000));
-      await loadAccounts();
+      const { jobId } = await api.queueCartScrape(accountId);
+      const existingTimer = cartRefreshPollersRef.current.get(accountId);
+      if (existingTimer) {
+        window.clearTimeout(existingTimer);
+      }
+      void pollCartRefreshJob(accountId, jobId, 0);
     } catch (error) {
       console.error('Failed to refresh cart:', error);
+      clearCartRefreshPolling(accountId);
       alert(`刷新失败：${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      setRefreshingCartIds((prev) => {
-        const next = new Set(prev);
-        next.delete(accountId);
-        return next;
-      });
     }
   };
 
@@ -491,6 +561,12 @@ export default function Accounts() {
     loginState.displayMode === 'page' &&
     loginState.status === 'scanning' &&
     !!loginState.screenshot;
+  const loginModeLabel =
+    loginState?.mode === 'agent'
+      ? 'Agent 模式'
+      : loginState?.mode === 'local'
+        ? 'Local 模式'
+        : null;
 
   return (
     <div className="space-y-6">
@@ -763,7 +839,20 @@ export default function Accounts() {
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl w-full max-w-2xl shadow-xl overflow-hidden flex flex-col max-h-[90vh]">
             <div className="flex items-center justify-between p-4 border-b flex-shrink-0">
-              <h3 className="text-lg font-bold">淘宝登录</h3>
+              <div className="flex items-center gap-3">
+                <h3 className="text-lg font-bold">淘宝登录</h3>
+                {loginModeLabel && (
+                  <span
+                    className={`px-2.5 py-1 rounded-full text-xs font-semibold border ${
+                      loginState.mode === 'agent'
+                        ? 'bg-green-50 text-green-700 border-green-100'
+                        : 'bg-amber-50 text-amber-700 border-amber-100'
+                    }`}
+                  >
+                    {loginModeLabel}
+                  </span>
+                )}
+              </div>
               <button
                 onClick={cancelLogin}
                 className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
@@ -773,6 +862,20 @@ export default function Accounts() {
             </div>
 
             <div className="p-6 overflow-y-auto flex-1 min-h-0">
+              {loginState.mode && (
+                <div
+                  className={`mb-4 rounded-xl border px-4 py-3 text-sm ${
+                    loginState.mode === 'agent'
+                      ? 'bg-green-50 border-green-100 text-green-800'
+                      : 'bg-amber-50 border-amber-100 text-amber-800'
+                  }`}
+                >
+                  {loginState.mode === 'agent'
+                    ? '当前使用 Agent 登录。遇到验证码或安全验证时，可切到完整页面后直接在此窗口远程操作。'
+                    : '当前使用 Local 登录。本地模式只同步登录画面，不显示网页远程输入/点按控件。'}
+                </div>
+              )}
+
               {loginState.status === 'connecting' && (
                 <div className="flex flex-col items-center justify-center py-12">
                   <Loader2 className="w-8 h-8 text-orange-500 animate-spin" />

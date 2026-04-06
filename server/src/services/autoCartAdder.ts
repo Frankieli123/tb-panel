@@ -2,6 +2,8 @@ import { Page, BrowserContext, Browser, Frame } from 'playwright';
 import { SkuParser, SkuCombination } from './skuParser.js';
 import { HumanSimulator, randomDelay, randomRange } from './humanSimulator.js';
 import { sharedBrowserManager } from './sharedBrowserManager.js';
+import { cartScraper } from './cartScraper.js';
+import { buildCartSkuSnapshot, cloneCartSkuSnapshot, mergeSuccessfulSkuResults } from './cartSnapshot.js';
 import {
   isCancelRequested,
   isPauseRequested,
@@ -147,6 +149,11 @@ export class AutoCartAdder {
     if (/cart\.taobao\.com\/cart\.htm/i.test(url)) return;
 
     await this.humanSimulator.navigateAsHuman('https://cart.taobao.com/cart.htm');
+    const session = this.currentAccountId ? sharedBrowserManager.getSession(this.currentAccountId) : null;
+    if (session) {
+      session.lastCartRefreshAt = Date.now();
+      session.cartReloadCount = (session.cartReloadCount ?? 0) + 1;
+    }
     await this.assertNotAuthPage('打开购物车页');
     await this.humanSimulator.sleep(randomDelay(800, 1600));
     await this.closeFeatureTips().catch(() => {});
@@ -158,6 +165,10 @@ export class AutoCartAdder {
   ): Promise<{ keys: Set<string>; uniqueCount: number }> {
     const targetId = String(taobaoId || '').trim();
     if (!/^\d+$/.test(targetId)) return { keys: new Set<string>(), uniqueCount: 0 };
+    const session = this.currentAccountId ? sharedBrowserManager.getSession(this.currentAccountId) : null;
+    if (session) {
+      session.fullCartScanCount = (session.fullCartScanCount ?? 0) + 1;
+    }
 
     await this.page.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' as any })).catch(() => {});
     await this.humanSimulator.sleep(randomDelay(350, 650));
@@ -587,48 +598,28 @@ export class AutoCartAdder {
   ): Promise<{ cartUrl: string; usedPopup: boolean; usedSameTab: boolean; cartPage: Page }> {
     const cartPage = this.page;
     const cartUrl = cartPage.url();
+    const session = this.currentAccountId ? sharedBrowserManager.getSession(this.currentAccountId) : null;
 
-    // 在新标签页打开商品详情页，保持购物车页面不关闭
     const url = `https://item.taobao.com/item.htm?id=${taobaoId}`;
-    console.log(`[AutoCart] 新标签页打开商品页: ${url}`);
-    
-    const productPage = await this.context.newPage();
+    let productPage = session?.detailPage ?? null;
+    if (!productPage || productPage.isClosed()) {
+      console.log(`[AutoCart] 创建/复用详情页标签: ${url}`);
+      productPage = await this.context.newPage();
+      if (session) {
+        session.detailPage = productPage;
+        session.detailPageOpenCount = (session.detailPageOpenCount ?? 0) + 1;
+      }
+    } else {
+      console.log(`[AutoCart] 复用详情页标签: ${url}`);
+    }
+
     this.page = productPage;
     this.humanSimulator = new HumanSimulator(this.page);
     this.skuParser = new SkuParser(this.page);
-    
+
     await this.humanSimulator.navigateAsHuman(url);
-    
-    // 返回购物车页面引用，用于后续刷新获取价格
+
     return { cartUrl, usedPopup: true, usedSameTab: false, cartPage };
-  }
-
-  private async returnToCartAfterAdd(cartUrl: string, cartPage: Page): Promise<void> {
-    try {
-      // 优先按“后退键”（更像人）
-      await this.page.keyboard.press('Alt+Left').catch(() => {});
-      await this.page.waitForTimeout(randomDelay(300, 650));
-      if (/cart\.taobao\.com\/cart\.htm/i.test(this.page.url())) return;
-
-      await this.page.goBack({ waitUntil: 'domcontentloaded', timeout: 12000 }).catch(() => {});
-      await this.page.waitForTimeout(randomDelay(300, 650));
-      if (/cart\.taobao\.com\/cart\.htm/i.test(this.page.url())) return;
-
-      await this.page.goto(cartUrl || 'https://cart.taobao.com/cart.htm', {
-        waitUntil: 'domcontentloaded',
-        timeout: 20000,
-      }).catch(() => {});
-    } finally {
-      await this.closeFeatureTips().catch(() => {});
-      await this.waitForOverlaysCleared().catch(() => {});
-
-      // 如果当前页面不是最初的购物车 tab，则切回去（避免用户看到奇怪页面）
-      if (this.page !== cartPage) {
-        this.page = cartPage;
-        this.humanSimulator = new HumanSimulator(this.page);
-        this.skuParser = new SkuParser(this.page);
-      }
-    }
   }
 
   private async runExclusive<T>(fn: () => Promise<T>): Promise<T> {
@@ -913,11 +904,16 @@ export class AutoCartAdder {
         await this.ensureBrowser(accountId, cookies);
         throwIfCancelled();
         sessionPage = this.page;
+        const session = sharedBrowserManager.getSession(accountId);
 
         // 阶段1：打开购物车预检查已存在的SKU
-        // 如果批量模式已经预先抓取过购物车，则直接使用传入的数据
         let existedSkuKeys: Set<string>;
         let existedSkuCount = 0;
+        const cachedSnapshot = cloneCartSkuSnapshot(session?.lastCartSnapshot ?? null);
+        if (!options?.existingCartSkus && cachedSnapshot.size > 0) {
+          options = { ...options, existingCartSkus: cachedSnapshot };
+        }
+
         if (options?.existingCartSkus?.has(taobaoId)) {
           const raw = options.existingCartSkus.get(taobaoId)!;
           existedSkuKeys = new Set<string>();
@@ -925,6 +921,7 @@ export class AutoCartAdder {
             const key = normalizeExistingCartSkuKey(entry);
             if (key) existedSkuKeys.add(key);
           }
+          options.existingCartSkus.set(taobaoId, existedSkuKeys);
           const idCount = Array.from(existedSkuKeys).filter((k) => k.startsWith('id:')).length;
           existedSkuCount = idCount > 0 ? idCount : existedSkuKeys.size;
           console.log(`[AutoCart] 使用预取购物车数据: taobaoId=${taobaoId} existedSkus=${existedSkuCount}`);
@@ -949,6 +946,10 @@ export class AutoCartAdder {
           const precheck = await this.collectCartSkuKeysForTaobaoId(taobaoId);
           throwIfCancelled();
           existedSkuKeys = precheck.keys;
+          options?.existingCartSkus?.set(taobaoId, existedSkuKeys);
+          if (session) {
+            session.lastCartSnapshot = cloneCartSkuSnapshot(options?.existingCartSkus ?? new Map([[taobaoId, existedSkuKeys]]));
+          }
           existedSkuCount = precheck.uniqueCount;
           console.log(`[AutoCart] 购物车预检查: taobaoId=${taobaoId} existedSkus=${existedSkuCount}`);
           if (options?.onProgress) {
@@ -1058,6 +1059,7 @@ export class AutoCartAdder {
 
         let successCount = 0;
         let failedCount = 0;
+        let addedAny = false;
 
         for (let i = 0; i < selected.length; i++) {
           await pauseIfRequested('【抢占】暂停加购，优先抓价中…');
@@ -1097,6 +1099,7 @@ export class AutoCartAdder {
               result = await this.addSingleSkuAsHuman(sku, taobaoId);
               throwIfCancelled();
               if (result.success) {
+                addedAny = true;
                 successCount++;
                 if (idKey) existedKeys.add(idKey);
                 if (propsKey) existedKeys.add(propsKey);
@@ -1170,10 +1173,18 @@ export class AutoCartAdder {
         }
 
         const duration = Date.now() - startTime;
+        const sessionState = sharedBrowserManager.getSession(accountId);
+        if (options?.existingCartSkus) {
+          mergeSuccessfulSkuResults(options.existingCartSkus, taobaoId, results);
+        }
+        if (sessionState) {
+          const nextSnapshot = cloneCartSkuSnapshot(options?.existingCartSkus ?? sessionState.lastCartSnapshot ?? null);
+          mergeSuccessfulSkuResults(nextSnapshot, taobaoId, results);
+          sessionState.lastCartSnapshot = nextSnapshot;
+        }
 
         console.log(`[AutoCart] 完成: ${successCount}/${skuTarget} 成功，耗时=${duration}ms`);
 
-        // 阶段5：关闭商品详情页，切回购物车页面刷新获取价格
         const refreshCartAfterAdd = options?.refreshCartAfterAdd !== false;
         if (options?.onProgress) {
           options.onProgress(
@@ -1189,16 +1200,15 @@ export class AutoCartAdder {
           success: successCount,
           failed: failedCount,
         };
-        
-        // 关闭商品详情页（当前页面）
-        await this.page.close().catch(() => {});
-        
-        // 切回购物车页面
+
         this.page = openInfo.cartPage;
         this.humanSimulator = new HumanSimulator(this.page);
         this.skuParser = new SkuParser(this.page);
 
         if (!refreshCartAfterAdd) {
+          if (sessionState && addedAny) {
+            sessionState.lastCartRefreshAt = 0;
+          }
           return {
             taobaoId,
             totalSkus: skuTarget,
@@ -1211,11 +1221,14 @@ export class AutoCartAdder {
             skuTarget,
           };
         }
-        
-        // 刷新购物车页面获取最新价格
+
         throwIfCancelled();
         console.log('[AutoCart] 刷新购物车页以获取最新价格...');
         await this.page.reload({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+        if (sessionState) {
+          sessionState.lastCartRefreshAt = Date.now();
+          sessionState.cartReloadCount = (sessionState.cartReloadCount ?? 0) + 1;
+        }
         await this.humanSimulator.sleep(randomDelay(1000, 2000));
         throwIfCancelled();
         await this.closeFeatureTips().catch(() => {});
@@ -1236,10 +1249,20 @@ export class AutoCartAdder {
           })
           .catch(() => null);
 
-        // 直接在当前页面抓取购物车数据
+        if (sessionState) {
+          sessionState.fullCartScanCount = (sessionState.fullCartScanCount ?? 0) + 1;
+        }
         console.log('[AutoCart] 从当前页面提取购物车数据...');
         const cartProducts = await this.extractCartDataFromCurrentPage(taobaoId);
         throwIfCancelled();
+        if (sessionState) {
+          sessionState.lastCartSnapshot = buildCartSkuSnapshot(cartProducts, sessionState.lastCartSnapshot ?? null);
+          console.log(
+            `[AutoCart] 会话统计 accountId=${accountId} cartReloadCount=${sessionState.cartReloadCount ?? 0} fullCartScanCount=${
+              sessionState.fullCartScanCount ?? 0
+            } detailPageOpenCount=${sessionState.detailPageOpenCount ?? 0}`
+          );
+        }
         console.log(`[AutoCart] 已提取 ${cartProducts.length} 个商品 taobaoId=${taobaoId}`);
 
         return {
@@ -1257,16 +1280,14 @@ export class AutoCartAdder {
         };
       } finally {
         markAddEnd(accountId);
-        // 关键：异常路径也必须清理多余 tab（否则会积累一堆商品页导致卡顿）
-        // 只保留共享会话的 page（通常是购物车页）。
         try {
+          const session = sharedBrowserManager.getSession(accountId);
+          const detailPage = session?.detailPage && !session.detailPage.isClosed() ? session.detailPage : null;
           const pages = this.context?.pages?.().filter((p) => !p.isClosed()) ?? [];
-          const keep =
-            sessionPage && !sessionPage.isClosed()
-              ? sessionPage
-              : pages.length > 0
-                ? pages[0]
-                : null;
+          const keep = new Set<Page>();
+          if (sessionPage && !sessionPage.isClosed()) keep.add(sessionPage);
+          if (detailPage) keep.add(detailPage);
+          if (keep.size === 0 && pages.length > 0) keep.add(pages[0]);
 
           if (pages.length > 1) {
             const sample = pages.slice(0, 3).map((p) => {
@@ -1283,12 +1304,13 @@ export class AutoCartAdder {
           }
 
           for (const p of pages) {
-            if (keep && p === keep) continue;
+            if (keep.has(p)) continue;
             await p.close().catch(() => {});
           }
 
-          if (keep && this.page !== keep && !keep.isClosed()) {
-            this.page = keep;
+          const keepPage = sessionPage && !sessionPage.isClosed() ? sessionPage : Array.from(keep.values())[0] ?? null;
+          if (keepPage && this.page !== keepPage && !keepPage.isClosed()) {
+            this.page = keepPage;
             this.humanSimulator = new HumanSimulator(this.page);
             this.skuParser = new SkuParser(this.page);
           }
@@ -1296,7 +1318,6 @@ export class AutoCartAdder {
           console.warn('[AutoCart] 清理多余页面失败:', e);
         }
 
-        // 不关闭 context，保持购物车页面打开供用户查看；浏览器会被复用。
         console.log('[AutoCart] 任务完成，保持购物车页打开供用户查看');
       }
     });
@@ -1306,7 +1327,7 @@ export class AutoCartAdder {
     sku: SkuCombination,
     taobaoId: string
   ): Promise<SkuAddResult> {
-    for (let attempt = 1; attempt <= 2; attempt++) {
+    for (let attempt = 1; attempt <= 3; attempt++) {
       try {
         return await this.addSingleSkuAttempt(sku, taobaoId, attempt);
       } catch (error: any) {
@@ -1323,7 +1344,11 @@ export class AutoCartAdder {
         });
 
         if (attempt === 1) {
-          await this.resetToProductPage(taobaoId);
+          await this.softRecoverProductPage().catch(() => {});
+          continue;
+        }
+        if (attempt === 2) {
+          await this.resetToProductPage(taobaoId).catch(() => {});
           continue;
         }
         throw error;
@@ -1331,6 +1356,14 @@ export class AutoCartAdder {
     }
 
     throw new Error('加购失败：未知错误');
+  }
+
+  private async softRecoverProductPage(): Promise<void> {
+    await this.page.evaluate(() => window.scrollTo({ top: 0, behavior: 'instant' as any })).catch(() => {});
+    await this.closeFeatureTips().catch(() => {});
+    await this.closeAddCartModal().catch(() => {});
+    await this.waitForOverlaysCleared().catch(() => {});
+    await this.humanSimulator.sleep(randomDelay(180, 420));
   }
 
   private async resetToProductPage(taobaoId: string): Promise<void> {
@@ -2317,78 +2350,9 @@ export class AutoCartAdder {
     if (!this.page) return [];
 
     try {
-      // 等待购物车内容加载
       await this.page.waitForSelector('.trade-cart-item-info', { timeout: 10000 }).catch(() => {});
-
-      const products = await this.page.evaluate((targetTaobaoId) => {
-        const items: any[] = [];
-        const cartItems = Array.from(document.querySelectorAll('.trade-cart-item-info'));
-
-        cartItems.forEach((item) => {
-          // 从链接中提取ID
-          const linkEl = item.querySelector('a[href*="item.taobao.com"], a[href*="detail.tmall.com"]');
-          const href = linkEl?.getAttribute('href') || '';
-          const taobaoIdMatch = href.match(/[?&]id=(\d+)/);
-          const skuIdMatch = href.match(/[?&]skuId=(\d+)/);
-          const itemTaobaoId = taobaoIdMatch ? taobaoIdMatch[1] : '';
-
-          // 只提取目标商品
-          if (itemTaobaoId !== targetTaobaoId) return;
-
-          const skuId = skuIdMatch ? skuIdMatch[1] : '';
-
-          // 标题
-          const titleEl = item.querySelector('a.title--dsuLK9IN');
-          const title = titleEl?.textContent?.trim() || '';
-
-          // 图片
-          const imageEl = item.querySelector('img.image--MC0kGGgi');
-          const imageSrc = imageEl?.getAttribute('src') || null;
-          const imageUrl = imageSrc ? (imageSrc.startsWith('//') ? 'https:' + imageSrc : imageSrc) : null;
-
-          // 价格
-          const priceContainer = item.querySelector('.trade-cart-item-price');
-          const priceContainers = priceContainer ? Array.from(priceContainer.querySelectorAll('.trade-price-container')) : [];
-
-          let finalPrice = 0;
-          let originalPrice: number | null = null;
-
-          if (priceContainers.length > 0) {
-            const firstContainer = priceContainers[0];
-            const priceInteger1 = firstContainer?.querySelector('.trade-price-integer')?.textContent?.trim() || '0';
-            const priceDecimal1 = firstContainer?.querySelector('.trade-price-decimal')?.textContent?.trim() || '0';
-            finalPrice = parseFloat(`${priceInteger1}.${priceDecimal1}`);
-
-            if (priceContainers.length > 1) {
-              const secondContainer = priceContainers[1];
-              const priceInteger2 = secondContainer?.querySelector('.trade-price-integer')?.textContent?.trim() || '0';
-              const priceDecimal2 = secondContainer?.querySelector('.trade-price-decimal')?.textContent?.trim() || '0';
-              originalPrice = parseFloat(`${priceInteger2}.${priceDecimal2}`);
-            }
-          }
-
-          // SKU属性
-          const skuEl = item.querySelector('.trade-cart-item-sku-old');
-          const skuLabels = skuEl ? Array.from(skuEl.querySelectorAll('.label--T4deixnF')) : [];
-          const skuProperties = skuLabels.map(label => (label as Element).textContent?.trim() || '').join(' ');
-
-          items.push({
-            taobaoId: itemTaobaoId,
-            skuId,
-            skuProperties,
-            title,
-            imageUrl,
-            finalPrice,
-            originalPrice,
-            quantity: 1,
-            cartItemId: `${itemTaobaoId}_${skuId}`
-          });
-        });
-
-        return items;
-      }, taobaoId);
-
-      return products;
+      const parsed = await cartScraper.parseCartPage(this.page, { expectedTaobaoIds: [taobaoId] });
+      return parsed.products.filter((item) => String(item.taobaoId || '').trim() === String(taobaoId || '').trim());
     } catch (error: any) {
       console.error('[AutoCart] 提取购物车数据失败:', error?.message);
       return [];

@@ -1,7 +1,9 @@
 import { Page, Frame } from 'playwright';
 import { sharedBrowserManager } from './sharedBrowserManager.js';
+import type { BrowserSession } from './sharedBrowserManager.js';
 import { HumanSimulator, randomDelay, randomRange } from './humanSimulator.js';
 import { calculatePriceDrop } from '../utils/helpers.js';
+import { buildCartSkuSnapshot } from './cartSnapshot.js';
 
 import type { PrismaClient } from '@prisma/client';
 
@@ -70,11 +72,7 @@ export class CartScraper {
     );
   }
 
-  private async getOrCreateSession(accountId: string, cookies?: string): Promise<{
-    context: any;
-    page: Page;
-    human: HumanSimulator;
-  }> {
+  private async getOrCreateSession(accountId: string, cookies?: string): Promise<BrowserSession> {
     // 使用共享浏览器管理器
     const session = await sharedBrowserManager.getOrCreateSession(accountId, cookies);
     console.log(`[CartScraper] 使用共享浏览器会话 accountId=${accountId}`);
@@ -305,30 +303,71 @@ export class CartScraper {
     }
   }
 
-  private async refreshCartPage(session: { page: Page; human: HumanSimulator }): Promise<void> {
+  private async refreshCartPage(
+    session: {
+      page: Page;
+      human: HumanSimulator;
+      lastCartRefreshAt?: number;
+      cartReloadCount?: number;
+    },
+    options?: { force?: boolean; maxAgeMs?: number }
+  ): Promise<void> {
     const url = session.page.url();
     const isCart = /cart\.taobao\.com\/cart\.htm/i.test(url);
+    const force = options?.force === true;
+    const maxAgeMs =
+      typeof options?.maxAgeMs === 'number' && Number.isFinite(options.maxAgeMs)
+        ? Math.max(0, Math.floor(options.maxAgeMs))
+        : 25_000;
+    const now = Date.now();
+    const recentlyRefreshed =
+      !force &&
+      isCart &&
+      typeof session.lastCartRefreshAt === 'number' &&
+      session.lastCartRefreshAt > 0 &&
+      now - session.lastCartRefreshAt <= maxAgeMs;
 
-    if (!isCart) {
+    if (recentlyRefreshed) {
+      console.log(`[CartScraper] 复用最近刷新过的购物车页面 ageMs=${now - Number(session.lastCartRefreshAt || 0)}`);
+    } else if (!isCart) {
       await session.human.navigateAsHuman('https://cart.taobao.com/cart.htm');
+      session.lastCartRefreshAt = Date.now();
+      session.cartReloadCount = (session.cartReloadCount ?? 0) + 1;
     } else {
       await session.page
         .reload({ waitUntil: 'domcontentloaded', timeout: 30000 })
         .catch(async () => {
           await session.page.goto('https://cart.taobao.com/cart.htm', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
         });
+      session.lastCartRefreshAt = Date.now();
+      session.cartReloadCount = (session.cartReloadCount ?? 0) + 1;
     }
 
-    await session.page.waitForTimeout(randomDelay(1200, 2400));
+    await session.page.waitForTimeout(recentlyRefreshed ? randomDelay(220, 520) : randomDelay(1200, 2400));
     await this.assertNotAuthPage(session.page, 'cart');
+    if (!/cart\.taobao\.com\/cart\.htm/i.test(session.page.url())) {
+      console.warn(`[CartScraper] 当前不在购物车页，尝试重新进入购物车: ${session.page.url()}`);
+      await session.human.navigateAsHuman('https://cart.taobao.com/cart.htm');
+      session.lastCartRefreshAt = Date.now();
+      session.cartReloadCount = (session.cartReloadCount ?? 0) + 1;
+      await session.page.waitForTimeout(randomDelay(900, 1800));
+      await this.assertNotAuthPage(session.page, 'cart_reenter');
+    }
     await this.makeCartPageMoreHuman(session.page, session.human);
-    await session.page.waitForTimeout(randomDelay(600, 1200));
+    await session.page.waitForTimeout(recentlyRefreshed ? randomDelay(120, 320) : randomDelay(600, 1200));
+  }
+
+  async parseCartPage(
+    page: Page,
+    options?: { expectedTaobaoIds?: string[] }
+  ): Promise<{ products: CartProduct[]; uiTotalCount: number | null }> {
+    return this.extractCartData(page, options);
   }
 
   async scrapeCart(
     accountId: string,
     cookies?: string,
-    options?: { expectedTaobaoIds?: string[] }
+    options?: { expectedTaobaoIds?: string[]; forceReload?: boolean; maxAgeMs?: number }
   ): Promise<CartScrapeResult> {
     console.log(`[CartScraper] 开始抓取购物车 accountId=${accountId}`);
 
@@ -340,10 +379,20 @@ export class CartScraper {
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
           const session = await this.getOrCreateSession(accountId, cookies);
-          await this.refreshCartPage(session);
+          await this.refreshCartPage(session, { force: options?.forceReload === true, maxAgeMs: options?.maxAgeMs });
 
+          session.fullCartScanCount = (session.fullCartScanCount ?? 0) + 1;
           const cartData = await this.extractCartData(session.page, options);
+          session.lastCartSnapshot = buildCartSkuSnapshot(
+            cartData.products,
+            options?.expectedTaobaoIds && options.expectedTaobaoIds.length > 0 ? session.lastCartSnapshot ?? null : null
+          );
           console.log(`[CartScraper] 购物车已抓取 ${cartData.products.length} 条`);
+          console.log(
+            `[CartScraper] 会话统计 accountId=${accountId} cartReloadCount=${session.cartReloadCount ?? 0} fullCartScanCount=${
+              session.fullCartScanCount ?? 0
+            } detailPageOpenCount=${session.detailPageOpenCount ?? 0}`
+          );
 
           return {
             success: true,

@@ -251,6 +251,14 @@ export const api = {
       body: JSON.stringify({}),
     }),
 
+  getCartScrapeProgress: (jobId: string) =>
+    request<{
+      status: 'pending' | 'running' | 'completed' | 'failed';
+      progress?: { step?: string; accountId?: string; productCount?: number; underfilled?: number; updated?: number; failed?: number; missing?: number };
+      result?: { updated: number; failed: number; missing: number } | null;
+      logs: string[];
+    }>(`/cart/scrape-progress/${encodeURIComponent(jobId)}`),
+
   // 通知
   getNotificationConfig: () => request<NotificationConfig>('/notifications/config'),
 

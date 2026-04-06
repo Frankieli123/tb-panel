@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useRef, useCallback, ReactNode } from 'react';
+import { createContext, useContext, useState, useRef, useCallback, useEffect, ReactNode } from 'react';
 import { api } from '../services/api';
 
 export interface TaskProgress {
@@ -35,6 +35,16 @@ export function TaskProvider({ children }: { children: ReactNode }) {
   const [tasks, setTasks] = useState<TaskProgress[]>([]);
   const taskIntervalsRef = useRef<Map<string, number>>(new Map());
 
+  const clearTaskTimer = useCallback((jobId: string) => {
+    const timerId = taskIntervalsRef.current.get(jobId);
+    if (timerId !== undefined) {
+      if (timerId > 0) {
+        window.clearTimeout(timerId);
+      }
+      taskIntervalsRef.current.delete(jobId);
+    }
+  }, []);
+
   const appendTaskLog = useCallback((jobId: string, text: string) => {
     setTasks((prev) =>
       prev.map((task) => {
@@ -48,6 +58,15 @@ export function TaskProvider({ children }: { children: ReactNode }) {
     );
   }, []);
 
+  useEffect(() => {
+    return () => {
+      for (const timerId of taskIntervalsRef.current.values()) {
+        window.clearTimeout(timerId);
+      }
+      taskIntervalsRef.current.clear();
+    };
+  }, []);
+
   const startTaskMonitoring = useCallback((jobId: string, title: string) => {
     const newTask: TaskProgress = {
       jobId,
@@ -58,9 +77,9 @@ export function TaskProvider({ children }: { children: ReactNode }) {
       startedAt: Date.now(),
     };
 
-    setTasks((prev) => [...prev, newTask]);
+    setTasks((prev) => (prev.some((task) => task.jobId === jobId) ? prev : [...prev, newTask]));
 
-    const intervalId = window.setInterval(async () => {
+    const poll = async (failureCount = 0) => {
       try {
         const status = await api.getAddProgress(jobId);
 
@@ -79,19 +98,30 @@ export function TaskProvider({ children }: { children: ReactNode }) {
         );
 
         if (status.status === 'completed' || status.status === 'failed') {
-          const interval = taskIntervalsRef.current.get(jobId);
-          if (interval) {
-            clearInterval(interval);
-            taskIntervalsRef.current.delete(jobId);
-          }
+          clearTaskTimer(jobId);
+          return;
         }
-      } catch (error) {
-        console.error('Failed to fetch task progress:', error);
-      }
-    }, 1000);
+        if (!taskIntervalsRef.current.has(jobId)) return;
 
-    taskIntervalsRef.current.set(jobId, intervalId);
-  }, []);
+        const timerId = window.setTimeout(() => {
+          void poll(0);
+        }, 2000);
+        taskIntervalsRef.current.set(jobId, timerId);
+      } catch (error) {
+        const nextFailureCount = failureCount + 1;
+        console.error('Failed to fetch task progress:', error);
+        if (!taskIntervalsRef.current.has(jobId)) return;
+        const timerId = window.setTimeout(() => {
+          void poll(nextFailureCount);
+        }, Math.min(10000, 2000 * nextFailureCount));
+        taskIntervalsRef.current.set(jobId, timerId);
+      }
+    };
+
+    clearTaskTimer(jobId);
+    taskIntervalsRef.current.set(jobId, 0);
+    void poll(0);
+  }, [clearTaskTimer]);
 
   const startBatchTaskMonitoring = useCallback((batchJobId: string, title: string) => {
     const newTask: TaskProgress = {
@@ -104,9 +134,9 @@ export function TaskProvider({ children }: { children: ReactNode }) {
       isBatch: true,
     };
 
-    setTasks((prev) => [...prev, newTask]);
+    setTasks((prev) => (prev.some((task) => task.jobId === batchJobId) ? prev : [...prev, newTask]));
 
-    const intervalId = window.setInterval(async () => {
+    const poll = async (failureCount = 0) => {
       try {
         const status = await api.getBatchAddProgress(batchJobId);
 
@@ -145,19 +175,30 @@ export function TaskProvider({ children }: { children: ReactNode }) {
         );
 
         if (status.status === 'completed' || status.status === 'failed' || status.status === 'partial') {
-          const interval = taskIntervalsRef.current.get(batchJobId);
-          if (interval) {
-            clearInterval(interval);
-            taskIntervalsRef.current.delete(batchJobId);
-          }
+          clearTaskTimer(batchJobId);
+          return;
         }
-      } catch (error) {
-        console.error('Failed to fetch batch task progress:', error);
-      }
-    }, 2000);
+        if (!taskIntervalsRef.current.has(batchJobId)) return;
 
-    taskIntervalsRef.current.set(batchJobId, intervalId);
-  }, []);
+        const timerId = window.setTimeout(() => {
+          void poll(0);
+        }, 3000);
+        taskIntervalsRef.current.set(batchJobId, timerId);
+      } catch (error) {
+        const nextFailureCount = failureCount + 1;
+        console.error('Failed to fetch batch task progress:', error);
+        if (!taskIntervalsRef.current.has(batchJobId)) return;
+        const timerId = window.setTimeout(() => {
+          void poll(nextFailureCount);
+        }, Math.min(15000, 3000 * nextFailureCount));
+        taskIntervalsRef.current.set(batchJobId, timerId);
+      }
+    };
+
+    clearTaskTimer(batchJobId);
+    taskIntervalsRef.current.set(batchJobId, 0);
+    void poll(0);
+  }, [clearTaskTimer]);
 
   const cancelTask = useCallback(
     async (jobId: string) => {
@@ -177,11 +218,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
         const result = await api.cancelAddTask(jobId);
 
         if (result.cancelled) {
-          const intervalId = taskIntervalsRef.current.get(jobId);
-          if (intervalId) {
-            clearInterval(intervalId);
-            taskIntervalsRef.current.delete(jobId);
-          }
+          clearTaskTimer(jobId);
           setTasks((prev) =>
             prev.map((task) =>
               task.jobId === jobId
@@ -227,17 +264,13 @@ export function TaskProvider({ children }: { children: ReactNode }) {
         appendTaskLog(jobId, error instanceof Error ? error.message : '取消任务失败');
       }
     },
-    [appendTaskLog]
+    [appendTaskLog, clearTaskTimer]
   );
 
   const dismissTask = useCallback((jobId: string) => {
-    const intervalId = taskIntervalsRef.current.get(jobId);
-    if (intervalId) {
-      clearInterval(intervalId);
-      taskIntervalsRef.current.delete(jobId);
-    }
+    clearTaskTimer(jobId);
     setTasks((prev) => prev.filter((t) => t.jobId !== jobId));
-  }, []);
+  }, [clearTaskTimer]);
 
   return (
     <TaskContext.Provider value={{ tasks, startTaskMonitoring, startBatchTaskMonitoring, cancelTask, dismissTask }}>
