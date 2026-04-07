@@ -49,7 +49,7 @@ jobs:
 
           if ($tag -and -not ($tag -match '^v')) { $tag = "v$tag" }
 
-          if (-not $tag -or -not ($tag -match '^v\\d+\\.\\d+\\.\\d+')) {
+          if (-not $tag -or -not ($tag -match '^v\d+\.\d+\.\d+$')) {
             if (-not (Test-Path "server/package.json")) { throw "Missing: server/package.json" }
             $ver = (node -p "require('./server/package.json').version").Trim()
             if (-not $ver) { throw "Missing version in server/package.json" }
@@ -57,13 +57,15 @@ jobs:
           }
 
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "version=$($tag -replace '^v', '')" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Build agent (zip + msi)
         shell: powershell
         run: |
           $domain = "${{ vars.AGENT_DOMAIN }}"
           if (-not $domain) { $domain = "tb.slee.cc" }
-          ./scripts/build-agent-msi.ps1 -Domain $domain -Scheme https -Target win-x64 -OutDir release
+          $version = "${{ steps.tag.outputs.version }}"
+          ./scripts/build-agent-msi.ps1 -Domain $domain -Scheme https -Target win-x64 -OutDir release -ProductVersion $version -AgentVersion $version
 
       - name: Compute SHA256
         shell: powershell
@@ -108,12 +110,26 @@ jobs:
           Set-Content -Encoding UTF8 -Path (Join-Path "release" "agent-latest.json") -Value $manifest
 
       - name: Publish GitHub Release assets
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          target_commitish: ${{ github.sha }}
-          files: |
-            release/agent-latest.json
-            release/*.zip
-            release/*.msi
-            release/*.sha256
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $tag = "${{ steps.tag.outputs.tag }}"
+          $files = @(
+            Get-ChildItem release/agent-latest.json -ErrorAction Stop
+            Get-ChildItem release/*.zip -ErrorAction Stop
+            Get-ChildItem release/*.msi -ErrorAction Stop
+            Get-ChildItem release/*.sha256 -ErrorAction Stop
+          ) | ForEach-Object { $_.FullName }
+
+          cmd /c "gh release view $tag 1>nul 2>nul"
+          $exists = ($LASTEXITCODE -eq 0)
+
+          if ($exists) {
+            gh release upload $tag @files --clobber
+            gh release edit $tag --title $tag --latest
+          } else {
+            gh release create $tag @files --title $tag --notes "" --latest
+          }

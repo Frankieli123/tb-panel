@@ -12,7 +12,9 @@ param(
 
   [switch]$SkipNodeRuntime,
 
-  [string]$NodeVersion = ''
+  [string]$NodeVersion = '',
+
+  [string]$AgentVersion = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -60,6 +62,27 @@ function Get-NodeVersion([string]$explicit) {
   if ($v) { return ($v -replace '^v', '') }
   $detected = (node -v).Trim()
   return ($detected -replace '^v', '')
+}
+
+function Get-AgentVersion([string]$explicit, [string]$serverDir) {
+  $v = ([string]$explicit).Trim()
+  if ($v) {
+    $v = $v -replace '^v', ''
+    $v = $v -replace '-.*$', ''
+    return $v
+  }
+
+  try {
+    $pkg = Get-Content (Join-Path $serverDir 'package.json') -Raw | ConvertFrom-Json
+    $fromPkg = ([string]$pkg.version).Trim()
+    if ($fromPkg) {
+      $fromPkg = $fromPkg -replace '^v', ''
+      $fromPkg = $fromPkg -replace '-.*$', ''
+      return $fromPkg
+    }
+  } catch {}
+
+  return '1.0.0'
 }
 
 function Invoke-CurlDownload([string]$url, [string]$outFile) {
@@ -126,12 +149,7 @@ if (-not (Test-Path $serverDir)) {
 
 Invoke-InDir $serverDir 'npm run build'
 
-$agentVersion = ''
-try {
-  $pkg = Get-Content (Join-Path $serverDir 'package.json') -Raw | ConvertFrom-Json
-  $agentVersion = ([string]$pkg.version).Trim()
-} catch {}
-if (-not $agentVersion) { $agentVersion = '1.0.0' }
+$agentVersion = Get-AgentVersion $AgentVersion $serverDir
 
 $resolvedOutDir = Resolve-Path (Join-Path $repoRoot $OutDir) -ErrorAction SilentlyContinue
 if (-not $resolvedOutDir) {

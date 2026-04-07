@@ -12,6 +12,8 @@ param(
 
   [string]$ProductVersion = '',
 
+  [string]$AgentVersion = '',
+
   [string]$ProductName = 'Taobao Agent',
 
   [string]$Manufacturer = 'slee.cc'
@@ -41,19 +43,52 @@ function Normalize-Domain([string]$value) {
   return $v
 }
 
+function Convert-ToMsiProductVersion([string]$raw) {
+  $v = ([string]$raw).Trim()
+  if (-not $v) { return '' }
+
+  $parts = @($v -split '\.')
+  if ($parts.Count -eq 3) { $parts += '0' }
+  if ($parts.Count -ne 4) {
+    throw "Invalid ProductVersion: $v (expected x.y.z or x.y.z.w)"
+  }
+
+  $nums = @()
+  foreach ($part in $parts) {
+    if ($part -notmatch '^\d+$') {
+      throw "Invalid ProductVersion: $v (expected numeric components)"
+    }
+    $nums += [int]$part
+  }
+
+  if ($nums[0] -ge 2000 -and $nums[0] -le 2255) {
+    $nums[0] = $nums[0] - 2000
+  }
+
+  if ($nums[0] -gt 255 -or $nums[1] -gt 255 -or $nums[2] -gt 65535 -or $nums[3] -gt 65535) {
+    throw "Invalid ProductVersion for MSI: $v -> $($nums -join '.')"
+  }
+
+  return ($nums -join '.')
+}
+
 function Get-ProductVersion([string]$explicit, [string]$repoRoot) {
   $v = ([string]$explicit).Trim()
   if ($v) {
-    if ($v -match '^\d+\.\d+\.\d+\.\d+$') { return $v }
-    if ($v -match '^\d+\.\d+\.\d+$') { return "$v.0" }
-    throw "Invalid ProductVersion: $v (expected x.y.z or x.y.z.w)"
+    $v = $v -replace '^v', ''
+    $v = $v -replace '-.*$', ''
+    return (Convert-ToMsiProductVersion $v)
   }
 
   $pkgPath = Join-Path $repoRoot 'server/package.json'
   if (Test-Path $pkgPath) {
     $pkg = Get-Content $pkgPath -Raw | ConvertFrom-Json
     $pv = ([string]$pkg.version).Trim()
-    if ($pv -match '^\d+\.\d+\.\d+$') { return "$pv.0" }
+    $pv = $pv -replace '^v', ''
+    $pv = $pv -replace '-.*$', ''
+    if ($pv) {
+      return (Convert-ToMsiProductVersion $pv)
+    }
   }
 
   return '1.0.0.0'
@@ -100,6 +135,10 @@ Assert-Tool powershell
 $repoRoot = Get-RepoRoot
 $domain = Normalize-Domain $Domain
 $version = Get-ProductVersion $ProductVersion $repoRoot
+$agentVersion = ([string]$AgentVersion).Trim()
+if (-not $agentVersion) {
+  $agentVersion = ($version -replace '\.0$', '')
+}
 
 $packageScript = Join-Path $repoRoot 'scripts/package-agent.ps1'
 if (-not (Test-Path $packageScript)) {
@@ -107,7 +146,7 @@ if (-not (Test-Path $packageScript)) {
 }
 
 Write-Host ">> Building agent stage (domain=$domain target=$Target)"
-& powershell -NoProfile -ExecutionPolicy Bypass -File $packageScript -Domain $domain -Scheme $Scheme -Target $Target -OutDir $OutDir
+& powershell -NoProfile -ExecutionPolicy Bypass -File $packageScript -Domain $domain -Scheme $Scheme -Target $Target -OutDir $OutDir -AgentVersion $agentVersion
 if ($LASTEXITCODE -ne 0) {
   throw "package-agent.ps1 failed (exit=$LASTEXITCODE)"
 }
