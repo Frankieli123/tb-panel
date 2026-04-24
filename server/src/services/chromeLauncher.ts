@@ -14,6 +14,7 @@ import { pipeline } from 'stream/promises';
 export class ChromeLauncher {
   private chromeProcess: ChildProcess | null = null;
   private browser: Browser | null = null;
+  private isolatedBrowsers = new Map<string, Browser>();
   private readonly debugPort = 9222;
   private readonly userDataDir: string;
   private readonly autoInstallChrome: boolean;
@@ -351,6 +352,68 @@ export class ChromeLauncher {
     return await this.ensureChromeForTestingInstalled();
   }
 
+  private buildLaunchArgs(): string[] {
+    const args = [
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--disable-blink-features=AutomationControlled',
+      '--disable-dev-shm-usage',
+      '--disable-background-timer-throttling',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-renderer-backgrounding',
+    ];
+
+    try {
+      if (typeof process.getuid === 'function' && process.getuid() === 0) {
+        args.push('--no-sandbox', '--disable-setuid-sandbox');
+      }
+    } catch {}
+
+    return args;
+  }
+
+  async launchIsolated(key: string): Promise<Browser> {
+    const browserKey = String(key || 'default').trim() || 'default';
+    const existing = this.isolatedBrowsers.get(browserKey);
+    if (existing) {
+      try {
+        existing.contexts();
+        console.log(`[ChromeLauncher] 复用隔离浏览器 key=${browserKey}`);
+        return existing;
+      } catch {
+        this.isolatedBrowsers.delete(browserKey);
+        try {
+          await existing.close();
+        } catch {}
+      }
+    }
+
+    const chromePath = await this.ensureChromeAvailable();
+    if (!chromePath) {
+      throw new Error(
+        'Chrome/Chromium not found. Please install Google Chrome/Chromium/Microsoft Edge, or enable CHROME_AUTO_INSTALL=1 to auto-download Chrome for Testing.'
+      );
+    }
+
+    const hasDisplay = Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
+    const browser = await chromium.launch({
+      executablePath: chromePath,
+      headless: process.platform !== 'win32' && !hasDisplay,
+      args: this.buildLaunchArgs(),
+    });
+
+    browser.on('disconnected', () => {
+      if (this.isolatedBrowsers.get(browserKey) === browser) {
+        this.isolatedBrowsers.delete(browserKey);
+      }
+      console.log(`[ChromeLauncher] 隔离浏览器已断开 key=${browserKey}`);
+    });
+
+    this.isolatedBrowsers.set(browserKey, browser);
+    console.log(`[ChromeLauncher] 已启动隔离浏览器 key=${browserKey}`);
+    return browser;
+  }
+
   async launch(): Promise<Browser> {
     // 检查现有浏览器是否仍然健康
     if (this.browser) {
@@ -403,26 +466,11 @@ export class ChromeLauncher {
     const args = [
       `--remote-debugging-port=${this.debugPort}`,
       `--user-data-dir=${this.userDataDir}`,
-      '--no-first-run',
-      '--no-default-browser-check',
       '--no-startup-window',
-      '--disable-blink-features=AutomationControlled',
-      '--disable-dev-shm-usage',
-      '--disable-background-timer-throttling',
-      '--disable-backgrounding-occluded-windows',
-      '--disable-renderer-backgrounding',
+      ...this.buildLaunchArgs(),
     ];
-
     const hasDisplay = Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
-    if (process.platform !== 'win32' && !hasDisplay) {
-      args.push('--headless=new');
-    }
-
-    try {
-      if (typeof process.getuid === 'function' && process.getuid() === 0) {
-        args.push('--no-sandbox', '--disable-setuid-sandbox');
-      }
-    } catch {}
+    if (process.platform !== 'win32' && !hasDisplay) args.push('--headless=new');
 
     // 启动 Chrome 进程
     this.chromeProcess = spawn(chromePath, args, {
@@ -487,6 +535,15 @@ export class ChromeLauncher {
    */
   async kill(): Promise<void> {
     console.log('[ChromeLauncher] 正在关闭 Chrome...');
+
+    for (const [key, browser] of this.isolatedBrowsers.entries()) {
+      try {
+        await browser.close();
+      } catch (error) {
+        console.warn(`[ChromeLauncher] 关闭隔离浏览器失败 key=${key}:`, error);
+      }
+    }
+    this.isolatedBrowsers.clear();
 
     if (this.browser) {
       try {

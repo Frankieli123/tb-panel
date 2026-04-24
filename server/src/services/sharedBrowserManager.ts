@@ -1,4 +1,4 @@
-import { Page, BrowserContext } from 'playwright';
+import { Page, BrowserContext, Browser } from 'playwright';
 import { createHash } from 'crypto';
 import { chromeLauncher } from './chromeLauncher.js';
 import { HumanSimulator } from './humanSimulator.js';
@@ -6,6 +6,7 @@ import { decryptCookies } from '../utils/helpers.js';
 import type { CartSkuSnapshot } from './cartSnapshot.js';
 
 export interface BrowserSession {
+  browser: Browser;
   context: BrowserContext;
   page: Page;
   detailPage?: Page | null;
@@ -92,7 +93,7 @@ class SharedBrowserManager {
 
       // 创建新会话
       console.log(`[SharedBrowser] 创建新会话 accountId=${accountId}`);
-      const realChrome = await chromeLauncher.launch();
+      const realChrome = await chromeLauncher.launchIsolated(accountId);
 
       const context = await realChrome.newContext({
         viewport: { width: 1920, height: 1080 },
@@ -115,6 +116,7 @@ class SharedBrowserManager {
       const human = new HumanSimulator(page);
 
       const session: BrowserSession = {
+        browser: realChrome,
         context,
         page,
         detailPage: null,
@@ -149,6 +151,9 @@ class SharedBrowserManager {
     } catch {}
     try {
       await session.context.close().catch(() => {});
+    } catch {}
+    try {
+      await session.browser.close().catch(() => {});
     } catch {}
 
     console.log(`[SharedBrowser] 会话已关闭 accountId=${accountId}`);

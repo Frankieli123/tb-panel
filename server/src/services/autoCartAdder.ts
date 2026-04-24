@@ -125,6 +125,8 @@ export class AutoCartAdder {
   private lastTipEscapeAt = 0;
   private lastTipDeepScanAt = 0;
   private currentAccountId: string | null = null;
+  private currentProductTaobaoId: string | null = null;
+  private guardedPages = new WeakSet<Page>();
 
   async closeBrowser(): Promise<void> {
     // 不关闭共享浏览器，由 sharedBrowserManager 统一管理
@@ -137,11 +139,59 @@ export class AutoCartAdder {
     
     this.context = session.context;
     this.page = session.page;
+    this.browser = session.browser;
     this.humanSimulator = session.human;
     this.skuParser = new SkuParser(this.page);
     this.currentAccountId = accountId;
+    this.ensurePagePopupGuard(this.page);
     
     console.log('[AutoCart] 使用共享浏览器会话');
+  }
+
+  private ensurePagePopupGuard(page: Page): void {
+    if (this.guardedPages.has(page)) return;
+    this.guardedPages.add(page);
+
+    page.on('popup', (popup) => {
+      const openerUrl = (() => {
+        try {
+          return page.url();
+        } catch {
+          return 'n/a';
+        }
+      })();
+      const popupUrl = (() => {
+        try {
+          return popup.url();
+        } catch {
+          return 'n/a';
+        }
+      })();
+      console.warn(`[AutoCart] 拦截到弹出页 opener=${openerUrl} popup=${popupUrl}`);
+      void popup.close().catch(() => {});
+    });
+  }
+
+  private async closeDetailPageIfAny(): Promise<void> {
+    const accountId = String(this.currentAccountId || '').trim();
+    if (!accountId) return;
+
+    const session = sharedBrowserManager.getSession(accountId);
+    const detailPage = session?.detailPage ?? null;
+    if (!detailPage) return;
+
+    if (detailPage.isClosed()) {
+      if (session) session.detailPage = null;
+      return;
+    }
+
+    try {
+      const url = detailPage.url();
+      await detailPage.close().catch(() => {});
+      console.log(`[AutoCart] 已关闭详情页: ${url}`);
+    } finally {
+      if (session) session.detailPage = null;
+    }
   }
 
   private async navigateToCartPage(): Promise<void> {
@@ -605,6 +655,7 @@ export class AutoCartAdder {
     if (!productPage || productPage.isClosed()) {
       console.log(`[AutoCart] 创建/复用详情页标签: ${url}`);
       productPage = await this.context.newPage();
+      this.ensurePagePopupGuard(productPage);
       if (session) {
         session.detailPage = productPage;
         session.detailPageOpenCount = (session.detailPageOpenCount ?? 0) + 1;
@@ -639,6 +690,35 @@ export class AutoCartAdder {
 
   private isAuthOrChallengeUrl(url: string): boolean {
     return /login\.taobao\.com|login\.tmall\.com|passport\.taobao\.com|sec\.taobao\.com|captcha|verify|risk/i.test(url);
+  }
+
+  private extractDetailTaobaoId(url: string): string | null {
+    try {
+      const parsed = new URL(String(url || ''));
+      const host = parsed.hostname.toLowerCase();
+      if (host !== 'item.taobao.com' && host !== 'detail.tmall.com') return null;
+      const id = String(parsed.searchParams.get('id') || '').trim();
+      return /^\d+$/.test(id) ? id : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async recoverUnexpectedDetailNavigation(stage: string): Promise<void> {
+    const expectedTaobaoId = String(this.currentProductTaobaoId || '').trim();
+    if (!expectedTaobaoId || !this.page || this.page.isClosed()) return;
+
+    const currentUrl = String(this.page.url() || '').trim();
+    if (!currentUrl || this.isAuthOrChallengeUrl(currentUrl)) return;
+
+    const currentTaobaoId = this.extractDetailTaobaoId(currentUrl);
+    if (!currentTaobaoId || currentTaobaoId === expectedTaobaoId) return;
+
+    const expectedUrl = `https://item.taobao.com/item.htm?id=${expectedTaobaoId}`;
+    console.warn(
+      `[AutoCart] 检测到误跳转详情页 stage=${stage} current=${currentUrl} expected=${expectedUrl}，正在恢复`
+    );
+    await this.page.goto(expectedUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
   }
 
   private async tryQuickLogin(stage: string): Promise<boolean> {
@@ -845,6 +925,7 @@ export class AutoCartAdder {
       const startTime = Date.now();
       console.log(`[AutoCart] 开始 taobaoId=${taobaoId} accountId=${accountId}`);
       console.log(`[AutoCart] 模式: ${options?.headless === false ? '可视' : '无头'}`);
+      this.currentProductTaobaoId = taobaoId;
 
       let lastProgress: { total: number; current: number; success: number; failed: number } = {
         total: 0,
@@ -1280,7 +1361,9 @@ export class AutoCartAdder {
         };
       } finally {
         markAddEnd(accountId);
+        this.currentProductTaobaoId = null;
         try {
+          await this.closeDetailPageIfAny().catch(() => {});
           const session = sharedBrowserManager.getSession(accountId);
           const detailPage = session?.detailPage && !session.detailPage.isClosed() ? session.detailPage : null;
           const pages = this.context?.pages?.().filter((p) => !p.isClosed()) ?? [];
@@ -1909,181 +1992,46 @@ export class AutoCartAdder {
 
   private async closeAddCartModal(): Promise<void> {
     try {
-      console.log('[AutoCart] 关闭加购弹窗...');
+      console.log('[AutoCart] 检查加购成功弹窗（被动模式）...');
 
-      // 快速判断：页面没有任何遮罩/弹层/提示时，避免无意义的 ESC 等操作（会拖慢每个SKU的节奏）
-      const maybeHasModal = await this.page
+      const successTextRe = /(成功加入购物车|已添加到购物车|已放入购物车|加入购物车成功)/;
+      const modalLocator = this.page
         .locator(
           [
-            '.CommonMask--UmpuIa8a',
-            '[class*="mask"]',
-            '[class*="overlay"]',
+            '[role="alert"]',
             '[role="dialog"]',
             '[aria-modal="true"]',
-            '[role="alert"]',
             '[class*="toast"]',
-            '[class*="popup"]',
-            '[class*="Modal"]',
-            '[class*="Dialog"]',
             '[class*="message"]',
-            '[class*="notification"]',
+            '[class*="notice"]',
+            '[class*="popup"]',
+            '[class*="modal"]',
+            '[class*="Dialog"]',
+            '[class*="Modal"]',
+            '.CommonMask--UmpuIa8a',
           ].join(', ')
         )
-        .first()
-        .isVisible()
-        .catch(() => false);
-      if (!maybeHasModal) return;
+        .filter({ hasText: successTextRe })
+        .first();
 
-      // 策略1：先尝试识别小弹窗（第二次加购时出现的简洁弹窗）
-      const miniPopupSelectors = [
-        // 基于文本内容的小弹窗识别
-        'div:has-text("成功加入购物车")',
-        'div:has-text("已添加到购物车")',
-        'div:has-text("已放入购物车")',
-        '[class*="message"]:has-text("成功加入购物车")',
-        '[class*="message"]:has-text("已添加到购物车")',
-        '[class*="toast"]:has-text("成功加入购物车")',
-        '[class*="toast"]:has-text("已添加到购物车")',
-        '[class*="notice"]:has-text("成功加入购物车")',
-        '[class*="notice"]:has-text("已添加到购物车")',
-        '[class*="popup"]:has-text("成功加入购物车")',
-        '[class*="popup"]:has-text("已添加到购物车")',
-        // 通用小弹窗容器
-        '[class*="mini-popup"]',
-        '[class*="mini-modal"]',
-        '[class*="message-box"]',
-        '[class*="notification"]',
-        '[role="alert"]',
-        '[role="dialog"][class*="mini"]'
-      ];
+      const hasSuccessModal = await modalLocator.isVisible().catch(() => false);
+      if (!hasSuccessModal) return;
 
-      // 尝试查找小弹窗并关闭（小弹窗通常会自动消失，或需要点击关闭按钮）
-      for (const selector of miniPopupSelectors) {
-        try {
-          const miniPopup = await this.page.$(selector).catch(() => null);
-          if (miniPopup) {
-            const isVisible = await miniPopup.isVisible().catch(() => false);
-            if (isVisible) {
-              console.log(`[AutoCart] 检测到小弹窗: ${selector}`);
+      // 用户反馈：这里其实不需要主动处理弹窗，也能继续加购。
+      // 因此改为“只等待自动消失/动画结束”，避免任何额外点击误开详情页。
+      await this.humanSimulator.sleep(randomDelay(350, 800));
+      await this.waitForOverlaysCleared(1200).catch(() => {});
 
-              // 查找小弹窗内的关闭按钮
-              const closeBtn = await miniPopup.$('button, [class*="close"], a[class*="close"], i[class*="close"]').catch(() => null);
-              if (closeBtn) {
-                const btnVisible = await closeBtn.isVisible().catch(() => false);
-                if (btnVisible) {
-                  // 滚动到按钮位置
-                  try {
-                    await closeBtn.scrollIntoViewIfNeeded({ timeout: 2000 });
-                    await this.humanSimulator.sleep(randomDelay(200, 400));
-                  } catch (scrollError) {
-                    console.log('[AutoCart] 无法滚动到小弹窗关闭按钮');
-                  }
-
-                  console.log('[AutoCart] 点击小弹窗关闭按钮');
-                  await closeBtn.click({ timeout: 3000 }).catch(() => {});
-                  await this.humanSimulator.sleep(randomDelay(250, 600));
-                  console.log('[AutoCart] 小弹窗已关闭');
-                  return;
-                }
-              }
-
-              // 等待弹窗自动消失（不再点击外部区域，避免误点击其他商品）
-              console.log('[AutoCart] 等待小弹窗自动消失...');
-              await this.humanSimulator.sleep(randomDelay(1500, 2500));
-
-              // 检查是否已经消失
-              const stillVisible = await miniPopup.isVisible().catch(() => false);
-              if (!stillVisible) {
-                console.log('[AutoCart] 小弹窗已自动消失');
-                return;
-              }
-            }
-          }
-        } catch (e) {
-          // 忽略单个选择器错误，继续尝试下一个
-        }
+      const stillVisible = await modalLocator.isVisible().catch(() => false);
+      if (stillVisible) {
+        // 最保守兜底：只发 ESC，不做任何鼠标点击
+        console.log('[AutoCart] 成功弹窗仍可见，发送 ESC 作为兜底...');
+        await this.page.keyboard.press('Escape').catch(() => {});
+        await this.humanSimulator.sleep(randomDelay(120, 260));
       }
 
-      // 策略2：传统的大弹窗关闭按钮
-      const closeSelectors = [
-        // 成功弹窗常见操作（继续购物/再逛逛）
-        'button:has-text("继续购物")',
-        'a:has-text("继续购物")',
-        'button:has-text("再逛逛")',
-        'a:has-text("再逛逛")',
-        'button:has-text("继续逛")',
-        'a:has-text("继续逛")',
-        // 遮罩层关闭按钮
-        '.CommonMask--UmpuIa8a [class*="close"]',
-        '.CommonMask--UmpuIa8a .close',
-        // X 图标
-        '[class*="icon-guanbi"]',
-        'i.icon-guanbi',
-        // 通用关闭按钮
-        'button[class*="close"]',
-        '.modal-close',
-        '.popup-close',
-        '[aria-label="关闭"]',
-        '[title="关闭"]',
-        // 按钮文本
-        'button:has-text("关闭")',
-        'button:has-text("×")',
-        'a:has-text("×")',
-        // 淘宝特定选择器
-        '[class*="Dialog"] [class*="close"]',
-        '[class*="Modal"] [class*="close"]',
-      ];
-
-      for (const selector of closeSelectors) {
-        try {
-          const closeBtn = await this.page.$(selector).catch(() => null);
-          if (closeBtn) {
-            const isVisible = await closeBtn.isVisible().catch(() => false);
-            if (isVisible) {
-              // 滚动到按钮位置
-              try {
-                await closeBtn.scrollIntoViewIfNeeded({ timeout: 2000 });
-                await this.humanSimulator.sleep(randomDelay(200, 400));
-              } catch (scrollError) {
-                console.log('[AutoCart] 无法滚动到关闭按钮');
-              }
-
-              console.log(`[AutoCart] 找到关闭按钮: ${selector}`);
-              await closeBtn.click({ timeout: 3000 }).catch(() => {});
-              await this.humanSimulator.sleep(randomDelay(250, 600));
-              console.log('[AutoCart] 弹窗已关闭');
-              return;
-            }
-          }
-        } catch (e) {
-          // 忽略单个选择器错误
-        }
-      }
-
-      // 策略3：点击遮罩层外部
-      const mask = await this.page.$('.CommonMask--UmpuIa8a, [class*="mask"], [class*="overlay"]').catch(() => null);
-      if (mask) {
-        const maskVisible = await mask.isVisible().catch(() => false);
-        if (maskVisible) {
-          console.log('[AutoCart] 点击遮罩关闭弹窗...');
-          await mask.click({ timeout: 2000 }).catch(() => {});
-          await this.humanSimulator.sleep(randomDelay(200, 450));
-
-          // 检查是否成功关闭
-          const stillVisible = await mask.isVisible().catch(() => false);
-          if (!stillVisible) {
-            console.log('[AutoCart] 通过点击遮罩关闭弹窗');
-            return;
-          }
-        }
-      }
-
-      // 策略4：按 ESC 键
-      console.log('[AutoCart] 尝试按 ESC 关闭弹窗...');
-      await this.page.keyboard.press('Escape').catch(() => {});
-      await this.humanSimulator.sleep(randomDelay(200, 350));
-
-      console.log('[AutoCart] 已尝试关闭弹窗');
+      await this.recoverUnexpectedDetailNavigation('closeAddCartModal-passive');
+      console.log('[AutoCart] 未主动点击成功弹窗，继续后续流程');
     } catch (error) {
       console.warn('[AutoCart] 关闭弹窗失败:', error);
       // 不抛出错误，继续执行
@@ -2177,14 +2125,22 @@ export class AutoCartAdder {
         if (!closed) {
           console.log('[AutoCart] selector 无法关闭弹窗，尝试 page.evaluate...');
           const clicked = await this.page.evaluate(() => {
+            const roots = Array.from(
+              document.querySelectorAll(
+                '[class*="popoverContent"], [class*="contentWrap"], [class*="tip"], [class*="guide"], [role="dialog"], [aria-modal="true"]'
+              )
+            );
+            const root = roots.find((el) => /新增大图查看功能|大图查看功能|切换大图模式/.test(el.textContent || ''));
+            if (!root) return false;
+
             // 优先查找 tipBtn 类名的元素
-            const tipBtn = document.querySelector('div[class*="tipBtn"]') as HTMLElement;
+            const tipBtn = root.querySelector('div[class*="tipBtn"]') as HTMLElement | null;
             if (tipBtn && tipBtn.textContent?.trim() === '知道了') {
               tipBtn.click();
               return true;
             }
-            // 兜底：查找所有文本为"知道了"的元素
-            const allElements = document.querySelectorAll('*');
+            // 兜底：仅在目标弹窗容器内查找文本为"知道了"的元素
+            const allElements = root.querySelectorAll('*');
             for (const el of allElements) {
               const text = el.textContent?.trim();
               if (text === '知道了' && el instanceof HTMLElement) {
@@ -2206,7 +2162,7 @@ export class AutoCartAdder {
         }
       }
 
-      const closeTexts = ['知道了', '我知道了', '好的', '明白了', '关闭', '我知道', '继续逛', '继续购物', '再逛逛'];
+      const closeTexts = ['知道了', '我知道了', '好的', '明白了', '关闭', '我知道'];
       const closeSelectors = [
         '[class*="tipClose" i]',
         '[class*="guideClose" i]',
@@ -2218,7 +2174,26 @@ export class AutoCartAdder {
         '[class*="close" i]',
       ];
 
-      const scopes: any[] = [this.page, ...this.page.frames()];
+      const dialogSelectors = [
+        '[role="dialog"]',
+        '[aria-modal="true"]',
+        '[class*="popover" i]',
+        '[class*="popup" i]',
+        '[class*="modal" i]',
+        '[class*="dialog" i]',
+        '[class*="tip" i]',
+        '[class*="guide" i]',
+      ].join(', ');
+      const scopes: any[] = [];
+      for (const scope of [this.page, ...this.page.frames()]) {
+        const containers = scope.locator?.(dialogSelectors);
+        const count = containers ? await containers.count().catch(() => 0) : 0;
+        for (let idx = 0; idx < Math.min(count, 6); idx++) {
+          const container = containers.nth(idx);
+          const visible = await container.isVisible().catch(() => false);
+          if (visible) scopes.push(container);
+        }
+      }
 
       // 改进的点击函数：遍历所有匹配元素，找到第一个可见的再点击；只执行一次点击
       const clickLocator = async (locator: any, label: string): Promise<boolean> => {
@@ -2296,6 +2271,7 @@ export class AutoCartAdder {
         anyClosed = true;
         await this.humanSimulator.sleep(randomDelay(220, 420));
         await this.waitForOverlaysCleared(2000);
+        await this.recoverUnexpectedDetailNavigation('closeFeatureTips');
       }
 
       if (!anyClosed) {
@@ -2322,6 +2298,8 @@ export class AutoCartAdder {
           }
         }
       }
+
+      await this.recoverUnexpectedDetailNavigation('closeFeatureTips-final');
 
       console.log('[AutoCart] 功能提示检查完成');
     } catch (error) {
