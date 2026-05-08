@@ -1041,6 +1041,28 @@ async function main(): Promise<void> {
           return;
         }
 
+        if (method === 'refreshCartStats') {
+          const accountId = required('params.accountId', params.accountId as any);
+          const cookies = String((params.cookies as any) || '');
+          const maxAgeMsRaw = Number((params as any).maxAgeMs);
+          const maxAgeMs = Number.isFinite(maxAgeMsRaw) ? Math.max(0, Math.floor(maxAgeMsRaw)) : undefined;
+          const forceReloadRaw = (params as any).forceReload;
+          const forceReload =
+            forceReloadRaw === true ||
+            forceReloadRaw === 1 ||
+            String(forceReloadRaw).toLowerCase() === 'true';
+          const delayScaleRaw =
+            typeof (params as any).delayScale === 'number'
+              ? (params as any).delayScale
+              : Number.parseFloat(String((params as any).delayScale ?? ''));
+          if (Number.isFinite(delayScaleRaw) && delayScaleRaw > 0) {
+            setHumanDelayScale(delayScaleRaw);
+          }
+          const result = await cartScraper.refreshCartStats(accountId, cookies, { maxAgeMs, forceReload });
+          wsConn.send(JSON.stringify({ type: 'rpc_result', requestId, ok: true, result }));
+          return;
+        }
+
         if (method === 'removeTaobaoIdFromCart') {
           const accountId = required('params.accountId', params.accountId as any);
           const taobaoId = required('params.taobaoId', (params as any).taobaoId as any);

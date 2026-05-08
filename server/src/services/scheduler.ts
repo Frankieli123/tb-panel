@@ -771,6 +771,8 @@ class SchedulerService {
   private async processCartScrapeJob(job: Job): Promise<{ success: boolean; updated: number; failed: number; missing: number }> {
     const { accountId, productCount } = job.data;
     const jobIdText = toJobIdText(job.id);
+    const source = String((job.data as any)?.source || '').trim();
+    const statsOnlyRefresh = source === 'manual_cart_scrape_queue';
     const setScrapeProgress = async (step: string, extra?: Record<string, unknown>) => {
       await job
         .updateProgress({
@@ -791,7 +793,7 @@ class SchedulerService {
         return { success: true, updated: 0, failed: 0, missing: 0 };
       }
       console.log(
-        `[Scheduler] 购物车抓价开始 accountId=${accountId} products=${productCount}${force ? ' force=1' : ''}`
+        `[Scheduler] ${statsOnlyRefresh ? '购物车统计刷新' : '购物车抓价'}开始 accountId=${accountId} products=${productCount}${force ? ' force=1' : ''}${source ? ` source=${source}` : ''}`
       );
       const humanDelayScale =
         typeof scraperConfig?.humanDelayScale === 'number' && Number.isFinite(scraperConfig.humanDelayScale)
@@ -840,7 +842,7 @@ class SchedulerService {
           isActive: true,
         },
       });
-      if (activeCartProductCount <= 0) {
+      if (!statsOnlyRefresh && activeCartProductCount <= 0) {
         const message = `[Scheduler] 跳过购物车抓价 accountId=${accountId}: 无有效监控商品`;
         console.log(message);
         await job.log(message).catch(() => {});
@@ -858,6 +860,98 @@ class SchedulerService {
           agentIdToUse && agentHub.isConnected(agentIdToUse) ? agentIdToUse : 'local'
         }`
       );
+
+      if (statsOnlyRefresh) {
+        const refreshCartStats = async (): Promise<any> => {
+          if (agentIdToUse && agentHub.isConnected(agentIdToUse)) {
+            try {
+              return await agentHub.call<any>(
+                agentIdToUse,
+                'refreshCartStats',
+                {
+                  accountId,
+                  cookies: account.cookies,
+                  delayScale: humanDelayScale,
+                  forceReload: force,
+                  maxAgeMs: force ? 0 : 25_000,
+                },
+                { timeoutMs: 10 * 60 * 1000 }
+              );
+            } catch (err: any) {
+              const msg = err?.message ? String(err.message) : String(err);
+              if (!/Unknown method/i.test(msg)) throw err;
+              console.warn(`[Scheduler] Agent 不支持 refreshCartStats，回退本地执行 accountId=${accountId} agentId=${agentIdToUse}`);
+            }
+          }
+
+          return cartScraper.refreshCartStats(accountId, account.cookies, {
+            forceReload: force,
+            maxAgeMs: force ? 0 : 25_000,
+          });
+        };
+
+        let refreshThrown: any = null;
+        const safeRefreshCartStats = async (): Promise<any> => {
+          try {
+            return await refreshCartStats();
+          } catch (err) {
+            refreshThrown = err;
+            return null;
+          }
+        };
+
+        const pauseTimeoutMs = 20000;
+        const pausedUsingAgent = Boolean(agentIdToUse && agentHub.isConnected(agentIdToUse));
+        if (pausedUsingAgent && agentIdToUse) {
+          await agentHub
+            .call<any>(agentIdToUse, 'pauseAddForScrape', { accountId, timeoutMs: pauseTimeoutMs }, { timeoutMs: pauseTimeoutMs + 5000 })
+            .catch((err) => {
+              console.warn(`[Scheduler] 刷新购物车统计前暂停加购失败 accountId=${accountId} agentId=${agentIdToUse}:`, err);
+            });
+        } else {
+          await requestPauseForAddWithTimeout(accountId, pauseTimeoutMs).catch(() => {});
+        }
+
+        try {
+          await setScrapeProgress('refreshing_stats');
+          const stats = await safeRefreshCartStats();
+          if (!stats?.success) {
+            const refreshErrorRaw = typeof stats?.error === 'string' ? stats.error : '';
+            const thrownMessage = refreshThrown instanceof Error ? refreshThrown.message : String(refreshThrown ?? '');
+            const errorText = (refreshErrorRaw || thrownMessage || 'refreshCartStats failed').trim() || 'refreshCartStats failed';
+            await job.log(`refreshCartStats failed: ${errorText}`).catch(() => {});
+            await setScrapeProgress('failed', { error: errorText });
+            throw new Error(errorText);
+          }
+
+          const cartSkuLoadedRaw = (stats as any)?.cartSkuLoaded;
+          const cartSkuLoaded =
+            typeof cartSkuLoadedRaw === 'number' && Number.isFinite(cartSkuLoadedRaw)
+              ? Math.max(0, Math.floor(cartSkuLoadedRaw))
+              : 0;
+          setCartSkuStats(accountId, {
+            cartSkuTotal: (stats as any)?.cartSkuTotal ?? null,
+            cartSkuLoaded,
+          });
+          console.log(
+            `[Scheduler] 购物车统计刷新完成 accountId=${accountId} total=${(stats as any)?.cartSkuTotal ?? 'n/a'} loaded=${cartSkuLoaded}`
+          );
+          await setScrapeProgress('completed', {
+            updated: 0,
+            failed: 0,
+            missing: 0,
+            cartSkuTotal: (stats as any)?.cartSkuTotal ?? null,
+            cartSkuLoaded,
+          });
+          return { success: true, updated: 0, failed: 0, missing: 0 };
+        } finally {
+          if (pausedUsingAgent && agentIdToUse) {
+            await agentHub.call<any>(agentIdToUse, 'resumeAddForScrape', { accountId }, { timeoutMs: 15000 }).catch(() => {});
+          } else {
+            resumeAdd(accountId);
+          }
+        }
+      }
 
       const expectedTaobaoIds = await (async (): Promise<string[]> => {
         const rowsBase = await prisma.product.findMany({
@@ -961,17 +1055,20 @@ class SchedulerService {
             }
           }
         } else if (expectedDistinctTaobaoIds > 0 && bestDistinct < expectedDistinctTaobaoIds) {
-          for (let attempt = 1; attempt <= 2; attempt++) {
-            await sleep(1500);
-            const next = await safeScrapeCart();
-            if (!next) continue;
-            const nextDistinct = distinctCount(next);
-            if (nextDistinct > bestDistinct) {
-              cart = next;
-              bestDistinct = nextDistinct;
-            }
-            if (bestDistinct >= expectedDistinctTaobaoIds) break;
-          }
+          const scanMeta = (cart as any)?.scanMeta;
+          const loadedEntryCountRaw = scanMeta?.loadedEntryCount;
+          const loadedEntryCount =
+            typeof loadedEntryCountRaw === 'number' && Number.isFinite(loadedEntryCountRaw)
+              ? Math.max(0, Math.floor(loadedEntryCountRaw))
+              : bestDistinct;
+          const stopReason =
+            typeof scanMeta?.stopReason === 'string' && scanMeta.stopReason.trim() ? scanMeta.stopReason.trim() : 'n/a';
+          await job
+            .log(`cart partial loaded=${loadedEntryCount} expected=${expectedDistinctTaobaoIds} stop=${stopReason}`)
+            .catch(() => {});
+          console.warn(
+            `[Scheduler] 购物车抓取本轮结束但不再重试 accountId=${accountId} loaded=${loadedEntryCount} expected=${expectedDistinctTaobaoIds} stop=${stopReason}`
+          );
         }
       } finally {
         if (pausedUsingAgent && agentIdToUse) {
@@ -982,7 +1079,13 @@ class SchedulerService {
       }
 
       try {
-        const cartSkuLoaded = cart?.success && Array.isArray(cart?.products) ? cart.products.length : 0;
+        const loadedEntryCountRaw = (cart as any)?.scanMeta?.loadedEntryCount;
+        const cartSkuLoaded =
+          typeof loadedEntryCountRaw === 'number' && Number.isFinite(loadedEntryCountRaw)
+            ? Math.max(0, Math.floor(loadedEntryCountRaw))
+            : cart?.success && Array.isArray(cart?.products)
+              ? cart.products.length
+              : 0;
         const cartSkuTotalRaw = (cart as any)?.uiTotalCount;
         const cartSkuTotal =
           typeof cartSkuTotalRaw === 'number' && Number.isFinite(cartSkuTotalRaw) ? cartSkuTotalRaw : null;
@@ -1258,7 +1361,13 @@ class SchedulerService {
             }
 
             try {
-              const cartSkuLoaded = cart?.success && Array.isArray(cart?.products) ? cart.products.length : 0;
+              const loadedEntryCountRaw = (cart as any)?.scanMeta?.loadedEntryCount;
+              const cartSkuLoaded =
+                typeof loadedEntryCountRaw === 'number' && Number.isFinite(loadedEntryCountRaw)
+                  ? Math.max(0, Math.floor(loadedEntryCountRaw))
+                  : cart?.success && Array.isArray(cart?.products)
+                    ? cart.products.length
+                    : 0;
               const cartSkuTotalRaw = (cart as any)?.uiTotalCount;
               const cartSkuTotal =
                 typeof cartSkuTotalRaw === 'number' && Number.isFinite(cartSkuTotalRaw) ? cartSkuTotalRaw : null;
@@ -1405,19 +1514,36 @@ class SchedulerService {
       );
 
       // 刷新一次购物车统计，避免“已满”状态卡住
-      const scrapeCart = async (): Promise<any> => {
+      const refreshCartStats = async (): Promise<any> => {
         if (agentIdToUse && agentHub.isConnected(agentIdToUse)) {
-          return agentHub.call<any>(agentIdToUse, 'scrapeCart', { accountId, cookies: account.cookies }, { timeoutMs: 10 * 60 * 1000 });
+          try {
+            return await agentHub.call<any>(
+              agentIdToUse,
+              'refreshCartStats',
+              { accountId, cookies: account.cookies },
+              { timeoutMs: 10 * 60 * 1000 }
+            );
+          } catch (err: any) {
+            const msg = err?.message ? String(err.message) : String(err);
+            if (!/Unknown method/i.test(msg)) throw err;
+            console.warn(`[Scheduler] Agent 不支持 refreshCartStats，回退本地执行 accountId=${accountId} agentId=${agentIdToUse}`);
+          }
         }
-        return cartScraper.scrapeCart(accountId, account.cookies);
+        return cartScraper.refreshCartStats(accountId, account.cookies);
       };
 
-      const cart = await scrapeCart().catch(() => null as any);
+      const cartStats = await refreshCartStats().catch(() => null as any);
       try {
-        const cartSkuLoaded = cart?.success && Array.isArray(cart?.products) ? cart.products.length : 0;
-        const cartSkuTotalRaw = (cart as any)?.uiTotalCount;
-        const cartSkuTotal = typeof cartSkuTotalRaw === 'number' && Number.isFinite(cartSkuTotalRaw) ? cartSkuTotalRaw : null;
-        setCartSkuStats(accountId, { cartSkuTotal, cartSkuLoaded });
+        if (cartStats?.success) {
+          const cartSkuLoadedRaw = (cartStats as any)?.cartSkuLoaded;
+          const cartSkuLoaded =
+            typeof cartSkuLoadedRaw === 'number' && Number.isFinite(cartSkuLoadedRaw)
+              ? Math.max(0, Math.floor(cartSkuLoadedRaw))
+              : 0;
+          const cartSkuTotalRaw = (cartStats as any)?.cartSkuTotal;
+          const cartSkuTotal = typeof cartSkuTotalRaw === 'number' && Number.isFinite(cartSkuTotalRaw) ? cartSkuTotalRaw : null;
+          setCartSkuStats(accountId, { cartSkuTotal, cartSkuLoaded });
+        }
       } catch {}
 
       return { success: true, taobaoId, removed };

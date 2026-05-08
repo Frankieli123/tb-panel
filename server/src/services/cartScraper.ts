@@ -43,6 +43,23 @@ export interface CartScrapeResult {
   products: CartProduct[];
   total: number;
   uiTotalCount?: number | null;
+  scanMeta?: CartScanMeta;
+  error?: string;
+  needLogin?: boolean;
+  needCaptcha?: boolean;
+}
+
+export interface CartScanMeta {
+  loadedEntryCount: number;
+  expectedRemainingCount: number;
+  fullLoadReached: boolean;
+  stopReason: string | null;
+}
+
+export interface CartStatsRefreshResult {
+  success: boolean;
+  cartSkuTotal: number | null;
+  cartSkuLoaded: number;
   error?: string;
   needLogin?: boolean;
   needCaptcha?: boolean;
@@ -357,10 +374,101 @@ export class CartScraper {
     await session.page.waitForTimeout(recentlyRefreshed ? randomDelay(120, 320) : randomDelay(600, 1200));
   }
 
+  private async readCartHeaderTotal(page: Page): Promise<number | null> {
+    return page
+      .evaluate(() => {
+        const toCount = (raw: string | null | undefined): number | null => {
+          const digits = String(raw || '')
+            .replace(/[^\d]/g, '')
+            .trim();
+          if (!digits) return null;
+          const parsed = parseInt(digits, 10);
+          return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+        };
+
+        const header = document.querySelector('.trade-cart-header-container') as HTMLElement | null;
+        const headerText = header?.textContent || '';
+        const direct = /全部商品\s*[（(]\s*(\d{1,6})\s*[）)]/.exec(headerText);
+        const directCount = direct ? toCount(direct[1]) : null;
+        if (directCount !== null) return directCount;
+
+        const fallback = new RegExp('\u5168\u90e8\u5546\u54c1\\s*[\\(\uff08]\\s*(\\d{1,6})\\s*[\\)\uff09]').exec(headerText);
+        return fallback ? toCount(fallback[1]) : null;
+      })
+      .catch(() => null);
+  }
+
+  async refreshCartStats(
+    accountId: string,
+    cookies?: string,
+    options?: { forceReload?: boolean; maxAgeMs?: number }
+  ): Promise<CartStatsRefreshResult> {
+    console.log(`[CartScraper] 刷新购物车统计 accountId=${accountId}`);
+
+    return this.runExclusive(async () => {
+      let lastErr: any = null;
+      const maxAttempts = this.keepOpen ? 2 : 1;
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          const session = await this.getOrCreateSession(accountId, cookies);
+          await this.refreshCartPage(session, { force: options?.forceReload === true, maxAgeMs: options?.maxAgeMs });
+
+          const cartSkuTotal = await this.readCartHeaderTotal(session.page);
+          const visibleEntryCount = await session.page
+            .evaluate(() => document.querySelectorAll('.trade-cart-item-info').length)
+            .catch(() => 0);
+          const cartSkuLoaded =
+            typeof cartSkuTotal === 'number' && Number.isFinite(cartSkuTotal)
+              ? Math.max(0, Math.floor(cartSkuTotal))
+              : Math.max(0, Math.floor(Number(visibleEntryCount) || 0));
+
+          console.log(
+            `[CartScraper] 购物车统计已刷新 accountId=${accountId} total=${cartSkuTotal ?? 'n/a'} loaded=${cartSkuLoaded}`
+          );
+
+          return {
+            success: true,
+            cartSkuTotal,
+            cartSkuLoaded,
+          };
+        } catch (error: any) {
+          lastErr = error;
+          console.error(`[CartScraper] 刷新购物车统计失败（第 ${attempt}/${maxAttempts} 次）:`, error);
+
+          if (this.isFatalSessionError(error)) {
+            await sharedBrowserManager.disposeSession(accountId);
+            continue;
+          }
+
+          if (!this.keepOpen) {
+            await sharedBrowserManager.disposeSession(accountId);
+          }
+          break;
+        }
+      }
+
+      const message = lastErr?.message ? String(lastErr.message) : String(lastErr ?? 'unknown');
+      const lower = message.toLowerCase();
+      return {
+        success: false,
+        cartSkuTotal: null,
+        cartSkuLoaded: 0,
+        error: message || 'unknown',
+        needLogin:
+          /需要登录|login required/i.test(message) ||
+          /login\.taobao\.com|login\.tmall\.com|passport\.taobao\.com/i.test(lower),
+        needCaptcha:
+          /验证码|滑块|安全验证/i.test(message) ||
+          /sec\.taobao\.com|punish|waf|risk|captcha|verify/i.test(lower),
+      };
+    });
+  }
+
   async parseCartPage(
     page: Page,
     options?: { expectedTaobaoIds?: string[] }
-  ): Promise<{ products: CartProduct[]; uiTotalCount: number | null }> {
+  ): Promise<{ products: CartProduct[]; uiTotalCount: number | null; scanMeta: CartScanMeta }> {
     return this.extractCartData(page, options);
   }
 
@@ -399,6 +507,7 @@ export class CartScraper {
             products: cartData.products,
             total: cartData.products.length,
             uiTotalCount: cartData.uiTotalCount ?? null,
+            scanMeta: cartData.scanMeta,
           };
         } catch (error: any) {
           lastErr = error;
@@ -955,40 +1064,14 @@ export class CartScraper {
   private async extractCartData(
     page: Page,
     options?: { expectedTaobaoIds?: string[] }
-  ): Promise<{ products: CartProduct[]; uiTotalCount: number | null }> {
+  ): Promise<{ products: CartProduct[]; uiTotalCount: number | null; scanMeta: CartScanMeta }> {
     const productsByKey = new Map<string, CartProduct>();
     const expectedRemaining = new Set<string>(
       (options?.expectedTaobaoIds ?? [])
         .map((x) => String(x || '').trim())
         .filter((x) => /^\d+$/.test(x))
     );
-
-    const uiTotalCount = await page
-      .evaluate(() => {
-        const toCount = (raw: string | null | undefined): number | null => {
-          const digits = String(raw || '')
-            .replace(/[^\d]/g, '')
-            .trim();
-          if (!digits) return null;
-          const n = parseInt(digits, 10);
-          return Number.isFinite(n) && n >= 0 ? n : null;
-        };
-
-        const header = document.querySelector('.trade-cart-header-container') as HTMLElement | null;
-        const headerText = header?.textContent || '';
-        const m = /全部商品\s*[（(]\s*(\d{1,6})\s*[）)]/.exec(headerText);
-        const n2 = m ? toCount(m[1]) : null;
-        if (n2 !== null) return n2;
-
-        const m2 = new RegExp(
-          '\u5168\u90e8\u5546\u54c1\\s*[\\(\uff08]\\s*(\\d{1,6})\\s*[\\)\uff09]'
-        ).exec(headerText);
-        const n3 = m2 ? toCount(m2[1]) : null;
-        if (n3 !== null) return n3;
-
-        return null;
-      })
-      .catch(() => null);
+    const uiTotalCount = await this.readCartHeaderTotal(page);
 
     const extractVisible = async (): Promise<{
       items: CartProduct[];
@@ -1178,6 +1261,7 @@ export class CartScraper {
     let stuckRounds = 0;
     let lastTop: number | null = null;
     let bottomWaits = 0;
+    let stopReason: string | null = null;
 
     const detectCartEndMarker = async (): Promise<{ hit: boolean; reason: string | null }> => {
       return page
@@ -1210,7 +1294,10 @@ export class CartScraper {
 
     for (let round = 0; round < maxRounds; round++) {
       const snapshot = await extractVisible();
-      if (!snapshot) break;
+      if (!snapshot) {
+        stopReason = 'snapshot-missing';
+        break;
+      }
 
       let added = 0;
       for (const item of snapshot.items) {
@@ -1234,28 +1321,32 @@ export class CartScraper {
         if (expectedRemaining.has(existing.taobaoId)) expectedRemaining.delete(existing.taobaoId);
       }
 
-      if (productsByKey.size === 0 && round === 0 && snapshot.items.length === 0) break;
+      if (productsByKey.size === 0 && round === 0 && snapshot.items.length === 0) {
+        stopReason = 'empty-first-pass';
+        break;
+      }
 
       if (added > 0) bottomWaits = 0;
       stableNoNewRounds = added === 0 ? stableNoNewRounds + 1 : 0;
 
-      const loadedQty = Array.from(productsByKey.values()).reduce(
-        (sum, p) => sum + (typeof p.quantity === 'number' ? p.quantity : 1),
-        0
-      );
-      const needsFullLoad = typeof uiTotalCount === 'number' && loadedQty < uiTotalCount;
-      if (typeof uiTotalCount === 'number' && stableNoNewRounds >= 1 && loadedQty >= uiTotalCount) break;
+      const loadedEntryCount = productsByKey.size;
+      const needsFullLoad = typeof uiTotalCount === 'number' && loadedEntryCount < uiTotalCount;
+      if (typeof uiTotalCount === 'number' && stableNoNewRounds >= 1 && loadedEntryCount >= uiTotalCount) {
+        stopReason = 'header-count-satisfied';
+        break;
+      }
 
       // 购物车底部通常会进入“猜你喜欢/为你推荐”无限滚动区域；此时即使页面还能继续向下滚动，
       // 也不会再出现新的购物车条目。避免在推荐区无限滚动导致抓价超时/卡住。
       if (productsByKey.size > 0 && stableNoNewRounds >= 3) {
         const end = await detectCartEndMarker();
         if (end.hit) {
-          if (typeof uiTotalCount === 'number' && loadedQty < uiTotalCount) {
+          if (typeof uiTotalCount === 'number' && loadedEntryCount < uiTotalCount) {
             console.warn(
-              `[CartScraper] 已进入推荐区域（${end.reason || 'recommend'}）loadedQty=${loadedQty} < uiTotalCount=${uiTotalCount}；停止滚动`
+              `[CartScraper] 已进入推荐区域（${end.reason || 'recommend'}）loaded=${loadedEntryCount} < uiTotalCount=${uiTotalCount}；停止滚动`
             );
           }
+          stopReason = `recommend:${end.reason || 'recommend'}`;
           break;
         }
       }
@@ -1273,14 +1364,18 @@ export class CartScraper {
         }
         if ((expectedRemaining.size > 0 || needsFullLoad) && bottomWaits >= bottomWaitLimit && stableNoNewRounds >= 1) {
           const end = await detectCartEndMarker();
-          if (typeof uiTotalCount === 'number' && loadedQty < uiTotalCount) {
+          if (typeof uiTotalCount === 'number' && loadedEntryCount < uiTotalCount) {
             console.warn(
-              `[CartScraper] 购物车滚动结束（${end.reason || 'no-progress'}）loadedQty=${loadedQty} < uiTotalCount=${uiTotalCount}；停止滚动`
+              `[CartScraper] 购物车滚动结束（${end.reason || 'no-progress'}）loaded=${loadedEntryCount} < uiTotalCount=${uiTotalCount}；停止滚动`
             );
           }
+          stopReason = `bottom:${end.reason || 'no-progress'}`;
           break;
         }
-        if (stableNoNewRounds >= 2 && (uiTotalCount === null || loadedQty >= uiTotalCount)) break;
+        if (stableNoNewRounds >= 2 && (uiTotalCount === null || loadedEntryCount >= uiTotalCount)) {
+          stopReason = 'bottom-stable';
+          break;
+        }
       }
 
       const step = Math.max(650, Math.min(2400, Math.floor((client || 800) * 0.95)));
@@ -1305,20 +1400,37 @@ export class CartScraper {
         }
         if ((expectedRemaining.size > 0 || needsFullLoad) && bottomWaits >= bottomWaitLimit) {
           const end = await detectCartEndMarker();
-          if (typeof uiTotalCount === 'number' && loadedQty < uiTotalCount) {
+          if (typeof uiTotalCount === 'number' && loadedEntryCount < uiTotalCount) {
             console.warn(
-              `[CartScraper] 购物车滚动卡住（${end.reason || 'no-progress'}）loadedQty=${loadedQty} < uiTotalCount=${uiTotalCount}；停止滚动`
+              `[CartScraper] 购物车滚动卡住（${end.reason || 'no-progress'}）loaded=${loadedEntryCount} < uiTotalCount=${uiTotalCount}；停止滚动`
             );
           }
+          stopReason = `stuck:${end.reason || 'no-progress'}`;
           break;
         }
-        if (uiTotalCount === null || loadedQty >= uiTotalCount) break;
+        if (uiTotalCount === null || loadedEntryCount >= uiTotalCount) {
+          stopReason = 'stuck-stable';
+          break;
+        }
       }
 
       await page.waitForTimeout(hasExpected ? randomDelay(380, 780) : randomDelay(240, 520)).catch(() => {});
     }
 
-    return { products: Array.from(productsByKey.values()), uiTotalCount };
+    if (!stopReason) {
+      stopReason = 'max-rounds';
+    }
+
+    return {
+      products: Array.from(productsByKey.values()),
+      uiTotalCount,
+      scanMeta: {
+        loadedEntryCount: productsByKey.size,
+        expectedRemainingCount: expectedRemaining.size,
+        fullLoadReached: typeof uiTotalCount === 'number' ? productsByKey.size >= uiTotalCount : expectedRemaining.size === 0,
+        stopReason,
+      },
+    };
   }
 
   async updatePricesFromCart(
